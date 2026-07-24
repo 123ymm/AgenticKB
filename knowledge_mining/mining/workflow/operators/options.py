@@ -154,6 +154,15 @@ class EntityResolveOptions(OperatorOptions):
     )
 
 
+class EntityRelationOptions(OperatorOptions):
+    require_resolved_entities: bool = Field(
+        False,
+        alias="requireResolvedEntities",
+        title="要求已归一实体",
+        description="启用后，关系抽取必须位于实体归一之后。",
+    )
+
+
 class FinalizeOptions(OperatorOptions):
     publish_on_partial_failure: bool = Field(
         False,
@@ -172,7 +181,7 @@ OPTIONS_BY_OPERATOR: dict[str, type[OperatorOptions]] = {
     "embedding": EmbeddingOptions,
     "entity_extract": EntityExtractOptions,
     "entity_resolve": EntityResolveOptions,
-    "entity_relation_extract": EmptyOptions,
+    "entity_relation_extract": EntityRelationOptions,
     "asset_persist": EmptyOptions,
     "entity_review_gate": EmptyOptions,
     "ontology_induction": EmptyOptions,
