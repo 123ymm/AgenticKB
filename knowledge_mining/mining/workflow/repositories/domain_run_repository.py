@@ -264,6 +264,37 @@ class DomainRunRepository:
             )
             return cursor.fetchone() is not None
 
+    def reusable_node_result(
+        self,
+        run_id: str,
+        node_id: str,
+        run_document_id: str | None,
+    ) -> dict | None:
+        """Load the latest successful terminal result for crash-safe resume."""
+
+        with self.pool.connection() as conn:
+            cursor = conn.execute(
+                """SELECT status, output_summary_json
+                   FROM mining_workflow_node_events
+                   WHERE run_id = %s
+                     AND node_id = %s
+                     AND run_document_id IS NOT DISTINCT FROM %s
+                     AND status IN (
+                         'completed', 'skipped', 'fallback', 'not_applicable'
+                     )
+                   ORDER BY attempt_no DESC
+                   LIMIT 1""",
+                (run_id, node_id, run_document_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        summary = row.get("output_summary_json") or {}
+        return {
+            "status": str(row["status"]),
+            "capabilities": tuple(summary.get("capabilities") or ()),
+        }
+
     def list_node_events(self, run_id: str) -> list[dict]:
         with self.pool.connection() as conn:
             cursor = conn.execute(

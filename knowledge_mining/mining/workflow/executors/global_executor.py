@@ -56,9 +56,10 @@ class GlobalExecutor:
         for node_id in plan.global_order:
             self._check_cancellation()
             planned = plan.node(node_id)
-            if self.repository.is_node_completed(run_id, node_id, None):
-                state = state.with_capabilities(planned.provides)
-                statuses[node_id] = "completed"
+            reusable = self._reusable_result(run_id, planned)
+            if reusable is not None:
+                state = state.with_capabilities(reusable[1])
+                statuses[node_id] = reusable[0]
                 continue
 
             attempt = self.repository.start_node(
@@ -130,6 +131,21 @@ class GlobalExecutor:
 
     def resume(self, plan: ExecutionPlan) -> GlobalExecutionResult:
         return self.execute(plan)
+
+    def _reusable_result(
+        self, run_id: str, planned: PlannedNode
+    ) -> tuple[str, frozenset[str]] | None:
+        loader = getattr(self.repository, "reusable_node_result", None)
+        if loader is not None:
+            result = loader(run_id, planned.node_id, None)
+            if result is not None:
+                return (
+                    str(result["status"]),
+                    frozenset(result.get("capabilities") or planned.provides),
+                )
+        if self.repository.is_node_completed(run_id, planned.node_id, None):
+            return "completed", planned.provides
+        return None
 
     def _call_handler(
         self, planned: PlannedNode, state: GlobalState

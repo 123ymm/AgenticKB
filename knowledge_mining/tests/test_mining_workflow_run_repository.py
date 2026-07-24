@@ -122,6 +122,19 @@ class FakeConnection:
                 for row in self.pool.rows.values()
             )
             return FakeCursor(row={"exists": 1} if completed else None)
+        if normalized.startswith("SELECT status, output_summary_json"):
+            run_id, node_id, run_document_id = params
+            reusable = [
+                row
+                for row in self.pool.rows.values()
+                if row["run_id"] == run_id
+                and row["node_id"] == node_id
+                and row["run_document_id"] == run_document_id
+                and row["status"]
+                in {"completed", "skipped", "fallback", "not_applicable"}
+            ]
+            reusable.sort(key=lambda row: row["attempt_no"], reverse=True)
+            return FakeCursor(row=reusable[0] if reusable else None)
         if normalized.startswith("SELECT * FROM mining_workflow_node_events"):
             rows = sorted(
                 (
@@ -201,6 +214,30 @@ def test_completed_document_node_is_resume_safe(
     assert repo.is_node_completed("run-1", "asset_persist", "rd-1") is True
     assert repo.is_node_completed("run-1", "asset_persist", "rd-2") is False
     assert repo.is_node_completed("run-1", "asset_persist", None) is False
+
+
+def test_reusable_node_result_restores_dynamic_capabilities(
+    fake_sync_pool: FakeSyncPool,
+) -> None:
+    repo = DomainRunRepository(fake_sync_pool)
+    attempt = repo.start_node(
+        run_id="run-1",
+        run_document_id=None,
+        node_id="finalize",
+        operator_type="mining_finalize",
+        operator_version="1",
+        input_summary={},
+    )
+    repo.finish_node(
+        attempt,
+        status="completed",
+        output_summary={"capabilities": ["finalized", "release_published"]},
+    )
+
+    assert repo.reusable_node_result("run-1", "finalize", None) == {
+        "status": "completed",
+        "capabilities": ("finalized", "release_published"),
+    }
 
 
 def test_manifest_active_node_and_event_listing_are_domain_local(

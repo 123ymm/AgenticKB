@@ -102,6 +102,26 @@ class FakeGlobalRepository:
             for item in self.events
         )
 
+    def reusable_node_result(self, run_id, node_id, run_document_id):
+        reusable = {"completed", "skipped", "fallback", "not_applicable"}
+        matching = [
+            item
+            for item in self.events
+            if item["run_id"] == run_id
+            and item["node_id"] == node_id
+            and item["run_document_id"] is run_document_id
+            and item["status"] in reusable
+        ]
+        if not matching:
+            return None
+        event = matching[-1]
+        return {
+            "status": event["status"],
+            "capabilities": event.get("output_summary", {}).get(
+                "capabilities", ()
+            ),
+        }
+
     def set_active_node(self, run_id, node_id, operator_type, pause_step=None):
         self.active.append((run_id, node_id, operator_type, pause_step))
 

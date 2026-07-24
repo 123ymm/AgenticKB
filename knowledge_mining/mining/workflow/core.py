@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -190,6 +190,12 @@ def _merge_document_context(left: Any, right: Any) -> Any:
         right_value = getattr(right, name, None)
         if left_value is None and right_value is not None:
             updates[name] = deepcopy(right_value)
+    left_segments = tuple(getattr(left, "segments", ()) or ())
+    right_segments = tuple(getattr(right, "segments", ()) or ())
+    merged_segments = _merge_segments(left_segments, right_segments)
+    if merged_segments:
+        updates["segments"] = merged_segments
+
     for name, key in (
         ("relations", lambda item: (
             item.source_segment_key, item.target_segment_key, item.relation_type
@@ -209,11 +215,76 @@ def _merge_document_context(left: Any, right: Any) -> Any:
     left_ids.update(deepcopy(getattr(right, "seg_ids", {}) or {}))
     if left_ids:
         updates["seg_ids"] = left_ids
-    left_segments = tuple(getattr(left, "segments", ()) or ())
-    right_segments = tuple(getattr(right, "segments", ()) or ())
-    if not left_segments and right_segments:
-        updates["segments"] = deepcopy(right_segments)
+    if merged_segments:
+        units = tuple(
+            updates.get("retrieval_units", getattr(left, "retrieval_units", ()) or ())
+        )
+        if units:
+            refs_by_segment = {
+                f"{item.document_key}#{item.segment_index}": item.entity_refs_json
+                for item in merged_segments
+            }
+            updates["retrieval_units"] = tuple(
+                replace(
+                    item,
+                    entity_refs_json=deepcopy(
+                        refs_by_segment.get(item.segment_key, item.entity_refs_json)
+                    ),
+                )
+                for item in units
+            )
     return left.with_updates(**updates) if updates else left
+
+
+def _merge_segments(left: tuple[Any, ...], right: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Merge branch-local segment annotations by stable document/index identity."""
+
+    if not left:
+        return deepcopy(right)
+    if not right:
+        return deepcopy(left)
+    identity = lambda item: (item.document_key, item.segment_index)
+    left_keys = [identity(item) for item in left]
+    right_by_key = {identity(item): item for item in right}
+    if len(right_by_key) != len(right) or set(left_keys) != set(right_by_key):
+        raise ValueError("document segment identity set mismatch")
+
+    merged = []
+    for left_item in left:
+        right_item = right_by_key[identity(left_item)]
+        refs = deepcopy(left_item.entity_refs_json)
+        for ref in right_item.entity_refs_json:
+            if ref not in refs:
+                refs.append(deepcopy(ref))
+        metadata = _merge_mappings(left_item.metadata_json, right_item.metadata_json)
+        semantic_role = left_item.semantic_role
+        if semantic_role == "unknown" and right_item.semantic_role != "unknown":
+            semantic_role = right_item.semantic_role
+        merged.append(replace(
+            left_item,
+            semantic_role=semantic_role,
+            entity_refs_json=refs,
+            metadata_json=metadata,
+        ))
+    return tuple(merged)
+
+
+def _merge_mappings(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(dict(left))
+    for key, value in right.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[key] = _merge_mappings(current, value)
+        elif current in (None, "", [], {}, ()) or current == value:
+            merged[key] = deepcopy(value)
+        elif key not in merged:
+            merged[key] = deepcopy(value)
+        else:
+            # Preserve the first predecessor on conflicts. This matches the DAG's
+            # deterministic edge order while still adding annotations that exist
+            # only on a later branch.
+            continue
+    return merged
 
 
 @dataclass(frozen=True)
