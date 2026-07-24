@@ -342,6 +342,7 @@ export interface RunTrace {
   run_id: string
   domain: string
   status: string
+  current_stage?: string | null
   subloop_stage?: string | null
   ontology_version_id?: string | null
   awaiting_review: boolean
@@ -359,6 +360,22 @@ export interface RunTrace {
   entity_count: number
   relation_count: number
   escape_hatch_candidates?: number
+  execution_engine?: MiningSubmissionEngine
+  workflow: FrozenMiningWorkflowSummary | null
+  active_node_id?: string | null
+  active_operator_type?: string | null
+  pause_step?: string | null
+  node_events: import('@/types/miningWorkflow').MiningWorkflowNodeEvent[]
+  stage_events: Array<Record<string, unknown>>
+  documents: Array<Record<string, unknown>>
+  warnings: Array<{
+    node_id: string
+    attempt_no: number
+    code: string
+    message: string
+  }>
+  asset_counts: { entities: number; relations: number }
+  build_id?: string | null
 }
 
 export interface OntologyVersion {

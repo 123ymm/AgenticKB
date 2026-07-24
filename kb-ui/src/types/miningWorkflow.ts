@@ -185,9 +185,14 @@ export interface FrozenMiningWorkflowSummary {
   id: string
   name?: string | null
   version: number
+  version_id?: string | null
   graph_hash: string
   schema_version?: string
   catalog_version?: string
+  graph?: MiningWorkflowGraph
+  nodes?: Array<Record<string, unknown>>
+  edges?: MiningWorkflowEdge[]
+  required_completion?: string[]
 }
 
 export interface MiningWorkflowNodeEvent {
@@ -207,5 +212,7 @@ export interface MiningWorkflowNodeEvent {
   error_code?: string | null
   error_message?: string | null
   metadata?: Record<string, unknown> | null
+  input_summary_json?: Record<string, unknown> | null
+  output_summary_json?: Record<string, unknown> | null
+  metadata_json?: Record<string, unknown> | null
 }
-

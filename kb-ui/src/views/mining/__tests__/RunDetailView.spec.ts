@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 
 const state = vi.hoisted(() => ({
-  domain: { currentDomain: 'odn' },
   store: {
     currentRun: { id: 'r1', status: 'queued', current_stage: 'queued', total_documents: 0,
       committed_count: 0, failed_count: 0, skipped_count: 0, new_count: 0, updated_count: 0 },
@@ -21,10 +21,10 @@ const api = vi.hoisted(() => ({
   resumeRun: vi.fn(),
 }))
 
-vi.mock('@/stores/domain', () => ({ useDomainStore: () => state.domain }))
 vi.mock('@/stores/mining', () => ({ useMiningStore: () => state.store }))
 vi.mock('@/api/mining', () => ({ useMiningApi: () => api }))
 
+import { useDomainStore } from '@/stores/domain'
 import RunDetailView from '../RunDetailView.vue'
 
 // v6 的轮询模型：挂载即 pollOnce 一次；仅当 run 处于 running 时才 arm 3 秒定时轮询；
@@ -32,10 +32,13 @@ import RunDetailView from '../RunDetailView.vue'
 describe('RunDetailView polling lifecycle', () => {
   beforeEach(() => {
     vi.useFakeTimers()
+    setActivePinia(createPinia())
+    useDomainStore().currentDomain = 'odn'
     state.store.fetchRunDetail.mockClear()
     state.store.fetchProgress.mockClear()
     state.store.currentRun.status = 'queued'
     api.resumeRun.mockReset()
+    api.getRunTrace.mockReset().mockRejectedValue(new Error('no trace'))
   })
   afterEach(() => vi.useRealTimers())
 
@@ -122,5 +125,33 @@ describe('RunDetailView polling lifecycle', () => {
     wrapper.unmount()
     await vi.advanceTimersByTimeAsync(3000)
     expect(state.store.fetchRunDetail.mock.calls.length).toBe(before)
+  })
+
+  it('drops a slow trace response captured in the previous Domain generation', async () => {
+    let resolveOld!: (value: Record<string, unknown>) => void
+    api.getRunTrace
+      .mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve }))
+      .mockResolvedValueOnce({
+        run_id: 'r1', domain: 'plant-b', status: 'running', workflow: {
+          id: 'plant-b-workflow', version: 2, graph_hash: 'new', graph: { nodes: [], edges: [], output: {} },
+        }, node_events: [], stage_events: [], documents: [], warnings: [], asset_counts: {},
+      })
+    useDomainStore().currentDomain = 'plant-a'
+    const wrapper = shallowMount(RunDetailView, { props: { runId: 'r1' } })
+    await flushPromises()
+
+    useDomainStore().currentDomain = 'plant-b'
+    await flushPromises()
+    resolveOld({
+      run_id: 'r1', domain: 'plant-a', status: 'running', workflow: {
+        id: 'plant-a-workflow', version: 1, graph_hash: 'old', graph: { nodes: [], edges: [], output: {} },
+      }, node_events: [], stage_events: [], documents: [], warnings: [], asset_counts: {},
+    })
+    await flushPromises()
+
+    const trace = (wrapper.vm as unknown as { trace: { workflow: { id: string } } | null }).trace
+    expect(trace?.workflow.id).toBe('plant-b-workflow')
+    expect(api.getRunTrace).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
   })
 })

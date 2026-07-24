@@ -28,20 +28,32 @@ export const useMiningStore = defineStore('mining', () => {
 
   const miningApi = useMiningApi()
   const domainStore = useDomainStore()
+  let runListGeneration = 0
+  let runDetailGeneration = 0
+  let progressGeneration = 0
+  let documentGeneration = 0
 
   async function fetchRuns(options?: { silent?: boolean }) {
+    const generation = ++runListGeneration
+    const domain = domainStore.currentDomain
     if (!options?.silent) loading.value = true
     error.value = null
     try {
-      runs.value = await miningApi.getRuns(domainStore.currentDomain)
+      const result = await miningApi.getRuns(domain)
+      if (generation !== runListGeneration || domain !== domainStore.currentDomain) return
+      runs.value = result
     } catch (e: unknown) {
-      error.value = e instanceof Error ? e.message : 'Failed to fetch runs'
+      if (generation === runListGeneration && domain === domainStore.currentDomain) {
+        error.value = e instanceof Error ? e.message : 'Failed to fetch runs'
+      }
     } finally {
-      if (!options?.silent) loading.value = false
+      if (!options?.silent && generation === runListGeneration && domain === domainStore.currentDomain) loading.value = false
     }
   }
 
   async function fetchRunDetail(runId: string, options?: { silent?: boolean }) {
+    const generation = ++runDetailGeneration
+    const domain = domainStore.currentDomain
     if (!options?.silent) loading.value = true
     error.value = null
     try {
@@ -50,20 +62,26 @@ export const useMiningStore = defineStore('mining', () => {
         miningApi.getRunStages(runId),
         miningApi.getRunDocuments(runId, { page: documentsPage.value, page_size: DOCUMENTS_PAGE_SIZE }),
       ])
+      if (generation !== runDetailGeneration || domain !== domainStore.currentDomain) return
       currentRun.value = run
       stages.value = runStages
       documents.value = runDocsResult.documents
       documentsTotal.value = runDocsResult.total
     } catch (e: unknown) {
-      error.value = e instanceof Error ? e.message : 'Failed to fetch run detail'
+      if (generation === runDetailGeneration && domain === domainStore.currentDomain) {
+        error.value = e instanceof Error ? e.message : 'Failed to fetch run detail'
+      }
     } finally {
-      if (!options?.silent) loading.value = false
+      if (!options?.silent && generation === runDetailGeneration && domain === domainStore.currentDomain) loading.value = false
     }
   }
 
   async function fetchRunDocuments(runId: string) {
+    const generation = ++documentGeneration
+    const domain = domainStore.currentDomain
     try {
       const runDocsResult = await miningApi.getRunDocuments(runId, { page: documentsPage.value, page_size: DOCUMENTS_PAGE_SIZE })
+      if (generation !== documentGeneration || domain !== domainStore.currentDomain) return
       documents.value = runDocsResult.documents
       documentsTotal.value = runDocsResult.total
     } catch {
@@ -104,8 +122,12 @@ export const useMiningStore = defineStore('mining', () => {
   }
 
   async function fetchProgress(runId: string) {
+    const generation = ++progressGeneration
+    const domain = domainStore.currentDomain
     try {
-      progress.value = await miningApi.getRunProgress(runId)
+      const result = await miningApi.getRunProgress(runId)
+      if (generation !== progressGeneration || domain !== domainStore.currentDomain) return
+      progress.value = result
     } catch {
       // silently ignore progress fetch failures
     }
@@ -131,6 +153,9 @@ export const useMiningStore = defineStore('mining', () => {
   }
 
   function clearCurrentRun() {
+    runDetailGeneration += 1
+    progressGeneration += 1
+    documentGeneration += 1
     currentRun.value = null
     stages.value = []
     documents.value = []

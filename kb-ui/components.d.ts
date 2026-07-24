@@ -49,6 +49,7 @@ declare module 'vue' {
     LineChart: typeof import('./src/components/charts/LineChart.vue')['default']
     MiningOperatorNode: typeof import('./src/components/mining/workflow/MiningOperatorNode.vue')['default']
     MiningOperatorPalette: typeof import('./src/components/mining/workflow/MiningOperatorPalette.vue')['default']
+    MiningWorkflowTrace: typeof import('./src/components/mining/workflow/MiningWorkflowTrace.vue')['default']
     OntologyDiGraph: typeof import('./src/components/charts/OntologyDiGraph.vue')['default']
     OperatorNode: typeof import('./src/components/paradigm/OperatorNode.vue')['default']
     OperatorPalette: typeof import('./src/components/paradigm/OperatorPalette.vue')['default']

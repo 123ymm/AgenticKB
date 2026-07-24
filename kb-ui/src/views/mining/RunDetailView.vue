@@ -120,7 +120,14 @@
 
       <!-- Pipeline Flow -->
       <div class="run-detail__section">
-        <h4 class="section-label">Pipeline 阶段</h4>
+        <h4 class="section-label">冻结 Workflow 执行图</h4>
+        <MiningWorkflowTrace v-if="trace" :trace="trace" />
+        <p v-else class="text-muted">正在加载 Run Trace…</p>
+      </div>
+
+      <!-- Compatible stage events -->
+      <div class="run-detail__section">
+        <h4 class="section-label">兼容阶段事件</h4>
         <PipelineFlow :stage-events="miningStore.stages" :all-docs-settled="allDocsSettled" />
         <div v-if="trace" class="ontology-line-stats">
           <span class="ontology-line-stats__tag">本体线产出</span>
@@ -217,6 +224,7 @@ import { useMiningApi } from '@/api/mining'
 import type { RunTrace } from '@/types'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import PipelineFlow from '@/components/mining/PipelineFlow.vue'
+import MiningWorkflowTrace from '@/components/mining/workflow/MiningWorkflowTrace.vue'
 
 const props = defineProps<{ runId: string }>()
 const domainStore = useDomainStore()
@@ -230,6 +238,7 @@ const resuming = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 // resume 后延迟启动轮询的句柄，需在卸载/切域时一并清除，避免离开页面后仍触发轮询
 let resumeTimer: ReturnType<typeof setTimeout> | null = null
+let requestGeneration = 0
 
 // ── Formatters ──
 
@@ -359,9 +368,14 @@ const filteredDocs = computed(() => {
 
 // ── Polling ──
 
-async function fetchTrace() {
+async function fetchTrace(runId: string, domain: string, generation: number) {
   try {
-    trace.value = await miningApi.getRunTrace(props.runId)
+    const result = await miningApi.getRunTrace(runId)
+    if (
+      generation === requestGeneration
+      && runId === props.runId
+      && domain === domainStore.currentDomain
+    ) trace.value = result
   } catch { /* trace 是叠加视图，失败不影响主流程 */ }
 }
 
@@ -387,12 +401,20 @@ async function handleResume() {
   }
 }
 
-async function pollOnce(silent = false) {
+async function pollOnce(
+  silent = false,
+  context = { generation: requestGeneration, runId: props.runId, domain: domainStore.currentDomain },
+) {
   await Promise.all([
-    miningStore.fetchProgress(props.runId),
-    miningStore.fetchRunDetail(props.runId, { silent }),
-    fetchTrace(),
+    miningStore.fetchProgress(context.runId),
+    miningStore.fetchRunDetail(context.runId, { silent }),
+    fetchTrace(context.runId, context.domain, context.generation),
   ])
+  if (
+    context.generation !== requestGeneration
+    || context.runId !== props.runId
+    || context.domain !== domainStore.currentDomain
+  ) return
   initialLoading.value = false
   if (miningStore.currentRun?.status !== 'running' && pollTimer) {
     clearInterval(pollTimer)
@@ -402,19 +424,31 @@ async function pollOnce(silent = false) {
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer)
-  pollOnce(false).then(() => {
-    if (miningStore.currentRun?.status === 'running') {
-      pollTimer = setInterval(() => pollOnce(true), 3000)
+  const context = {
+    generation: ++requestGeneration,
+    runId: props.runId,
+    domain: domainStore.currentDomain,
+  }
+  trace.value = null
+  pollOnce(false, context).then(() => {
+    if (
+      context.generation === requestGeneration
+      && context.runId === props.runId
+      && context.domain === domainStore.currentDomain
+      && miningStore.currentRun?.status === 'running'
+    ) {
+      pollTimer = setInterval(() => pollOnce(true, context), 3000)
     }
   })
 }
 
 onMounted(startPolling)
 onUnmounted(() => {
+  requestGeneration += 1
   if (pollTimer) clearInterval(pollTimer)
   if (resumeTimer) clearTimeout(resumeTimer)
 })
-watch(() => domainStore.currentDomain, () => {
+watch([() => domainStore.currentDomain, () => props.runId], () => {
   if (resumeTimer) clearTimeout(resumeTimer)
   resumeTimer = null
   miningStore.clearCurrentRun()
