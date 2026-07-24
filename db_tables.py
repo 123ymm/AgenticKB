@@ -7,6 +7,9 @@ TRUNCATE 顺序：反序（先清子表，再清父表）。
 from __future__ import annotations
 
 EXPORT_TABLES = [
+    # mining_control（全局 Workflow 定义）
+    "mining_workflows",
+    "mining_workflow_versions",
     # agent_llm_runtime
     "agent_llm_prompt_templates",
     "agent_llm_tasks",
@@ -19,6 +22,7 @@ EXPORT_TABLES = [
     "mining_runs",
     "mining_run_documents",
     "mining_run_stage_events",
+    "mining_workflow_node_events",
     # serving_runtime（检索服务运行态）——见 OPTIONAL_TABLES
     "serving_query_logs",
     "serving_query_cache",

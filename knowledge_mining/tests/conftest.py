@@ -54,6 +54,7 @@ def _truncate_all(conn):
     if os.environ.get("KB_ALLOW_TEST_TRUNCATE") != "1":
         return
 
+    conn.execute("TRUNCATE TABLE mining_workflow_node_events CASCADE")
     conn.execute("TRUNCATE TABLE mining_run_stage_events CASCADE")
     conn.execute("TRUNCATE TABLE mining_run_documents CASCADE")
     conn.execute("TRUNCATE TABLE mining_runs CASCADE")
@@ -68,6 +69,14 @@ def _truncate_all(conn):
     conn.execute("TRUNCATE TABLE asset_document_snapshots CASCADE")
     conn.execute("TRUNCATE TABLE asset_documents CASCADE")
     conn.execute("TRUNCATE TABLE asset_source_batches CASCADE")
+
+    # Control tables exist only in the primary database. Domain-only fixtures
+    # deliberately omit them, so cleanup must remain tolerant there.
+    for tbl in ("mining_workflow_versions", "mining_workflows"):
+        try:
+            conn.execute(f"TRUNCATE TABLE {tbl} CASCADE")
+        except Exception:
+            pass
 
     # 本体/图谱表是 domain 维度（不随 run 销毁），不清会让上批测试残留的待审
     # 候选/实体在下批测试里触发"本体确认"闸口暂停，污染端到端流水线断言。
