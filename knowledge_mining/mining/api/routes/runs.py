@@ -83,6 +83,34 @@ class RunResponse(BaseModel):
     workflow_graph_hash: str | None = None
 
 
+def _frozen_workflow_summary(
+    run: dict[str, Any], *, include_graph: bool = False
+) -> dict[str, Any] | None:
+    """Render historical Workflow data only from the Domain Run snapshot."""
+    if run.get("execution_engine") != "workflow":
+        return None
+    manifest = run.get("workflow_manifest_json")
+    if not isinstance(manifest, dict):
+        return None
+    summary = {
+        "id": run.get("workflow_id") or manifest.get("workflowId"),
+        "version": run.get("workflow_version") or manifest.get("workflowVersion"),
+        "version_id": run.get("workflow_version_id"),
+        "graph_hash": run.get("workflow_graph_hash") or manifest.get("graphHash"),
+        "schema_version": manifest.get("schemaVersion"),
+        "catalog_version": manifest.get("catalogVersion"),
+    }
+    if include_graph:
+        execution = manifest.get("executionPlan") or {}
+        summary.update({
+            "graph": manifest.get("graph"),
+            "nodes": manifest.get("nodes") or [],
+            "edges": manifest.get("edges") or [],
+            "required_completion": execution.get("requiredCompletion") or [],
+        })
+    return summary
+
+
 class CancelRunResponse(BaseModel):
     run_id: str
     status: str
@@ -295,18 +323,26 @@ async def list_runs(
         cur = await conn.execute(
             f"SELECT id, status, current_stage, input_path, domain, total_documents, "
             f"committed_count, failed_count, skipped_count, "
-            f"new_count, updated_count, build_id, started_at, finished_at "
+            f"new_count, updated_count, build_id, started_at, finished_at, "
+            f"execution_engine, workflow_id, workflow_version, workflow_version_id, "
+            f"workflow_graph_hash, workflow_manifest_json "
             f"FROM mining_runs {where} "
             f"ORDER BY started_at DESC LIMIT %s OFFSET %s",
             params + [limit, offset],
         )
         rows = await cur.fetchall()
 
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["workflow"] = _frozen_workflow_summary(item)
+        item.pop("workflow_manifest_json", None)
+        items.append(item)
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "items": [dict(r) for r in rows],
+        "items": items,
     }
 
 
@@ -321,13 +357,18 @@ async def get_run(run_id: str, request: Request, domain: str = Query(..., min_le
             "SELECT id, source_batch_id, input_path, domain, status, current_stage, build_id, "
             "total_documents, new_count, updated_count, skipped_count, "
             "failed_count, committed_count, started_at, finished_at, "
-            "error_summary, metadata_json "
+            "error_summary, metadata_json, execution_engine, workflow_id, "
+            "workflow_version, workflow_version_id, workflow_graph_hash, "
+            "workflow_manifest_json, active_node_id, active_operator_type, pause_step "
             "FROM mining_runs WHERE id = %s", [run_id]
         )
         run = await cur.fetchone()
         if not run:
             raise HTTPException(404, f"Run {run_id} not found")
-        return dict(run)
+        result = dict(run)
+        result["workflow"] = _frozen_workflow_summary(result)
+        result.pop("workflow_manifest_json", None)
+        return result
 
 
 @router.get("/{run_id}/stages")
@@ -964,9 +1005,12 @@ async def get_run_trace(run_id: str, request: Request, domain: str = Query(..., 
 
     async with pool.connection() as conn:
         run_cur = await conn.execute(
-            "SELECT id, domain, status, subloop_stage, ontology_version_id, "
+            "SELECT id, domain, status, current_stage, subloop_stage, ontology_version_id, "
             "total_documents, committed_count, new_count, updated_count, "
-            "failed_count, skipped_count, started_at, finished_at "
+            "failed_count, skipped_count, started_at, finished_at, build_id, "
+            "execution_engine, workflow_id, workflow_version, workflow_version_id, "
+            "workflow_graph_hash, workflow_manifest_json, active_node_id, "
+            "active_operator_type, pause_step "
             "FROM mining_runs WHERE id = %s", [run_id]
         )
         run = await run_cur.fetchone()
@@ -1006,10 +1050,54 @@ async def get_run_trace(run_id: str, request: Request, domain: str = Query(..., 
         )
         relation_count = (await rel_cur.fetchone())["n"]
 
+        stage_cur = await conn.execute(
+            "SELECT id, run_id, run_document_id, stage, status, created_at, "
+            "duration_ms, output_summary, error_message "
+            "FROM mining_run_stage_events WHERE run_id = %s ORDER BY created_at",
+            [run_id],
+        )
+        stage_events = [dict(item) for item in await stage_cur.fetchall()]
+
+        document_cur = await conn.execute(
+            "SELECT id, document_key, action, status, document_id, "
+            "document_snapshot_id, error_message FROM mining_run_documents "
+            "WHERE run_id = %s ORDER BY document_key",
+            [run_id],
+        )
+        documents = [dict(item) for item in await document_cur.fetchall()]
+
+        node_events: list[dict[str, Any]] = []
+        if run.get("execution_engine") == "workflow":
+            node_cur = await conn.execute(
+                "SELECT id, run_id, run_document_id, node_id, operator_type, "
+                "operator_version, status, attempt_no, started_at, finished_at, "
+                "duration_ms, input_summary_json, output_summary_json, error_code, "
+                "error_message, metadata_json FROM mining_workflow_node_events "
+                "WHERE run_id = %s ORDER BY started_at, node_id, attempt_no",
+                [run_id],
+            )
+            node_events = [dict(item) for item in await node_cur.fetchall()]
+
+    warnings = []
+    for event in node_events:
+        metadata = event.get("metadata_json") or {}
+        if not isinstance(metadata, dict):
+            continue
+        for warning in metadata.get("warnings") or []:
+            if not isinstance(warning, dict):
+                continue
+            warnings.append({
+                "node_id": event.get("node_id"),
+                "attempt_no": event.get("attempt_no"),
+                "code": warning.get("code"),
+                "message": warning.get("message"),
+            })
+
     return {
         "run_id": run_id,
         "domain": run_domain,
         "status": run["status"],
+        "current_stage": run.get("current_stage"),
         "subloop_stage": run["subloop_stage"],
         "ontology_version_id": run["ontology_version_id"],
         "awaiting_review": run["status"] == "awaiting_review",
@@ -1027,6 +1115,20 @@ async def get_run_trace(run_id: str, request: Request, domain: str = Query(..., 
         "entity_count": entity_count,
         "relation_count": relation_count,
         "escape_hatch_candidates": escape_hatch_candidates,
+        "execution_engine": run.get("execution_engine") or "legacy",
+        "workflow": _frozen_workflow_summary(dict(run), include_graph=True),
+        "active_node_id": run.get("active_node_id"),
+        "active_operator_type": run.get("active_operator_type"),
+        "pause_step": run.get("pause_step"),
+        "stage_events": stage_events,
+        "node_events": node_events,
+        "documents": documents,
+        "warnings": warnings,
+        "asset_counts": {
+            "entities": entity_count,
+            "relations": relation_count,
+        },
+        "build_id": run.get("build_id"),
     }
 
 
