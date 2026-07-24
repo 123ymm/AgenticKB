@@ -1,0 +1,5 @@
+# command_patterns.yaml
+# 命令识别规则，用于 M3 command_extraction
+# 当前为占位，M3 填充实际规则
+
+patterns: []

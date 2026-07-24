@@ -1,0 +1,5 @@
+# term_patterns.yaml
+# 术语识别规则，用于 M3 term extraction
+# 当前为占位，M3 填充实际规则
+
+patterns: []

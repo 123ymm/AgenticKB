@@ -1,0 +1,475 @@
+export interface DomainInfo {
+  domain_id: string
+  display_name: string
+  enabled: boolean
+  default_channel: string
+  scenario_pack_ref: string
+}
+
+
+export interface HealthStatus {
+  status: string
+  message?: string
+  timestamp?: string
+  version?: string
+}
+
+// ─── Knowledge Stats ───
+
+export interface KnowledgeStats {
+  documents: number
+  snapshots: number
+  segments: number
+  relations: number
+  retrieval_units: number
+  embeddings: number
+  builds: number
+  releases: number
+  retrieval_units_by_type?: Record<string, number>
+  active_release?: string
+}
+
+// ─── Mining Run ───
+
+export interface MiningRun {
+  id: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'awaiting_review'
+  subloop_stage?: string | null
+  ontology_version_id?: string | null
+  input_path?: string
+  domain?: string
+  started_at?: string
+  finished_at?: string
+  total_documents: number
+  committed_count: number
+  failed_count: number
+  skipped_count: number
+  new_count: number
+  updated_count: number
+  build_id?: string
+  error_message?: string
+  config?: Record<string, unknown>
+}
+
+export interface MiningRunStage {
+  id: string
+  stage: string
+  status: string
+  created_at: string
+  duration_ms?: number | null
+  output_summary?: string | null
+  error_message?: string | null
+  run_document_id?: string | null
+}
+
+export interface MiningRunDocument {
+  id?: string
+  document_id: string
+  document_name: string
+  document_key?: string
+  status: 'pending' | 'processing' | 'committed' | 'failed' | 'skipped'
+  action: 'new' | 'updated' | 'unchanged'
+  error_message?: string
+  error_summary?: string
+  current_stage?: string | null
+  duration_ms?: number | null
+  file_size?: number | null
+  /**
+   * 跳过原因码：unchanged | restored | preprocess_failed | parser_failed
+   * | unsupported_type | empty_file | no_segments | parse_no_tree
+   */
+  skip_reason?: string | null
+  /** 跳过原因明细（异常文本 / file_type），仅部分原因码有 */
+  skip_reason_detail?: string | null
+  started_at?: string
+  finished_at?: string
+  document_snapshot_id?: string | null
+  stage?: string
+}
+
+// ─── Knowledge Assets ───
+
+export interface KnowledgeDocument {
+  id: string
+  document_key: string
+  document_name: string
+  document_type: string
+  metadata_json?: Record<string, unknown>
+  created_at: string
+  source_batch_id?: string | null
+  batch_code?: string | null
+}
+
+export interface KnowledgeSegment {
+  id: string
+  segment_key: string
+  segment_index: number
+  block_type: string
+  semantic_role: string
+  section_title?: string
+  raw_text: string
+  token_count: number
+}
+
+export interface KnowledgeUnit {
+  id: string
+  unit_key: string
+  unit_type: 'raw_text' | 'contextual_text' | 'summary' | 'generated_question' | 'entity_card'
+  target_type: string
+  title: string
+  text: string
+  weight: number
+  block_type?: string
+  semantic_role?: string
+  created_at?: string
+}
+
+export interface KnowledgeRelation {
+  id: string
+  document_snapshot_id: string
+  source_segment_id: string
+  target_segment_id: string
+  relation_type: string
+  weight: number
+  confidence: number
+  distance: number
+  source_text?: string
+  target_text?: string
+}
+
+// ─── Search / Serving ───
+
+export interface SearchResult {
+  items: SearchContextItem[]
+  relations: SearchContextRelation[]
+  sources: SearchSourceRef[]
+  evidence_groups?: SearchEvidenceGroup[]
+  issues?: SearchIssue[]
+  suggestions?: string[]
+  debug?: SearchDebug
+}
+
+export interface SearchContextItem {
+  id: string
+  kind: string
+  role: 'seed' | 'context' | 'support'
+  text: string
+  score: number
+  title: string
+  blockType: string
+  semanticRole: string
+  sourceId: string | null
+  relationToSeed?: string | null
+  routeSources?: string[]
+  scoreChain?: Record<string, unknown>
+  evidenceRole: string
+  citation?: {
+    raw_segment_ids?: string[]
+    section?: string
+    document_snapshot_id?: string
+  }
+  metadata?: Record<string, unknown>
+}
+
+export interface SearchContextRelation {
+  id: string
+  fromId: string
+  toId: string
+  relationType: string
+  distance?: number
+}
+
+export interface SearchSourceRef {
+  id: string
+  documentKey: string
+  title: string
+  relativePath?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface SearchEvidenceGroup {
+  documentSnapshotId: string
+  itemIds: string[]
+  relationIds: string[]
+}
+
+export interface SearchIssue {
+  severity: string
+  message: string
+}
+
+export interface SearchDebug {
+  understanding?: {
+    original_query: string
+    intent: string
+    source: string
+    keywords: string[]
+    entities_count: number
+  }
+  route_plan?: {
+    routes_count: number
+    fusion_method: string
+    rerank_method: string
+  }
+  scope?: {
+    release_id: string
+    snapshot_count: number
+  }
+  trace?: {
+    request_id: string
+    total_duration_ms: number
+    stages: SearchDebugStage[]
+  }
+  candidate_count?: number
+  fusion_method?: string
+  query_embedding_dim?: number
+}
+
+export interface SearchDebugStage {
+  name: string
+  duration_ms: number
+  summary?: string
+  input?: string
+  output?: string
+  error?: string | null
+}
+
+// ─── LLM Service ───
+
+export interface LlmTaskStats {
+  tasks_by_status: Record<string, number>
+  tasks_by_type?: Record<string, number>
+  succeeded_attempts: number
+  total_tokens: number
+  avg_latency_ms: number
+  services?: string[]
+  domains?: string[]
+  stages?: string[]
+}
+
+export interface LlmTask {
+  id: string
+  task_type: 'chat' | 'embedding' | 'rerank'
+  caller_service?: string
+  knowledge_domain?: string
+  pipeline_stage?: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'dead_letter' | 'cancelled'
+  priority: number
+  attempt_count: number
+  max_attempts: number
+  created_at: string
+  started_at?: string
+  finished_at?: string
+  idempotency_key?: string
+  error_message?: string
+  total_tokens?: number
+  latency_ms?: number
+  metadata?: Record<string, unknown>
+}
+
+export interface LlmTaskDetail extends LlmTask {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+  latency_ms?: number
+  raw_response?: Record<string, unknown>
+  parsed_output?: Record<string, unknown>
+}
+
+// ─── Upload Config ───
+
+export interface UploadConfig {
+  max_file_size: number
+  max_archive_size: number
+  max_files_per_request: number
+  max_file_size_mb: number
+  max_archive_size_mb: number
+  accepted_extensions: string[]
+  archive_extensions: string[]
+}
+
+export interface UploadResult {
+  upload_batch_id: string
+  domain: string
+  file_count: number
+  files: string[]
+  storage_path: string
+  extracted_archives: Array<{
+    archive: string
+    error: string | null
+    file_count: number
+    files: string[]
+  }>
+}
+
+// ─── 本体 / 知识图谱（B7）───
+
+export interface RunTrace {
+  run_id: string
+  domain: string
+  status: string
+  subloop_stage?: string | null
+  ontology_version_id?: string | null
+  awaiting_review: boolean
+  active_gate?: string | null
+  counts: {
+    total_documents: number
+    committed: number
+    new: number
+    updated: number
+    failed: number
+    skipped: number
+  }
+  ontology_proposed_candidates: number
+  entity_pending_mentions: number
+  entity_count: number
+  relation_count: number
+  escape_hatch_candidates?: number
+}
+
+export interface OntologyVersion {
+  id: string
+  domain_id: string
+  version_no: number
+  status: 'draft' | 'active' | 'superseded'
+  source?: string
+  created_by?: string | null
+  note?: string | null
+  created_at?: string
+}
+
+export interface OntologyNodeType {
+  // id 在读取服务端本体时存在；前端编辑草稿（saveOntologyDraft）时尚无 id，故可选
+  id?: string
+  name: string
+  layer: string
+  is_strong: boolean
+  definition?: string | null
+  examples_json?: unknown[]
+}
+
+export interface OntologyRelationType {
+  // 同 OntologyNodeType：草稿编辑期无 id，故可选
+  id?: string
+  name: string
+  layer: string
+  is_directed: boolean
+  inverse_name?: string | null
+  allowed_pairs_json?: Array<{ head: string; tail: string }>
+  definition?: string | null
+}
+
+export interface ActiveOntology {
+  domain: string
+  version: OntologyVersion | null
+  node_types: OntologyNodeType[]
+  relation_types: OntologyRelationType[]
+}
+
+// 草稿编辑器：GET /ontology/draft 返回 / PUT 提交载荷，结构与 ActiveOntology 同构
+export interface OntologyDraft {
+  domain: string
+  version: OntologyVersion | null
+  node_types: OntologyNodeType[]
+  relation_types: OntologyRelationType[]
+}
+
+export interface OntologyCandidate {
+  id: string
+  domain_id: string
+  kind: 'node_type' | 'relation_type'
+  layer: string
+  proposed_name: string
+  payload_json?: Record<string, unknown>
+  source?: string
+  evidence_json?: unknown[]
+  score?: number | null
+  status: 'proposed' | 'accepted' | 'rejected'
+  review_note?: string | null
+  created_at?: string
+  duplicate_of?: string | null
+}
+
+export interface PendingMention {
+  id: string
+  document_snapshot_id: string
+  segment_id: string
+  node_type: string
+  mention_text: string
+  canonical_name?: string | null
+  resolved_entity_id?: string | null
+  resolve_status: string
+  confidence: number
+  metadata_json?: Record<string, unknown>
+  segment_text?: string | null      // §14.2：所在段原文
+  segment_section?: string | null   // §14.2：所在段标题
+}
+
+export interface GraphEntity {
+  id: string
+  domain_id: string
+  canonical_name: string
+  node_type: string
+  layer: string
+  aliases_json?: unknown[]
+  attributes_json?: Record<string, unknown>
+  mention_count: number
+  document_count: number
+}
+
+export interface EntityNeighbors {
+  center_id: string
+  hops: number
+  nodes: Array<{ id: string; canonical_name: string; node_type: string; mention_count: number }>
+  edges: Array<{ id: string; head_entity_id: string; tail_entity_id: string; relation_type: string; confidence?: number | null }>
+}
+
+export interface EntityMutationResult {
+  recomputed_edges?: number
+  affected?: string[]
+  neighbors?: EntityNeighbors
+  primary_id?: string
+}
+
+export interface GraphEvidence {
+  id: string
+  domain_id: string
+  document_snapshot_id: string
+  segment_id: string
+  quote?: string | null
+  target_kind: string
+  target_id: string
+  segment_text?: string | null
+  segment_section?: string | null
+  created_at?: string
+}
+
+// ─── Paginated Response ───
+
+export interface PaginatedResponse<T> {
+  total: number
+  limit: number
+  offset: number
+  items: T[]
+}
+
+// ─── 文档生命周期（下载 / 删除 / 批次）───
+
+export interface MiningBatchSummary {
+  source_batch_id: string | null
+  batch_code: string | null
+  mining_run_id: string | null
+  active_document_count: number
+  created_at: string | null
+  deletable: boolean
+  unclassified: boolean
+}
+
+export interface LifecycleRemovalResult {
+  domain: string
+  removed_count: number
+  build_id: string
+  release_id: string
+  document_id?: string
+  source_batch_id?: string
+}

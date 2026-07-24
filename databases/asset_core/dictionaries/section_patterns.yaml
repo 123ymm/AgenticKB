@@ -1,0 +1,5 @@
+# section_patterns.yaml
+# 段落类型识别规则，用于 M2 segmentation
+# 当前为占位，M2 填充实际规则
+
+patterns: []

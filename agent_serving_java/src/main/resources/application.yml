@@ -1,0 +1,38 @@
+server:
+  port: 8081
+
+spring:
+  config:
+    import: "optional:file:.env[.properties],optional:file:../.env[.properties]"
+  datasource:
+    url: jdbc:postgresql://${PG_HOST:localhost}:${PG_PORT:15432}/${PG_DBNAME:test_db}
+    username: ${PG_USER:zdy}
+    password: ${PG_PASSWORD:zdy1234}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      minimum-idle: ${PG_POOL_MIN:2}
+      maximum-pool-size: ${PG_POOL_MAX:10}
+      connection-timeout: 5000
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+
+# 与 Python 各服务共用同一个 LOG_LEVEL 环境变量（默认 INFO）。
+# 只调本项目的包，避免 DEBUG 时被 Spring/Hikari 的内部日志淹没。
+logging:
+  level:
+    com.coremasterkb: ${LOG_LEVEL:INFO}
+
+serving:
+  # 配置来源：serving 启动时从 main_control 拉取 per-domain 配置（GET /api/v1/serving-config），
+  # 并可经 POST /api/v1/admin/reload-config 热重载。
+  main-control:
+    base-url: ${SERVING_MAIN_CONTROL_BASEURL:http://localhost:8910}
+  # 本地文件兜底：仅当 main_control 不可达时使用（IntelliJ / 测试）。
+  # 指向 main_control 所拥有的同一份文件 —— main_control_service/config 是唯一真相源。
+  scenario-packs-dir: ${SCENARIO_PACKS_DIR:../main_control_service/config/scenario_packs}
+  domain-registry-path: ${DOMAIN_REGISTRY_PATH:../main_control_service/config/domain_registry.yaml}
+  # 需要覆盖时用环境变量 SERVING_DEFAULT_DOMAIN（Spring 宽松绑定，无需写占位符）。
+  default-domain: cloud_core_network
+  llm:
+    base-url: ${LLM_SERVICE_URL:http://localhost:8900}

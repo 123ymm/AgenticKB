@@ -1,0 +1,6 @@
+service_url: http://localhost:8081
+port: 8081
+llm_base_url: http://localhost:8900
+embedding_model: embedding-3
+embedding_dimensions: 1024
+rerank_model: rerank-pro

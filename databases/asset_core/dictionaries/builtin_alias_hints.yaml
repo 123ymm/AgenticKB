@@ -1,0 +1,5 @@
+# builtin_alias_hints.yaml
+# 内置别名提示，仅作开发参考，不是正式 alias_dictionary
+# 正式 alias 从用户导入的产品文档中抽取（M2/M3）
+
+hints: []

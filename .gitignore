@@ -1,0 +1,92 @@
+# === Whitelist mode: ignore everything by default ===
+*
+
+# === Allowlisted directories ===
+# 注：根目录的 scenario_packs/ 与 domain_registry.yaml 已删除——域配置统一到
+# main_control_service/config/（该目录已由下方的 !main_control_service/** 覆盖）。
+!agent_serving/
+!agent_serving/**
+!config_library/
+!config_library/**
+!databases/
+!databases/**
+!data/
+!data/**
+!knowledge_mining/
+!knowledge_mining/**
+!knowledge_mining_fzl/
+!knowledge_mining_fzl/**
+!knowledge_mining_zym/
+!knowledge_mining_zym/**
+!llm_service/
+!llm_service/**
+!mcp_server/
+!mcp_server/**
+!agent_serving_java/
+!agent_serving_java/**
+!agent_serving_fzl/
+!agent_serving_fzl/**
+!main_control_service/
+!main_control_service/**
+!agent_serving_zdy/
+!agent_serving_zdy/**
+!kb-ui/
+!kb-ui/**
+!docker/
+!docker/**
+!.github/
+!.github/**
+
+# === Allowlisted root files ===
+!.env.example
+!.env.docker
+!.gitignore
+!.dockerignore
+!README.md
+!CLAUDE.md
+!docker-compose.yml
+!pyproject.toml
+!deploy-build.sh
+!deploy-server.sh
+!reset_db.py
+!export_db.py
+!import_db.py
+!db_tables.py
+
+# === But still exclude these within allowlisted dirs ===
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# === Python cache (redundant safety) ===
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+.pytest_cache/
+dist/
+build/
+*.egg
+.env
+
+# === Java/Maven build artifacts ===
+agent_serving_java/target/
+agent_serving_zdy/target/
+**/target/
+*.class
+*.jar
+*.war
+*.iml
+.idea/
+.settings/
+.project
+.classpath
+
+# === Docker build artifacts ===
+cmkb.tar
+
+# === 运行时日志（docker-compose 把 ./logs 挂进容器 /app/logs）===
+logs/
+
+# === Main control service config ===

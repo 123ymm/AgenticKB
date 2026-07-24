@@ -1,0 +1,142 @@
+CREATE TABLE IF NOT EXISTS agent_llm_prompt_templates (
+    id                   TEXT PRIMARY KEY,
+    template_key         TEXT NOT NULL,
+    template_version     TEXT NOT NULL,
+    knowledge_domain     TEXT,
+    purpose              TEXT NOT NULL,
+    system_prompt        TEXT,
+    user_prompt_template TEXT NOT NULL,
+    expected_output_type TEXT NOT NULL,
+    output_schema_key    TEXT,
+    output_schema_json   TEXT NOT NULL DEFAULT '{}',
+    status               TEXT NOT NULL,
+    created_at           TEXT NOT NULL,
+    metadata_json        TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_llm_prompt_templates_key_version_domain
+    ON agent_llm_prompt_templates(template_key, template_version, COALESCE(knowledge_domain, ''));
+
+CREATE INDEX IF NOT EXISTS idx_agent_llm_prompt_templates_domain_status
+    ON agent_llm_prompt_templates(knowledge_domain, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_llm_tasks (
+    id                 TEXT PRIMARY KEY,
+    caller_service     TEXT NOT NULL,
+    knowledge_domain   TEXT,
+    pipeline_stage     TEXT NOT NULL,
+    ref_type           TEXT,
+    ref_id             TEXT,
+    build_id           TEXT,
+    release_id         TEXT,
+    request_id         TEXT,
+    idempotency_key    TEXT,
+    status             TEXT NOT NULL,
+    priority           INTEGER NOT NULL DEFAULT 100,
+    available_at       TEXT,
+    lease_expires_at   TEXT,
+    attempt_count      INTEGER NOT NULL DEFAULT 0,
+    max_attempts       INTEGER NOT NULL DEFAULT 3,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    started_at         TEXT,
+    finished_at        TEXT,
+    metadata_json      TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS agent_llm_requests (
+    id                      TEXT PRIMARY KEY,
+    task_id                 TEXT NOT NULL REFERENCES agent_llm_tasks(id) ON DELETE CASCADE,
+    provider                TEXT NOT NULL,
+    model                   TEXT NOT NULL,
+    prompt_template_key     TEXT,
+    prompt_template_version TEXT,
+    messages_json           TEXT NOT NULL DEFAULT '[]',
+    input_json              TEXT NOT NULL DEFAULT '{}',
+    params_json             TEXT NOT NULL DEFAULT '{}',
+    expected_output_type    TEXT NOT NULL,
+    output_schema_key       TEXT,
+    output_schema_json      TEXT NOT NULL DEFAULT '{}',
+    created_at              TEXT NOT NULL,
+    metadata_json           TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS agent_llm_attempts (
+    id                  TEXT PRIMARY KEY,
+    task_id             TEXT NOT NULL REFERENCES agent_llm_tasks(id) ON DELETE CASCADE,
+    request_id          TEXT NOT NULL REFERENCES agent_llm_requests(id) ON DELETE CASCADE,
+    attempt_no          INTEGER NOT NULL,
+    status              TEXT NOT NULL,
+    provider_request_id TEXT,
+    raw_output_text     TEXT,
+    raw_response_json   TEXT NOT NULL DEFAULT '{}',
+    error_type          TEXT,
+    error_message       TEXT,
+    prompt_tokens       INTEGER,
+    completion_tokens   INTEGER,
+    total_tokens        INTEGER,
+    latency_ms          INTEGER,
+    started_at          TEXT NOT NULL,
+    finished_at         TEXT,
+    metadata_json       TEXT NOT NULL DEFAULT '{}',
+    UNIQUE (task_id, attempt_no)
+);
+
+CREATE TABLE IF NOT EXISTS agent_llm_results (
+    id                     TEXT PRIMARY KEY,
+    task_id                TEXT NOT NULL REFERENCES agent_llm_tasks(id) ON DELETE CASCADE,
+    attempt_id             TEXT REFERENCES agent_llm_attempts(id) ON DELETE SET NULL,
+    parse_status           TEXT NOT NULL,
+    parsed_output_json     TEXT NOT NULL DEFAULT '{}',
+    text_output            TEXT,
+    parse_error            TEXT,
+    validation_errors_json TEXT NOT NULL DEFAULT '[]',
+    confidence             DOUBLE PRECISION,
+    created_at             TEXT NOT NULL,
+    metadata_json          TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS agent_llm_events (
+    id            TEXT PRIMARY KEY,
+    task_id       TEXT NOT NULL REFERENCES agent_llm_tasks(id) ON DELETE CASCADE,
+    event_type    TEXT NOT NULL,
+    message       TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_llm_tasks_status_priority
+    ON agent_llm_tasks(status, priority, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_agent_llm_tasks_service_domain
+    ON agent_llm_tasks(caller_service, knowledge_domain, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_agent_llm_requests_task
+    ON agent_llm_requests(task_id);
+
+CREATE INDEX IF NOT EXISTS idx_agent_llm_attempts_task
+    ON agent_llm_attempts(task_id, attempt_no);
+
+CREATE INDEX IF NOT EXISTS idx_agent_llm_results_task
+    ON agent_llm_results(task_id);
+
+CREATE INDEX IF NOT EXISTS idx_agent_llm_events_task
+    ON agent_llm_events(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS agent_llm_model_calls (
+    id               TEXT PRIMARY KEY,
+    call_type        TEXT NOT NULL,
+    model            TEXT NOT NULL,
+    caller_service   TEXT NOT NULL,
+    knowledge_domain TEXT,
+    pipeline_stage   TEXT NOT NULL,
+    input_count      INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL,
+    latency_ms       INTEGER,
+    token_usage      INTEGER,
+    error_message    TEXT,
+    created_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_llm_model_calls_type
+    ON agent_llm_model_calls(call_type, created_at);

@@ -1,0 +1,55 @@
+"""Mining pipeline configuration — all values from .env.
+
+Uses pydantic-settings to load environment variables, same pattern as pg_config.py.
+Mining calls llm_service for both chat (template-based) and embedding.
+Only the embedding model name and dimensions need to be configured here;
+the actual API key, base URL for embedding are handled by llm_service.
+"""
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+
+from pydantic_settings import BaseSettings
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]  # knowledge_mining/mining/infra/ -> CoreMasterKB/
+
+
+class MiningConfig(BaseSettings):
+    """Mining pipeline configuration, loaded from environment variables.
+
+    Env vars:
+        LLM_SERVICE_URL:        llm_service address (default: http://localhost:8900)
+        DOMAIN:                 default domain ID
+        DOMAIN_PACK:            (Deprecated) use DOMAIN instead
+        MAX_WORKERS:            max concurrent workers for streaming pipeline
+
+    Model-level params (embedding_model, embedding_dimensions, bypass_proxy)
+    are managed by llm_service. Mining no longer configures them.
+    """
+
+    # LLM Service
+    llm_service_url: str = "http://localhost:8900"
+
+    # Pipeline defaults
+    domain: str = "cloud_core_network"
+    domain_pack: str = ""
+    max_workers: int = 4
+
+    model_config = {
+        "env_prefix": "",
+        "env_file": str(_REPO_ROOT / ".env"),
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        # Backward compat: if DOMAIN_PACK is set but DOMAIN is not, use DOMAIN_PACK
+        if self.domain_pack and self.domain == "cloud_core_network":
+            warnings.warn(
+                "DOMAIN_PACK env var is deprecated; use DOMAIN instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.domain = self.domain_pack

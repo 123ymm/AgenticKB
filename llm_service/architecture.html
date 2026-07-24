@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Service 架构</title>
+<style>
+:root{--bg:#f6f4f0;--srf:#fff;--srf2:#faf9f7;--code:#f0eeea;--hi:#e8f4f8;--acc:#eef2ff;--wrn:#fef3c7;--ok:#ecfdf5;--t1:#1a1a2e;--t2:#4a4a6a;--t3:#7c7c9a;--ti:#fff;--cb:#2563eb;--ct:#0d9488;--cv:#7c3aed;--ca:#b45309;--cr:#be123c;--ce:#059669;--co:#c2410c;--cs:#475569;--bd:#e5e2dc;--fm:'Cascadia Code','JetBrains Mono',monospace;--fb:'Segoe UI','Noto Sans SC',system-ui,sans-serif;--fd:'Georgia','Noto Serif SC',serif;--r:8px;--rl:12px;--mw:1100px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}html{scroll-behavior:smooth;font-size:15px}body{font-family:var(--fb);background:var(--bg);color:var(--t1);line-height:1.7}
+nav{position:sticky;top:0;z-index:100;background:rgba(246,244,240,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--bd);padding:8px 0}
+nav .ni{max-width:var(--mw);margin:0 auto;padding:0 24px;display:flex;align-items:center;gap:16px;overflow-x:auto;white-space:nowrap}
+.nb{font-family:var(--fm);font-size:.82rem;font-weight:700;color:var(--cv);flex-shrink:0}
+.nl{display:flex;gap:10px;list-style:none}
+.nl a{font-size:.8rem;color:var(--t3);text-decoration:none;padding:4px 8px;border-radius:var(--r);transition:color .2s,background .2s}
+.nl a:hover{color:var(--cv);background:var(--acc)}
+.pc{max-width:var(--mw);margin:0 auto;padding:0 24px}
+.hero{padding:48px 0 36px;border-bottom:2px solid var(--bd)}.hero h1{font-family:var(--fd);font-size:1.8rem;font-weight:700;margin-bottom:8px}.hero .sub{font-size:.95rem;color:var(--t2);max-width:680px}
+.vb{display:inline-block;background:var(--cv);color:var(--ti);font-family:var(--fm);font-size:.72rem;font-weight:600;padding:2px 10px;border-radius:20px;margin-bottom:8px}
+.sec{padding:44px 0;border-bottom:1px solid var(--bd)}.sh h2{font-family:var(--fd);font-size:1.4rem;font-weight:700;margin-bottom:6px}.sh .sn{font-family:var(--fm);font-size:.78rem;color:var(--cv);font-weight:600;display:block;margin-bottom:4px;letter-spacing:1px}.sh p{font-size:.9rem;color:var(--t2);max-width:760px}
+.tw{overflow-x:auto;margin:16px 0;border-radius:var(--rl);border:1px solid var(--bd);background:var(--srf)}
+table{width:100%;border-collapse:collapse;font-size:.86rem}th{background:var(--srf2);font-weight:600;text-align:left;padding:9px 12px;border-bottom:2px solid var(--bd);color:var(--t2);font-size:.8rem;text-transform:uppercase;letter-spacing:.5px}td{padding:9px 12px;border-bottom:1px solid var(--bd);vertical-align:top}tr:last-child td{border-bottom:none}tr:hover td{background:var(--srf2)}
+.b{display:inline-block;font-size:.7rem;font-weight:600;padding:2px 7px;border-radius:4px}.bb{background:#dbeafe;color:#1e40af}.bt{background:#ccfbf1;color:#0f766e}.ba{background:#fef3c7;color:#92400e}.bv{background:#ede9fe;color:#5b21b6}.be{background:#d1fae5;color:#065f46}.br{background:#ffe4e6;color:#9f1239}
+.dia{background:#f8fafc;border:1px solid var(--bd);border-radius:var(--rl);padding:24px;margin:16px 0;overflow-x:auto}.dia-t{font-size:.8rem;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+.fb{background:var(--srf);border:1.5px solid #d4d0c8;border-radius:var(--r);padding:9px 13px;text-align:center;min-width:90px;flex-shrink:0}.fb.p{border-color:var(--cv);background:#f5f3ff}.fb .fl{font-size:.7rem;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.5px}.fb .fv{font-size:.82rem;font-weight:600;margin-top:2px}
+.fa{display:flex;align-items:center;padding:0 3px;color:var(--t3);font-size:1rem;flex-shrink:0}
+.co{border-left:3px solid var(--cv);background:var(--acc);padding:12px 18px;border-radius:0 var(--r) var(--r) 0;margin:16px 0;font-size:.88rem;color:var(--t2)}.co strong{color:var(--t1)}
+.card{background:var(--srf);border:1px solid var(--bd);border-radius:var(--rl);padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.06)}.cg{display:grid;gap:14px}.cg2{grid-template-columns:repeat(2,1fr)}@media(max-width:800px){.cg2{grid-template-columns:1fr}}.card h3{font-size:.95rem;font-weight:600;margin-bottom:6px}
+code{font-family:var(--fm);font-size:.84em;background:var(--code);padding:2px 5px;border-radius:4px;color:#4338ca}pre{background:var(--code);border:1px solid var(--bd);border-radius:var(--r);padding:12px;overflow-x:auto;font-family:var(--fm);font-size:.8rem;line-height:1.6;margin:10px 0}
+.mets{display:flex;gap:24px;flex-wrap:wrap;margin:16px 0}.met{text-align:center}.met-v{font-family:var(--fd);font-size:1.8rem;font-weight:700;line-height:1}.met-l{font-size:.76rem;color:var(--t3);margin-top:3px}
+footer{padding:36px 0;text-align:center;color:var(--t3);font-size:.8rem}
+</style>
+</head>
+<body>
+<div style="background:#fef3c7;border-bottom:2px solid #d4d0c8;padding:14px 24px;font-family:'Segoe UI','Noto Sans SC',system-ui,sans-serif;font-size:.9rem;color:#1a1a2e;">
+  <strong>⚠️ 本架构图已过时（v1.1 / 2026-04-23 版本）。</strong>
+  本页描述的 SQLite / 6 张表 / <code>runtime/executor.py</code> / <code>dashboard/</code> / <code>templates/</code> 目录均已不存在；当前版本（v2.0）已迁 PostgreSQL（7 张表）、配置改为控制面拉取、同步路径通过 PersistWriter 异步落库。
+  请改读 <a href="./ARCHITECTURE.md">ARCHITECTURE.md</a> 与 <a href="./README.md">README.md</a>。本页仅保留作历史参考。
+</div>
+<nav><div class="ni"><span class="nb">LLM Service</span><ul class="nl"><li><a href="#arch">模块架构</a></li><li><a href="#flow">数据流</a></li><li><a href="#db">数据库</a></li><li><a href="#lifecycle">任务生命周期</a></li><li><a href="#dual">双模式调用</a></li><li><a href="#template">模板系统</a></li><li><a href="#retry">重试机制</a></li><li><a href="#api">API</a></li><li><a href="#v12">v1.2 演进</a></li></ul></div></nav>
+<div class="pc">
+<section class="hero"><span class="vb">v1.1 PRODUCTION</span><h1>LLM Service 架构</h1><p class="sub">统一 LLM 调用与审计服务。独立 FastAPI 进程（:8900），集中管理所有 LLM 调用的提交、执行、重试、结果解析和审计记录。Mining 异步批量，Serving 同步在线。</p></section>
+
+<!-- S1: 模块架构 -->
+<section class="sec" id="arch"><div class="sh"><span class="sn">01</span><h2>模块架构</h2></div>
+<div class="dia"><div class="dia-t">调用方 → LLM Service → Provider</div>
+<div style="display:flex;flex-direction:column;gap:10px">
+<div style="display:flex;align-items:center;gap:6px"><div style="width:70px;text-align:right;font-size:.76rem;font-weight:600;color:var(--t3)">调用方</div><div style="flex:1;display:flex;gap:8px"><div class="fb" style="flex:1;border-color:var(--cb);background:#eff6ff"><div class="fl">MINING</div><div class="fv">submit() 异步</div></div><div class="fb" style="flex:1;border-color:var(--ct);background:#f0fdfa"><div class="fl">SERVING</div><div class="fv">execute() 同步</div></div></div></div>
+<div style="text-align:center;color:var(--t3)">↓ LLMClient / HTTP</div>
+<div style="display:flex;align-items:center;gap:6px"><div style="width:70px;text-align:right;font-size:.76rem;font-weight:600;color:var(--cv)">服务层</div><div style="flex:1;display:flex;gap:6px;flex-wrap:wrap"><div class="fb p"><div class="fl">API</div><div class="fv">FastAPI 路由</div></div><div class="fb p"><div class="fl">SERVICE</div><div class="fv">顶层编排</div></div><div class="fb p"><div class="fl">TASK MGR</div><div class="fv">生命周期</div></div><div class="fb p"><div class="fl">EXECUTOR</div><div class="fv">执行引擎</div></div><div class="fb p"><div class="fl">WORKER</div><div class="fv">后台进程</div></div><div class="fb p"><div class="fl">PARSER</div><div class="fv">输出解析</div></div></div></div>
+<div style="text-align:center;color:var(--t3)">↓</div>
+<div style="display:flex;align-items:center;gap:6px"><div style="width:70px;text-align:right;font-size:.76rem;font-weight:600;color:var(--t3)">存储层</div><div style="flex:1;display:flex;gap:8px"><div class="fb" style="flex:1;border-color:var(--cs);background:#f1f5f9"><div class="fl">SQLite WAL</div><div class="fv">6 张表审计</div></div></div></div>
+<div style="text-align:center;color:var(--t3)">↓</div>
+<div style="display:flex;align-items:center;gap:6px"><div style="width:70px;text-align:right;font-size:.76rem;font-weight:600;color:var(--co)">Provider</div><div style="flex:1;display:flex;gap:8px"><div class="fb" style="flex:1;border-color:var(--co);background:#ffedd5"><div class="fl">DEEPSEEK</div></div><div class="fb" style="flex:1;border-color:var(--co);background:#ffedd5"><div class="fl">OPENAI</div></div><div class="fb" style="flex:1;border-color:var(--co);background:#ffedd5"><div class="fl">OLLAMA</div></div></div></div>
+</div></div>
+
+<div class="tw"><table><thead><tr><th>模块</th><th>文件</th><th>职责</th></tr></thead><tbody>
+<tr><td>顶层编排</td><td><code>runtime/service.py</code></td><td>模板解析、任务提交/执行、响应构建。唯一持有所有组件的入口</td></tr>
+<tr><td>任务管理</td><td><code>runtime/task_manager.py</code></td><td>任务 CRUD：submit、claim、complete、fail、cancel。优先级队列</td></tr>
+<tr><td>执行引擎</td><td><code>runtime/executor.py</code></td><td>重试循环、调用 Provider、记录 attempt。指数退避策略</td></tr>
+<tr><td>后台 Worker</td><td><code>runtime/worker.py</code></td><td>持续从队列获取任务并执行。与 API 进程并行运行</td></tr>
+<tr><td>租约恢复</td><td><code>runtime/lease_recovery.py</code></td><td>处理 Worker 崩溃场景：超时任务重新入队</td></tr>
+<tr><td>输出解析</td><td><code>runtime/parser.py</code></td><td>text / json_object / json_array 三种输出类型解析。自动去 Markdown 标记</td></tr>
+<tr><td>模板注册</td><td><code>runtime/template_registry.py</code></td><td>Jinja2 模板管理。draft/active/archived 状态</td></tr>
+<tr><td>幂等控制</td><td><code>runtime/idempotency.py</code></td><td>基于 idempotency_key 查找已有任务，防止重复提交</td></tr>
+<tr><td>事件总线</td><td><code>runtime/event_bus.py</code></td><td>记录任务状态变更事件。7 种 event_type</td></tr>
+<tr><td>Provider 抽象</td><td><code>providers/base.py</code></td><td>ProviderProtocol 接口。chat() → ProviderResponse</td></tr>
+</tbody></table></div>
+</section>
+
+<!-- S2: 数据流 -->
+<section class="sec" id="flow"><div class="sh"><span class="sn">02</span><h2>数据流</h2></div>
+<div class="cg cg2">
+<div class="card" style="border-left:3px solid var(--ct)"><h3 style="color:var(--ct)">同步 execute（Serving）</h3>
+<pre style="font-size:.76rem;margin-top:6px">Client.execute()
+  → POST /api/v1/execute
+  → Service.submit()：创建任务
+  → 原子认领（atomic claim）
+  → Executor.run()：
+      构建 messages → Provider.chat()
+      → Parser.parse() → 记录 attempt+result+event
+  → 构建 ExecuteResponse 直接返回</pre>
+</div>
+<div class="card" style="border-left:3px solid var(--cb)"><h3 style="color:var(--cb)">异步 submit（Mining）</h3>
+<pre style="font-size:.76rem;margin-top:6px">Client.submit()
+  → POST /api/v1/tasks
+  → Idempotency 检查 → 创建任务
+  → 返回 task_id
+
+后台 Worker 循环：
+  → TaskManager.claim() 获取任务
+  → Executor.run() 执行（含重试）
+  → 持久化到数据库
+
+Client.get_result(task_id) 轮询获取</pre>
+</div>
+</div>
+</section>
+
+<!-- S3: 数据库 -->
+<section class="sec" id="db"><div class="sh"><span class="sn">03</span><h2>数据库设计（agent_llm_runtime）</h2></div>
+<div class="mets"><div class="met"><div class="met-v" style="color:var(--cv)">6</div><div class="met-l">张表</div></div><div class="met"><div class="met-v" style="color:var(--cv)">79</div><div class="met-l">测试用例</div></div><div class="met"><div class="met-v" style="color:var(--cv)">7</div><div class="met-l">事件类型</div></div></div>
+<div class="tw"><table><thead><tr><th>表</th><th>职责</th><th>关键列</th><th>写入模块</th></tr></thead><tbody>
+<tr><td><code>prompt_templates</code></td><td>Prompt 模板管理</td><td>template_key, version, system_prompt, user_prompt_template, output_schema</td><td>template_registry</td></tr>
+<tr><td><code>tasks</code></td><td>任务主表</td><td>caller_domain, pipeline_stage, status, priority, idempotency_key, attempt_count</td><td>task_manager</td></tr>
+<tr><td><code>requests</code></td><td>请求参数</td><td>task_id, provider, model, messages_json, params_json</td><td>executor</td></tr>
+<tr><td><code>attempts</code></td><td>每次调用尝试</td><td>task_id, attempt_no, raw_output, tokens, latency_ms, error_type</td><td>executor</td></tr>
+<tr><td><code>results</code></td><td>解析结果</td><td>task_id, parse_status, parsed_output_json, validation_errors</td><td>parser</td></tr>
+<tr><td><code>events</code></td><td>事件流水</td><td>task_id, event_type(7种), message, created_at</td><td>event_bus</td></tr>
+</tbody></table></div>
+<div class="co"><strong>审计链：</strong>每个 LLM 调用都有完整的 task → request → attempt → result → event 链路。可精确回溯任何一次调用的输入、输出、耗时、token 用量和错误信息。</div>
+</section>
+
+<!-- S4: 任务生命周期 -->
+<section class="sec" id="lifecycle"><div class="sh"><span class="sn">04</span><h2>任务生命周期</h2></div>
+<div class="dia"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center">
+<div class="fb" style="border-color:var(--ca);background:var(--wrn)"><div class="fv">queued</div></div><div class="fa">→</div>
+<div class="fb" style="border-color:var(--cb);background:#eff6ff"><div class="fv">running</div></div><div class="fa">→ ✓</div>
+<div class="fb" style="border-color:var(--ce);background:#ecfdf5"><div class="fv">succeeded</div></div>
+<div style="margin:0 8px;font-size:.82rem;color:var(--t3)">或</div>
+<div class="fb" style="border-color:var(--cr);background:#fff1f2"><div class="fv">failed</div></div><div class="fa">→ 重试</div>
+<div class="fb" style="border-color:var(--cs);background:#f5f5f5"><div class="fv">dead_letter</div></div>
+</div></div>
+<div class="tw"><table><thead><tr><th>状态</th><th>含义</th><th>转换条件</th></tr></thead><tbody>
+<tr><td><span class="b bv">queued</span></td><td>等待 Worker 认领</td><td>submit() 创建；failed 重试回此状态</td></tr>
+<tr><td><span class="b bb">running</span></td><td>Worker 正在执行</td><td>claim() 原子认领；设置 lease 过期时间</td></tr>
+<tr><td><span class="b be">succeeded</span></td><td>成功完成</td><td>Executor 完成且 parse_status=succeeded</td></tr>
+<tr><td><span class="b br">failed</span></td><td>本次尝试失败</td><td>Provider 错误或解析失败；未达 max_attempts 则回 queued</td></tr>
+<tr><td><span class="b ba">dead_letter</span></td><td>永久失败</td><td>attempt_count ≥ max_attempts（默认 3）</td></tr>
+<tr><td><span class="b bt">cancelled</span></td><td>手动取消</td><td>POST /api/v1/tasks/{id}/cancel</td></tr>
+</tbody></table></div>
+</section>
+
+<!-- S5: 双模式 -->
+<section class="sec" id="dual"><div class="sh"><span class="sn">05</span><h2>双模式调用</h2></div>
+<div class="cg cg2">
+<div class="card" style="border-left:3px solid var(--cb)"><h3>Mining 异步批量</h3><p>适合批量处理：section_summary、question_gen、entity_extract</p>
+<pre style="font-size:.76rem;margin-top:6px"># 批量提交
+task_ids = [await client.submit(
+    caller_domain="mining",
+    pipeline_stage="question_gen",
+    template_key="mining-question-gen",
+    input={"title": seg.title, "content": seg.text},
+    idempotency_key=f"seg-{seg.id}-qgen",
+) for seg in segments]
+
+# 批量轮询
+results = [await client.get_result(tid) for tid in task_ids]</pre>
+</div>
+<div class="card" style="border-left:3px solid var(--ct)"><h3>Serving 同步在线</h3><p>适合实时查询：query_rewrite、intent_extract、rerank</p>
+<pre style="font-size:.76rem;margin-top:6px">result = await client.execute(
+    caller_domain="serving",
+    pipeline_stage="query_rewrite",
+    template_key="serving-query-understanding",
+    input={"query": user_query},
+    expected_output_type="json_object",
+)
+rewritten = result["result"]["parsed_output"]</pre>
+</div>
+</div>
+</section>
+
+<!-- S6: 模板系统 -->
+<section class="sec" id="template"><div class="sh"><span class="sn">06</span><h2>模板系统</h2></div>
+<div class="dia"><div class="dia-t">模板解析流程</div>
+<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+<div class="fb p"><div class="fl">1</div><div class="fv">template_key</div></div><div class="fa">→</div>
+<div class="fb p"><div class="fl">2</div><div class="fv">加载模板</div></div><div class="fa">→</div>
+<div class="fb p"><div class="fl">3</div><div class="fv">safe_substitute</div></div><div class="fa">→</div>
+<div class="fb p"><div class="fl">4</div><div class="fv">构建 messages</div></div><div class="fa">→</div>
+<div class="fb p"><div class="fl">5</div><div class="fv">调用 Provider</div></div>
+</div></div>
+<div class="tw"><table><thead><tr><th>模板字段</th><th>说明</th><th>示例</th></tr></thead><tbody>
+<tr><td><code>system_prompt</code></td><td>系统角色定义</td><td>"你是知识挖掘专家..."</td></tr>
+<tr><td><code>user_prompt_template</code></td><td>用户提示模板（$variable 占位）</td><td>"基于以下内容生成问题：$content"</td></tr>
+<tr><td><code>expected_output_type</code></td><td>输出格式</td><td>json_object / json_array / text</td></tr>
+<tr><td><code>output_schema_json</code></td><td>JSON Schema 校验规则</td><td>{"type":"object","required":["questions"]}</td></tr>
+<tr><td><code>status</code></td><td>模板状态</td><td>draft → active → archived</td></tr>
+</tbody></table></div>
+</section>
+
+<!-- S7: 重试 -->
+<section class="sec" id="retry"><div class="sh"><span class="sn">07</span><h2>重试与容错</h2></div>
+<div class="tw"><table><thead><tr><th>错误类型</th><th>来源</th><th>处理</th></tr></thead><tbody>
+<tr><td><span class="b ba">timeout</span></td><td>Provider 响应超时</td><td>重试，指数退避</td></tr>
+<tr><td><span class="b br">connection_error</span></td><td>网络不可达</td><td>重试，指数退避</td></tr>
+<tr><td><span class="b bb">rate_limited</span></td><td>429 Too Many Requests</td><td>重试，更长退避</td></tr>
+<tr><td><span class="b ba">server_error</span></td><td>5xx</td><td>重试，指数退避</td></tr>
+<tr><td><span class="b br">client_error</span></td><td>4xx（非 429）</td><td>不重试，直接 failed</td></tr>
+</tbody></table></div>
+<div class="co"><strong>退避公式：</strong><code>delay = base ^ attempt_no</code>，上限 <code>backoff_max</code>。默认 3 次重试。所有尝试都记录在 attempts 表中，包括 token 用量和延迟。</div>
+<div class="co" style="border-color:var(--ce);background:#ecfdf5"><strong>降级策略：</strong>同步执行超时不直接失败，任务保持 running 状态，由 lease_recovery 机制后续处理。避免客户端超时导致任务丢失。</div>
+</section>
+
+<!-- S8: API -->
+<section class="sec" id="api"><div class="sh"><span class="sn">08</span><h2>API 接口</h2></div>
+<div class="tw"><table><thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead><tbody>
+<tr><td>GET</td><td><code>/health</code></td><td>健康检查</td></tr>
+<tr><td>POST</td><td><code>/api/v1/tasks</code></td><td>异步提交任务</td></tr>
+<tr><td>POST</td><td><code>/api/v1/execute</code></td><td>同步执行（等结果）</td></tr>
+<tr><td>GET</td><td><code>/api/v1/tasks/{id}</code></td><td>查任务详情</td></tr>
+<tr><td>POST</td><td><code>/api/v1/tasks/{id}/cancel</code></td><td>取消任务</td></tr>
+<tr><td>GET</td><td><code>/api/v1/tasks/{id}/result</code></td><td>查解析结果</td></tr>
+<tr><td>GET</td><td><code>/api/v1/tasks/{id}/attempts</code></td><td>查所有尝试</td></tr>
+<tr><td>GET</td><td><code>/api/v1/tasks/{id}/events</code></td><td>查事件流水</td></tr>
+<tr><td>GET</td><td><code>/dashboard</code></td><td>Web 监控看板</td></tr>
+<tr><td>GET</td><td><code>/dashboard/api/stats</code></td><td>统计 JSON</td></tr>
+</tbody></table></div>
+</section>
+
+<!-- S9: v1.2 -->
+<section class="sec" id="v12"><div class="sh"><span class="sn">09</span><h2>v1.2 演进方向</h2></div>
+<div class="tw"><table><thead><tr><th>方向</th><th>当前 v1.1</th><th>v1.2 目标</th><th>优先级</th></tr></thead><tbody>
+<tr><td><strong>批量 API</strong></td><td>逐个 submit</td><td>一次提交多个任务，减少 HTTP 往返</td><td><span class="b ba">HIGH</span></td></tr>
+<tr><td><strong>流式输出</strong></td><td>完整响应</td><td>SSE streaming，逐 token 返回</td><td><span class="b ba">HIGH</span></td></tr>
+<tr><td><strong>模型路由</strong></td><td>单一 model 配置</td><td>按 pipeline_stage 自动路由到不同模型</td><td><span class="b bb">MEDIUM</span></td></tr>
+<tr><td><strong>多 Worker</strong></td><td>单 Worker 进程</td><td>多 Worker + 连接池，提高并发</td><td><span class="b bb">MEDIUM</span></td></tr>
+<tr><td><strong>成本统计</strong></td><td>token 记录</td><td>用量聚合 + 费用追踪 + 预算告警</td><td><span class="b bb">MEDIUM</span></td></tr>
+<tr><td><strong>Prometheus</strong></td><td>Web 看板</td><td>暴露 /metrics，接入监控体系</td><td><span class="b bt">LOW</span></td></tr>
+<tr><td><strong>任务依赖</strong></td><td>无</td><td>任务间前置依赖关系</td><td><span class="b bt">LOW</span></td></tr>
+</tbody></table></div>
+</section>
+
+<footer><div>LLM Service Architecture — Internal Technical Document</div><div>2026-04-23</div></footer>
+</div></body></html>

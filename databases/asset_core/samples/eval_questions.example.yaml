@@ -1,0 +1,5 @@
+# eval_questions.example.yaml
+# 评测集格式示例，M7 填充真实问题
+# 格式参考，不是正式评测集
+
+questions: []

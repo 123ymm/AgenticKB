@@ -1,0 +1,85 @@
+host: "0.0.0.0"
+port: 8900
+pool_max: 20
+provider:
+  active_model: "deepseek-chat"
+  headers: {}
+  timeout: 30
+  bypass_proxy: false
+  models:
+    deepseek-chat:
+      model: "deepseek-chat"
+      base_url: "https://api.deepseek.com/chat/completions"
+      api_key: "sk-df519a8111ea4aee858f7f17517f2177"
+    glm-4-flash:
+      model: "glm-4-flash"
+      base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+      api_key: "bec7cc02fc88529bee532a07070f4e80.PbObZYZROyxvmtfq"
+    glm-4.5-air:
+      provider_type: "anthropic"
+      model: "glm-4.5-air"
+      base_url: "https://open.bigmodel.cn/api/anthropic/v1/messages"
+      api_key: "bec7cc02fc88529bee532a07070f4e80.PbObZYZROyxvmtfq"
+      api_version: "2023-06-01"
+      timeout: 60
+      bypass_proxy: false
+      headers: {}
+    glm-4.5:
+      provider_type: "anthropic"
+      model: "glm-4.5"
+      base_url: "https://open.bigmodel.cn/api/anthropic/v1/messages"
+      api_key: "bec7cc02fc88529bee532a07070f4e80.PbObZYZROyxvmtfq"
+      api_version: "2023-06-01"
+      timeout: 60
+      bypass_proxy: false
+      headers: {}
+    glm-4.7:
+      provider_type: "anthropic"
+      model: "glm-4.7"
+      base_url: "https://open.bigmodel.cn/api/anthropic/v1/messages"
+      api_key: "bec7cc02fc88529bee532a07070f4e80.PbObZYZROyxvmtfq"
+      api_version: "2023-06-01"
+      timeout: 60
+      bypass_proxy: false
+      headers: {}
+    glm-5.1:
+      provider_type: "anthropic"
+      model: "glm-5.1"
+      base_url: "https://open.bigmodel.cn/api/anthropic/v1/messages"
+      api_key: "bec7cc02fc88529bee532a07070f4e80.PbObZYZROyxvmtfq"
+      api_version: "2023-06-01"
+      timeout: 60
+      bypass_proxy: false
+      headers: {}
+embedding:
+  base_url: "https://open.bigmodel.cn/api/paas/v4/embeddings"
+  api_key: "bec7cc02fc88529bee532a07070f4e80.PbObZYZROyxvmtfq"
+  model: "embedding-3"
+  dimensions: 1024
+  timeout: 60
+  bypass_proxy: false
+  headers: {}
+rerank:
+  base_url: "https://open.bigmodel.cn/api/paas/v4/rerank"
+  api_key: "bec7cc02fc88529bee532a07070f4e80.PbObZYZROyxvmtfq"
+  model: "rerank-pro"
+  timeout: 60
+  bypass_proxy: false
+  headers: {}
+worker:
+  concurrency: 6
+  poll_interval: 1.0
+persist_writer:
+  queue_size: 10000
+  batch_size: 20
+  flush_interval: 0.5
+  writer_count: 1
+task:
+  default_max_attempts: 3
+  retry_backoff_base: 8.0
+  retry_backoff_max: 120.0
+  execute_timeout: 60
+  lease_duration: 300
+  lease_recovery_interval: 30.0
+template:
+  cache_ttl: 300.0
