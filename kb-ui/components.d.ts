@@ -47,6 +47,8 @@ declare module 'vue' {
     Header: typeof import('./src/components/layout/Header.vue')['default']
     JsonSchemaParamForm: typeof import('./src/components/workflow/JsonSchemaParamForm.vue')['default']
     LineChart: typeof import('./src/components/charts/LineChart.vue')['default']
+    MiningOperatorNode: typeof import('./src/components/mining/workflow/MiningOperatorNode.vue')['default']
+    MiningOperatorPalette: typeof import('./src/components/mining/workflow/MiningOperatorPalette.vue')['default']
     OntologyDiGraph: typeof import('./src/components/charts/OntologyDiGraph.vue')['default']
     OperatorNode: typeof import('./src/components/paradigm/OperatorNode.vue')['default']
     OperatorPalette: typeof import('./src/components/paradigm/OperatorPalette.vue')['default']
@@ -65,6 +67,8 @@ declare module 'vue' {
     StatusBadge: typeof import('./src/components/common/StatusBadge.vue')['default']
     SystemConfigTab: typeof import('./src/components/settings/SystemConfigTab.vue')['default']
     WorkflowOperatorNodeBase: typeof import('./src/components/workflow/WorkflowOperatorNodeBase.vue')['default']
+    WorkflowValidationPanel: typeof import('./src/components/mining/workflow/WorkflowValidationPanel.vue')['default']
+    WorkflowVersionPreview: typeof import('./src/components/mining/workflow/WorkflowVersionPreview.vue')['default']
     YamlEditor: typeof import('./src/components/common/YamlEditor.vue')['default']
   }
   export interface GlobalDirectives {

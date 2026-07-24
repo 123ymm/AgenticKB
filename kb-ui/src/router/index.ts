@@ -24,6 +24,17 @@ const router = createRouter({
           component: () => import('@/views/mining/CreateRunView.vue'),
         },
         {
+          path: 'mining/workflows',
+          name: 'mining-workflows',
+          component: () => import('@/views/mining/WorkflowListView.vue'),
+        },
+        {
+          path: 'mining/workflows/:id',
+          name: 'mining-workflow-editor',
+          component: () => import('@/views/mining/WorkflowEditorView.vue'),
+          props: true,
+        },
+        {
           path: 'mining/:runId',
           name: 'mining-detail',
           component: () => import('@/views/mining/RunDetailView.vue'),
