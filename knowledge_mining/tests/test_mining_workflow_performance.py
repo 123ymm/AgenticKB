@@ -20,7 +20,7 @@ from knowledge_mining.tests.test_mining_document_executor import (
 
 DOCUMENT_COUNT = 100
 MAX_WORKERS = 4
-OPERATOR_LATENCY_SECONDS = 0.002
+OPERATOR_LATENCY_SECONDS = 0.005
 
 
 def deterministic_work(state):
@@ -73,9 +73,13 @@ def test_workflow_throughput_and_live_document_bound() -> None:
 
     measure_legacy(states)
     measure_workflow(states)
-    legacy_samples = [measure_legacy(states) for _ in range(3)]
-    workflow_samples = [measure_workflow(states)[0] for _ in range(3)]
-    _, final_result = measure_workflow(states)
+    legacy_samples = []
+    workflow_samples = []
+    final_result = None
+    for _ in range(3):
+        legacy_samples.append(measure_legacy(states))
+        workflow_elapsed, final_result = measure_workflow(states)
+        workflow_samples.append(workflow_elapsed)
 
     legacy_median = median(legacy_samples)
     workflow_median = median(workflow_samples)
@@ -84,5 +88,6 @@ def test_workflow_throughput_and_live_document_bound() -> None:
         "workflow_median": workflow_median,
         "ratio": workflow_median / legacy_median,
     }
+    assert final_result is not None
     assert final_result.max_active_documents <= MAX_WORKERS
     assert len(final_result.outcomes) == DOCUMENT_COUNT
