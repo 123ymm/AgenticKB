@@ -18,7 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from knowledge_mining.mining.api.domain_pools import DomainPoolManager
 from knowledge_mining.mining.infra.pg_config import MiningDbConfig
-from knowledge_mining.mining.infra.pg_schema import ensure_schema
+from knowledge_mining.mining.infra.pg_schema import ensure_primary_schema
 from knowledge_mining.mining.api.routes.health import router as health_router
 from knowledge_mining.mining.api.routes.runs import router as runs_router
 from knowledge_mining.mining.api.routes.knowledge import router as knowledge_router
@@ -26,9 +26,14 @@ from knowledge_mining.mining.api.routes.config import router as config_router
 from knowledge_mining.mining.api.routes.builds import router as builds_router
 from knowledge_mining.mining.api.routes.uploads import router as uploads_router
 from knowledge_mining.mining.api.routes.ontology import router as ontology_router
+from knowledge_mining.mining.api.routes.workflows import router as workflows_router
 from knowledge_mining.mining.api.routes.document_lifecycle import (
     router as document_lifecycle_router,
 )
+from knowledge_mining.mining.workflow.repositories.global_workflow_repository import (
+    GlobalWorkflowRepository,
+)
+from knowledge_mining.mining.workflow.service import WorkflowService
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +44,7 @@ async def lifespan(app: FastAPI):
     cfg = MiningDbConfig()
 
     # Ensure database + schema (sync, runs once at startup)
-    ensure_schema(cfg)
+    ensure_primary_schema(cfg)
 
     pool = AsyncConnectionPool(
         cfg.conninfo,
@@ -56,6 +61,10 @@ async def lifespan(app: FastAPI):
     await pool.open()
     app.state.pg_pool = pool
     app.state.db_config = cfg
+
+    workflow_repo = GlobalWorkflowRepository(pool)
+    app.state.workflow_service = WorkflowService(workflow_repo)
+    await app.state.workflow_service.ensure_system_workflows()
 
     # Domain-specific async/sync pools are opened lazily by API dependencies.
     app.state.domain_pools = DomainPoolManager(cfg)
@@ -87,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(uploads_router)
     app.include_router(ontology_router)
     app.include_router(document_lifecycle_router)
+    app.include_router(workflows_router)
 
     # Allow cross-origin requests from the dev server and any local UI.
     app.add_middleware(
