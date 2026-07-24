@@ -337,6 +337,7 @@ class DocumentExecutor:
 
     def _run_id(self) -> str:
         value = self.runtime.manifest.get("runId") or self.runtime.manifest.get("run_id")
+        value = value or getattr(self.runtime.services, "run_id", None)
         if not value:
             raise ValueError("Workflow Manifest has no Run identity")
         return str(value)

@@ -119,7 +119,7 @@ def _create_dbs(
     return asset_db, runtime_db
 
 
-def run(
+def _run_legacy(
     input_path: str | Path,
     *,
     db_config: MiningDbConfig | None = None,
@@ -248,7 +248,7 @@ def run(
         runtime_db.close()
 
 
-def publish(
+def _publish_legacy(
     run_id: str,
     *,
     domain: str = "cloud_core_network",
@@ -304,7 +304,7 @@ def publish(
         runtime_db.close()
 
 
-def resume(
+def _resume_legacy(
     run_id: str,
     *,
     domain: str = "cloud_core_network",
@@ -393,6 +393,555 @@ def resume(
             False, publish_on_partial_failure, profile,
             channel=run_data["channel"],
         )
+    finally:
+        asset_db.close()
+        runtime_db.close()
+
+
+def _persisted_execution_engine(
+    *,
+    run_id: str,
+    domain: str,
+    db_config: MiningDbConfig | None,
+) -> str:
+    """Read the immutable engine from the Domain Run, never deployment config."""
+    registry_entry = resolve_domain(domain)
+    resolved_db = resolve_domain_database(
+        registry_entry, db_config or MiningDbConfig()
+    )
+    asset_db, runtime_db = _create_dbs(resolved_db)
+    try:
+        row = runtime_db.get_run(run_id)
+        if row is None:
+            raise ValueError(f"Run {run_id} not found")
+        engine = str(row.get("execution_engine") or "legacy")
+        if engine not in {"legacy", "workflow"}:
+            raise ValueError(f"Run {run_id} has invalid execution_engine {engine!r}")
+        return engine
+    finally:
+        asset_db.close()
+        runtime_db.close()
+
+
+def run(
+    input_path: str | Path,
+    *,
+    db_config: MiningDbConfig | None = None,
+    batch_params: BatchParams | None = None,
+    phase1_only: bool = False,
+    publish_on_partial_failure: bool = False,
+    llm_base_url: str | None = None,
+    max_workers: int | None = None,
+    domain: str | None = None,
+    domain_pack: str | None = None,
+    channel: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    selected_domain = domain or domain_pack
+    if selected_domain is None:
+        from knowledge_mining.mining.infra.mining_config import MiningConfig
+
+        selected_domain = MiningConfig().domain
+    if run_id is not None and _persisted_execution_engine(
+        run_id=run_id,
+        domain=selected_domain,
+        db_config=db_config,
+    ) == "workflow":
+        return _run_workflow_job(
+            input_path,
+            db_config=db_config,
+            batch_params=batch_params,
+            phase1_only=phase1_only,
+            publish_on_partial_failure=publish_on_partial_failure,
+            llm_base_url=llm_base_url,
+            max_workers=max_workers,
+            domain=selected_domain,
+            channel=channel,
+            run_id=run_id,
+        )
+    return _run_legacy(
+        input_path,
+        db_config=db_config,
+        batch_params=batch_params,
+        phase1_only=phase1_only,
+        publish_on_partial_failure=publish_on_partial_failure,
+        llm_base_url=llm_base_url,
+        max_workers=max_workers,
+        domain=domain,
+        domain_pack=domain_pack,
+        channel=channel,
+        run_id=run_id,
+    )
+
+
+def publish(
+    run_id: str,
+    *,
+    domain: str = "cloud_core_network",
+    db_config: MiningDbConfig | None = None,
+    channel: str | None = None,
+    released_by: str | None = None,
+) -> dict[str, Any]:
+    if _persisted_execution_engine(
+        run_id=run_id, domain=domain, db_config=db_config
+    ) == "workflow":
+        return _publish_workflow_job(
+            run_id,
+            domain=domain,
+            db_config=db_config,
+            channel=channel,
+            released_by=released_by,
+        )
+    return _publish_legacy(
+        run_id,
+        domain=domain,
+        db_config=db_config,
+        channel=channel,
+        released_by=released_by,
+    )
+
+
+def resume(
+    run_id: str,
+    *,
+    domain: str = "cloud_core_network",
+    db_config: MiningDbConfig | None = None,
+    publish_on_partial_failure: bool = False,
+) -> dict[str, Any]:
+    if _persisted_execution_engine(
+        run_id=run_id, domain=domain, db_config=db_config
+    ) == "workflow":
+        return _resume_workflow_job(
+            run_id,
+            domain=domain,
+            db_config=db_config,
+            publish_on_partial_failure=publish_on_partial_failure,
+        )
+    return _resume_legacy(
+        run_id,
+        domain=domain,
+        db_config=db_config,
+        publish_on_partial_failure=publish_on_partial_failure,
+    )
+
+
+def _run_workflow_job(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return _execute_workflow_job("execute", *args, **kwargs)
+
+
+def _resume_workflow_job(
+    run_id: str, **kwargs: Any
+) -> dict[str, Any]:
+    return _execute_workflow_job("resume", None, run_id=run_id, **kwargs)
+
+
+def _publish_workflow_job(
+    run_id: str, **kwargs: Any
+) -> dict[str, Any]:
+    kwargs.pop("released_by", None)
+    return _execute_workflow_job("publish", None, run_id=run_id, **kwargs)
+
+
+class _WorkflowJobServices:
+    def __init__(
+        self,
+        *,
+        action: str,
+        run_id: str,
+        asset_db: AssetCoreDB,
+        runtime_db: MiningRuntimeDB,
+        tracker: Any,
+        profile: DomainProfile,
+        channel: str,
+        input_path: Path,
+        batch_params: BatchParams,
+        llm_base_url: str | None,
+        max_workers: int,
+        execution_mode: str,
+        manifest: dict[str, Any],
+    ) -> None:
+        from types import SimpleNamespace
+
+        from knowledge_mining.mining.infra.ontology_store import GraphStore, OntologyStore
+        from knowledge_mining.mining.workflow.handler_registry import builtin_handler_registry
+
+        self.action = action
+        self.run_id = run_id
+        self.asset_db = asset_db
+        self.runtime_db = runtime_db
+        self.tracker = tracker
+        self.profile = profile
+        self.channel = channel
+        self.input_path = input_path
+        self.batch_params = batch_params
+        self.llm_base_url = llm_base_url
+        self.max_workers = max_workers
+        self.execution_mode = execution_mode
+        self.manifest = manifest
+        self.handler_registry = builtin_handler_registry()
+        self.input_spec = {
+            "inputPath": str(input_path),
+            "uploadBatchId": (manifest.get("runtimeBinding") or {}).get(
+                "uploadBatchId"
+            ),
+        }
+        self.ontology_store = OntologyStore(asset_db.pool)
+        self.graph_store = GraphStore(asset_db.pool)
+        llm = _init_llm(
+            llm_base_url,
+            profile,
+            knowledge_domain=profile.domain_id,
+            ontology_store=self.ontology_store,
+        ) or {}
+        has_ontology = (
+            (manifest.get("runtimeBinding") or {}).get("ontologyApplicable")
+            is True
+        )
+        self.pipeline_config = PipelineConfig(
+            domain=profile.domain_id,
+            parser_factory=create_parser,
+            segmenter=DefaultSegmenter(),
+            enricher=llm.get("enricher"),
+            entity_extractor=llm.get("entity_extractor") if has_ontology else None,
+            resolver=_init_resolver(asset_db, profile) if has_ontology else None,
+            entity_relation_builder=(
+                _init_relation_builder(asset_db, profile)
+                if has_ontology
+                else None
+            ),
+            question_generator=llm.get("question_generator"),
+            embedding_generator=_init_embedding(
+                llm_base_url, knowledge_domain=profile.domain_id
+            ),
+            discourse_relation_builder=llm.get("discourse_relation_builder"),
+            contextualizer=llm.get("contextualizer"),
+            domain_profile=profile,
+            asset_db=asset_db,
+            runtime_db=runtime_db,
+            tracker=tracker,
+            batch_id=None,
+        )
+        self.document_persist_lock = None
+        self.initial_global_capabilities = frozenset()
+        self._compat = SimpleNamespace()
+
+    def input_ingest(self, input_spec: Any, runtime: Any):
+        del input_spec, runtime
+        return self._prepare_document_states()
+
+    def count_pending_entity_mentions(self, run_id: str) -> int:
+        return workflow_count_pending_entity_mentions(self.asset_db, run_id)
+
+    def count_pending_ontology_candidates(self, domain: str) -> int:
+        return workflow_count_pending_ontology_candidates(self.asset_db, domain)
+
+    def run_ontology_induction(self, run_id: str, node_id: str):
+        return workflow_run_induction_strict(
+            self.asset_db,
+            run_id=run_id,
+            node_id=node_id,
+            profile=self.profile,
+            llm_base_url=self.llm_base_url,
+        )
+
+    def write_graph_strict(self, run_id: str):
+        return workflow_write_graph_strict(
+            self.asset_db, run_id=run_id, profile=self.profile
+        )
+
+    def finalize_mining(
+        self,
+        run_id: str,
+        *,
+        execution_mode: str,
+        publish_on_partial_failure: bool,
+    ):
+        return workflow_finalize_mining_strict(
+            self.asset_db,
+            self.runtime_db,
+            self.tracker,
+            run_id=run_id,
+            profile=self.profile,
+            channel=self.channel,
+            execution_mode=execution_mode,
+            publish_on_partial_failure=publish_on_partial_failure,
+        )
+
+    def _prepare_document_states(self):
+        from knowledge_mining.mining.workflow.core import DocumentState
+
+        run_data = self.runtime_db.get_run(self.run_id) or {}
+        if self.action == "execute":
+            if not self.tracker.set_run_phase(
+                self.run_id, self.profile.domain_id, "ingest"
+            ):
+                return ()
+        docs, ingest_summary = ingest_directory(
+            self.input_path, self.batch_params
+        )
+        batch_id = run_data.get("source_batch_id")
+        if not batch_id:
+            batch_id = (
+                (self.manifest.get("runtimeBinding") or {}).get("uploadBatchId")
+                or uuid.uuid4().hex
+            )
+            self.asset_db.upsert_source_batch(
+                batch_id=batch_id,
+                batch_code=f"batch-{self.run_id[:8]}",
+                source_type=self.batch_params.default_source_type,
+                domain=self.profile.domain_id,
+                description=f"Mining run {self.run_id}",
+            )
+            self.runtime_db._execute(
+                "UPDATE mining_runs SET source_batch_id = %s WHERE id = %s AND domain = %s",
+                (batch_id, self.run_id, self.profile.domain_id),
+            )
+        self.pipeline_config.batch_id = batch_id
+
+        existing_rows = {
+            row["document_key"]: row
+            for row in self.runtime_db.get_run_documents(self.run_id)
+        }
+        states = []
+        for doc in docs:
+            doc_key = f"doc:/{doc.relative_path}"
+            lifecycle = self.asset_db.get_document_lifecycle_state(
+                domain=self.profile.domain_id,
+                channel=self.channel,
+                document_key=doc_key,
+                normalized_content_hash=doc.normalized_content_hash,
+            )
+            lifecycle_action = decide_document_lifecycle_action(
+                lifecycle,
+                normalized_content_hash=doc.normalized_content_hash,
+            )
+            action = (
+                "SKIP"
+                if lifecycle_action in {"SKIP", "RESTORE"}
+                else lifecycle_action
+            )
+            existing = existing_rows.get(doc_key)
+            if existing is None:
+                run_document_id = uuid.uuid4().hex
+                metadata = {"file_size": doc.file_size}
+                if lifecycle_action == "SKIP" and lifecycle:
+                    metadata.update(
+                        source_batch_id=lifecycle.get("active_source_batch_id"),
+                        skip_reason="unchanged",
+                    )
+                elif lifecycle_action == "RESTORE":
+                    metadata.update(
+                        lifecycle_action="RESTORE",
+                        source_batch_id=batch_id,
+                        skip_reason="restored",
+                    )
+                self.tracker.register_document(MiningRunDocumentData(
+                    id=run_document_id,
+                    run_id=self.run_id,
+                    document_key=doc_key,
+                    raw_content_hash=doc.raw_content_hash,
+                    normalized_content_hash=doc.normalized_content_hash,
+                    action=action,
+                    metadata_json=metadata,
+                ))
+                if lifecycle_action == "SKIP" and lifecycle:
+                    self.tracker.commit_document(
+                        run_document_id,
+                        lifecycle["document_id"],
+                        lifecycle["active_snapshot_id"],
+                    )
+                elif lifecycle_action == "RESTORE" and lifecycle:
+                    snapshot_id = lifecycle["historical_snapshot_id"]
+                    self.asset_db.insert_snapshot_link(
+                        domain=self.profile.domain_id,
+                        link_id=uuid.uuid4().hex,
+                        document_id=lifecycle["document_id"],
+                        document_snapshot_id=snapshot_id,
+                        source_batch_id=batch_id,
+                        relative_path=doc.relative_path,
+                        source_uri=doc.source_uri,
+                        title=doc.title,
+                        scope_json=doc.scope_json,
+                        tags_json=doc.tags_json,
+                        metadata_json=doc.metadata_json,
+                    )
+                    self.tracker.commit_document(
+                        run_document_id, lifecycle["document_id"], snapshot_id
+                    )
+                else:
+                    self.tracker.start_document(run_document_id)
+            else:
+                run_document_id = existing["id"]
+                action = existing.get("action") or action
+                if existing.get("status") != "committed":
+                    self.tracker.start_document(run_document_id)
+
+            document_profile = DocumentProfile(
+                document_key=doc_key,
+                source_type=doc.source_type or self.batch_params.default_source_type,
+                document_type=(
+                    doc.document_type or self.batch_params.default_document_type
+                ),
+                scope_json=doc.scope_json,
+                tags_json=doc.tags_json,
+                title=doc.title,
+            )
+            existing_doc = None
+            if lifecycle:
+                existing_doc = {
+                    "id": lifecycle["document_id"],
+                    "domain": lifecycle["document_domain"],
+                    "document_key": lifecycle["document_key"],
+                }
+            states.append(DocumentState(
+                run_document_id,
+                doc_key,
+                DocumentContext(
+                    raw_file=doc,
+                    profile=document_profile,
+                    run_document_id=run_document_id,
+                    action=action,
+                    existing_doc=existing_doc,
+                ),
+            ))
+        if self.action == "execute":
+            self.tracker.finish_ingest(
+                self.run_id,
+                self.profile.domain_id,
+                len(docs),
+                ingest_summary,
+            )
+        self.runtime_db.commit()
+        return tuple(states)
+
+
+def _execute_workflow_job(
+    action: str,
+    input_path: str | Path | None,
+    *,
+    run_id: str,
+    db_config: MiningDbConfig | None = None,
+    batch_params: BatchParams | None = None,
+    phase1_only: bool = False,
+    publish_on_partial_failure: bool = False,
+    llm_base_url: str | None = None,
+    max_workers: int | None = None,
+    domain: str | None = None,
+    channel: str | None = None,
+    **_: Any,
+) -> dict[str, Any]:
+    from knowledge_mining.mining.infra.mining_config import MiningConfig
+    from knowledge_mining.mining.workflow.core import OperatorRuntimeContext
+    from knowledge_mining.mining.workflow.repositories.domain_run_repository import (
+        DomainRunRepository,
+    )
+    from knowledge_mining.mining.workflow.runtime import MiningWorkflowRuntime
+
+    config = MiningConfig()
+    domain = domain or config.domain
+    registry_entry = resolve_domain(domain)
+    resolved = resolve_domain_database(
+        registry_entry, db_config or MiningDbConfig()
+    )
+    asset_db, runtime_db = _create_dbs(resolved)
+    tracker = RuntimeTracker(runtime_db)
+    try:
+        run_data = runtime_db.get_run(run_id)
+        if run_data is None:
+            raise ValueError(f"Run {run_id} not found")
+        if (run_data.get("execution_engine") or "legacy") != "workflow":
+            raise ValueError(f"Run {run_id} is not a Workflow Run")
+        manifest = run_data.get("workflow_manifest_json")
+        if not isinstance(manifest, dict):
+            raise ValueError(f"Run {run_id} has no frozen Workflow Manifest")
+        binding = manifest.get("runtimeBinding") or {}
+        frozen_domain = str(binding.get("domain") or run_data.get("domain") or domain)
+        if frozen_domain != domain:
+            raise ValueError(f"Run {run_id} belongs to another domain")
+        frozen_channel = str(binding.get("channel") or run_data.get("channel") or channel or "prod")
+        frozen_input = Path(run_data.get("input_path") or input_path or "")
+        overrides = manifest.get("runOverrides") or {}
+        workers = int(overrides.get("maxWorkers") or max_workers or config.max_workers)
+        execution_mode = str(
+            overrides.get("executionMode")
+            or ("assets_only" if phase1_only else "publish")
+        )
+        partial = bool(
+            overrides.get("publishOnPartialFailure", publish_on_partial_failure)
+        )
+        if action == "resume" and run_data.get("status") == "awaiting_review":
+            if not tracker.resume_running(
+                run_id,
+                subloop_stage=run_data.get("subloop_stage"),
+                domain=frozen_domain,
+            ):
+                current = runtime_db.get_run(run_id) or {}
+                return {
+                    "run_id": run_id,
+                    "status": current.get("status", "cancelled"),
+                }
+            runtime_db.commit()
+        profile = load_domain_pack(frozen_domain)
+        repository = DomainRunRepository(asset_db.pool)
+        services = _WorkflowJobServices(
+            action=action,
+            run_id=run_id,
+            asset_db=asset_db,
+            runtime_db=runtime_db,
+            tracker=tracker,
+            profile=profile,
+            channel=frozen_channel,
+            input_path=frozen_input,
+            batch_params=batch_params or BatchParams(),
+            llm_base_url=llm_base_url or config.llm_service_url,
+            max_workers=workers,
+            execution_mode=execution_mode,
+            manifest=manifest,
+        )
+        context = OperatorRuntimeContext(
+            domain=frozen_domain,
+            channel=frozen_channel,
+            domain_profile=profile,
+            ontology_version_id=binding.get("ontologyVersionId"),
+            asset_repository=asset_db,
+            runtime_repository=repository,
+            tracker=tracker,
+            services=services,
+            publish_lock_provider=_domain_publish_transaction,
+            cancellation_check=lambda: (
+                (runtime_db.get_run(run_id) or {}).get("status") == "cancelled"
+            ),
+            manifest=manifest,
+        )
+        runtime = MiningWorkflowRuntime(context, run_id=run_id)
+        result = getattr(runtime, action)()
+        if result.status == "awaiting_review":
+            runtime_db.update_run_status(
+                run_id,
+                "awaiting_review",
+                subloop_stage=result.paused_at,
+                current_stage="review",
+                domain=frozen_domain,
+                expected_statuses=("queued", "running", "awaiting_review"),
+            )
+            runtime_db.commit()
+        return {
+            "run_id": run_id,
+            "status": result.status,
+            "subloop_stage": result.paused_at,
+            "capabilities": sorted(result.capabilities),
+            "publish_on_partial_failure": partial,
+        }
+    except Exception as exc:
+        row = runtime_db.get_run(run_id) or {}
+        if row.get("status") != "cancelled":
+            tracker.fail_run(
+                run_id,
+                str(exc)[:500],
+                current_stage=row.get("current_stage") or "mining",
+                domain=row.get("domain") or domain,
+            )
+        raise
     finally:
         asset_db.close()
         runtime_db.close()

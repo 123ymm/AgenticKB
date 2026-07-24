@@ -8,6 +8,7 @@ from ..operators.options import EmptyOptions
 
 def _run_id(runtime: Any) -> str:
     value = runtime.manifest.get("runId") or runtime.manifest.get("run_id")
+    value = value or getattr(runtime.services, "run_id", None)
     if not value:
         raise ValueError("Workflow Manifest has no Run identity")
     return str(value)

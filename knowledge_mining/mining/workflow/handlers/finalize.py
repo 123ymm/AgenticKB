@@ -29,6 +29,7 @@ def mining_finalize_handler(
             "Cannot finalize before capabilities: " + ", ".join(sorted(missing))
         )
     run_id = runtime.manifest.get("runId") or runtime.manifest.get("run_id")
+    run_id = run_id or getattr(runtime.services, "run_id", None)
     if not run_id:
         raise ValueError("Workflow Manifest has no Run identity")
     execution_mode = getattr(runtime.services, "execution_mode", "publish")
