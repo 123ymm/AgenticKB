@@ -5,10 +5,17 @@ cleanup are refused unless the configured database name ends with ``_test``.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
+import pytest_asyncio
 
 from knowledge_mining.mining.infra.pg_config import MiningDbConfig
-from knowledge_mining.mining.infra.pg_schema import ensure_schema
+from knowledge_mining.mining.infra.pg_schema import (
+    ensure_domain_schema,
+    ensure_primary_schema,
+    ensure_schema,
+)
 
 
 def _assert_disposable_database(db_config) -> None:
@@ -25,6 +32,50 @@ def _assert_disposable_database(db_config) -> None:
 def db_config():
     """Load PG config once per test session."""
     return MiningDbConfig()
+
+
+@pytest.fixture(scope="session")
+def control_db_config(db_config):
+    """Explicit alias for the global Workflow Control database."""
+
+    _assert_disposable_database(db_config)
+    return db_config
+
+
+@pytest.fixture(scope="session")
+def domain_db_config(control_db_config):
+    """Build a distinct disposable Domain database config for isolation tests."""
+
+    domain_name = os.environ.get("MINING_TEST_DOMAIN_PG_DBNAME", "").strip()
+    if not domain_name:
+        pytest.skip("MINING_TEST_DOMAIN_PG_DBNAME is required for PostgreSQL acceptance")
+    config = MiningDbConfig(
+        pg_host=os.environ.get(
+            "MINING_TEST_DOMAIN_PG_HOST", control_db_config.pg_host
+        ),
+        pg_port=int(os.environ.get(
+            "MINING_TEST_DOMAIN_PG_PORT", control_db_config.pg_port
+        )),
+        pg_dbname=domain_name,
+        pg_user=os.environ.get(
+            "MINING_TEST_DOMAIN_PG_USER", control_db_config.pg_user
+        ),
+        pg_password=os.environ.get(
+            "MINING_TEST_DOMAIN_PG_PASSWORD", control_db_config.pg_password
+        ),
+        pg_sslmode=os.environ.get(
+            "MINING_TEST_DOMAIN_PG_SSLMODE", control_db_config.pg_sslmode
+        ),
+        pg_gssencmode=os.environ.get(
+            "MINING_TEST_DOMAIN_PG_GSSENCMODE", control_db_config.pg_gssencmode
+        ),
+        pg_pool_min=1,
+        pg_pool_max=2,
+    )
+    _assert_disposable_database(config)
+    if config.pg_dbname.lower() == control_db_config.pg_dbname.lower():
+        raise RuntimeError("Control and Domain PostgreSQL databases must differ")
+    return config
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -78,10 +129,7 @@ def _truncate_all(conn):
         except Exception:
             pass
 
-    # 本体/图谱表是 domain 维度（不随 run 销毁），不清会让上批测试残留的待审
-    # 候选/实体在下批测试里触发"本体确认"闸口暂停，污染端到端流水线断言。
-    # asset_segment_entity_mentions 存待审 mention（按 run 关联）。
-    # 这些表在更老的测试库里可能不存在，逐个 try 以保持向后兼容。
+    # Domain ontology tables may be absent from older disposable databases.
     for tbl in (
         "asset_segment_entity_mentions",
         "ontology_candidates",
@@ -99,6 +147,77 @@ def _truncate_all(conn):
             pass
 
 
+def _require_postgres_acceptance() -> None:
+    if os.environ.get("KB_RUN_POSTGRES_ACCEPTANCE") != "1":
+        pytest.skip("set KB_RUN_POSTGRES_ACCEPTANCE=1 to run real PostgreSQL tests")
+
+
+def _cleanup_config(config: MiningDbConfig) -> None:
+    if os.environ.get("KB_ALLOW_TEST_TRUNCATE") != "1":
+        return
+    import psycopg
+
+    _assert_disposable_database(config)
+    conn = psycopg.connect(config.conninfo, autocommit=True)
+    try:
+        _truncate_all(conn)
+    finally:
+        conn.close()
+
+
+@pytest_asyncio.fixture
+async def control_pool(control_db_config):
+    """Async pool for global definitions; only opens under the explicit DB gate."""
+
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
+
+    _require_postgres_acceptance()
+    ensure_primary_schema(control_db_config)
+    pool = AsyncConnectionPool(
+        control_db_config.conninfo,
+        min_size=1,
+        max_size=2,
+        open=False,
+        kwargs={"row_factory": dict_row},
+    )
+    await pool.open()
+    await pool.wait()
+    try:
+        yield pool
+    finally:
+        await pool.close()
+        _cleanup_config(control_db_config)
+
+
+@pytest_asyncio.fixture
+async def domain_pool(domain_db_config):
+    """Async pool for one Domain runtime/asset store, never Control tables."""
+
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
+
+    _require_postgres_acceptance()
+    ensure_domain_schema(domain_db_config)
+    pool = AsyncConnectionPool(
+        domain_db_config.conninfo,
+        min_size=1,
+        max_size=2,
+        open=False,
+        kwargs={"row_factory": dict_row},
+    )
+    await pool.open()
+    await pool.wait()
+    try:
+        yield pool
+    finally:
+        await pool.close()
+        _cleanup_config(domain_db_config)
+
+    # 本体/图谱表是 domain 维度（不随 run 销毁），不清会让上批测试残留的待审
+    # 候选/实体在下批测试里触发"本体确认"闸口暂停，污染端到端流水线断言。
+    # asset_segment_entity_mentions 存待审 mention（按 run 关联）。
+    # 这些表在更老的测试库里可能不存在，逐个 try 以保持向后兼容。
 @pytest.fixture
 def asset_db(db_config, _ensure_schema):
     """Provide an AssetCoreDB connected to PG, with cleanup after test."""
