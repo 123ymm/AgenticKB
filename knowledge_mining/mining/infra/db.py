@@ -160,6 +160,32 @@ class _DB:
             finally:
                 self._tx_conn.reset(token)
 
+    @contextmanager
+    def join_transaction(self, owner: "_DB"):
+        """Route this adapter through another adapter's active transaction.
+
+        Asset, graph, ontology, and runtime adapters may be distinct objects but
+        still target the same Domain pool.  Explicit joining keeps their writes
+        on one connection without ever leaking a Control-store transaction into
+        a Domain adapter.
+        """
+        if self._pool is not owner._pool:
+            raise ValueError("transaction participants must use the same pool")
+        connection = owner._tx_conn.get()
+        if connection is None:
+            raise RuntimeError("transaction owner has no active transaction")
+        current = self._tx_conn.get()
+        if current is connection:
+            yield
+            return
+        if current is not None:
+            raise RuntimeError("adapter is already bound to another transaction")
+        token = self._tx_conn.set(connection)
+        try:
+            yield
+        finally:
+            self._tx_conn.reset(token)
+
     # -- helpers --
 
     def _run(self, sql: str, params: tuple, *, fetch: str | None):

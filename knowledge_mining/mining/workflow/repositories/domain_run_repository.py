@@ -112,6 +112,25 @@ class DomainRunRepository:
             raise ValueError(f"Run {run_id} has no Workflow manifest")
         return dict(manifest)
 
+    def document_persist_marker(
+        self, run_document_id: str
+    ) -> tuple[str, str] | None:
+        """Return the committed asset identity used as the retry boundary."""
+        with self.pool.connection() as conn:
+            cursor = conn.execute(
+                """SELECT document_id, document_snapshot_id
+                   FROM mining_run_documents
+                   WHERE id = %s
+                     AND status = 'committed'
+                     AND document_id IS NOT NULL
+                     AND document_snapshot_id IS NOT NULL""",
+                (run_document_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return str(row["document_id"]), str(row["document_snapshot_id"])
+
     def set_active_node(
         self,
         run_id: str,

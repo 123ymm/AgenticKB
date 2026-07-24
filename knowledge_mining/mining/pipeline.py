@@ -732,26 +732,195 @@ def _classify_parse_skip(ctx: DocumentContext) -> tuple[str, str | None]:
     return "parse_no_tree", None
 
 
-def db_write_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
-    """Stage 7: Write all results to DB (serial, 1 worker for thread safety).
-
-    Handles: select_snapshot → commit_segments → build_relations
-    → build_retrieval_units → insert embeddings → tracker.commit_document.
-
-    On failure, calls tracker.fail_document and returns ctx with error set.
-    """
+def _insert_document_embedding(
+    asset_db: Any, embedding: dict[str, Any], unit_ids: dict[str, str]
+) -> None:
     import json as _json
 
+    unit_key = embedding["unit_key"]
+    vector = embedding["vector"]
+    if unit_key not in unit_ids or not vector:
+        return
+    asset_db.insert_retrieval_embedding(
+        embedding_id=uuid.uuid4().hex,
+        retrieval_unit_id=unit_ids[unit_key],
+        embedding_model="managed",
+        embedding_provider="llm_service",
+        text_kind="full",
+        embedding_dim=len(vector),
+        embedding_vector=_json.dumps(vector),
+        content_hash="",
+    )
+
+
+def persist_document_assets(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    strict_embeddings: bool,
+    graph_store: Any | None = None,
+    ontology_store: Any | None = None,
+    run_id: str | None = None,
+    node_id: str = "asset_persist",
+) -> DocumentContext:
+    """Persist one document through one Domain-database transaction.
+
+    Workflow mode passes ``strict_embeddings=True`` and the graph stores, making
+    snapshot/link, content, retrieval, embeddings, mentions, candidates, and the
+    committed document marker one atomic boundary.  Legacy callers keep their
+    historical best-effort embedding behavior by passing ``False``.
+    """
+    if ctx.error:
+        raise ValueError(ctx.error)
+    if ctx.tree is None:
+        raise ValueError("document has no parse tree")
+    if not ctx.segments:
+        raise ValueError("document has no segments")
+    if cfg.asset_db is None or ctx.raw_file is None or ctx.profile is None:
+        raise RuntimeError("document persistence is not configured")
+
     asset_db = cfg.asset_db
+    unit_ids: dict[str, str] = {}
+    segment_ids = dict(ctx.seg_ids)
+    output = ctx
+    with asset_db.transaction():
+        document_id, snapshot_id, _ = select_or_create_snapshot(
+            asset_db,
+            ctx.raw_file,
+            ctx.profile,
+            domain=cfg.domain,
+            batch_id=cfg.batch_id,
+        )
+        if asset_db.count_segments_by_snapshot(snapshot_id) == 0:
+            for segment in ctx.segments:
+                segment_key = f"{segment.document_key}#{segment.segment_index}"
+                segment_id = segment_ids.get(segment_key, uuid.uuid4().hex)
+                segment_ids[segment_key] = segment_id
+                asset_db.insert_raw_segment(
+                    segment_id=segment_id,
+                    document_snapshot_id=snapshot_id,
+                    segment_key=segment_key,
+                    segment_index=segment.segment_index,
+                    block_type=segment.block_type,
+                    semantic_role=segment.semantic_role,
+                    section_path=segment.section_path,
+                    section_title=segment.section_title,
+                    raw_text=segment.raw_text,
+                    normalized_text=segment.normalized_text,
+                    content_hash=segment.content_hash,
+                    normalized_hash=segment.normalized_hash,
+                    token_count=segment.token_count,
+                    structure_json=segment.structure_json,
+                    source_offsets_json=segment.source_offsets_json,
+                    entity_refs_json=segment.entity_refs_json,
+                    metadata_json=segment.metadata_json,
+                )
+            for relation in ctx.relations:
+                source_id = segment_ids.get(relation.source_segment_key, "")
+                target_id = segment_ids.get(relation.target_segment_key, "")
+                if source_id and target_id:
+                    asset_db.insert_segment_relation(
+                        relation_id=uuid.uuid4().hex,
+                        document_snapshot_id=snapshot_id,
+                        source_segment_id=source_id,
+                        target_segment_id=target_id,
+                        relation_type=relation.relation_type,
+                        weight=relation.weight,
+                        confidence=relation.confidence,
+                        distance=relation.distance,
+                        metadata_json=relation.metadata_json,
+                    )
+            for unit in ctx.retrieval_units:
+                unit_id = uuid.uuid4().hex
+                unit_ids[unit.unit_key] = unit_id
+                asset_db.insert_retrieval_unit(
+                    unit_id=unit_id,
+                    document_snapshot_id=snapshot_id,
+                    unit_key=unit.unit_key,
+                    unit_type=unit.unit_type,
+                    target_type=unit.target_type,
+                    target_ref_json=unit.target_ref_json,
+                    title=unit.title,
+                    text=unit.text,
+                    search_text=unit.search_text,
+                    block_type=unit.block_type,
+                    semantic_role=unit.semantic_role,
+                    facets_json=unit.facets_json,
+                    entity_refs_json=unit.entity_refs_json,
+                    source_refs_json=unit.source_refs_json,
+                    llm_result_refs_json=unit.llm_result_refs_json,
+                    source_segment_id=unit.source_segment_id,
+                    weight=unit.weight,
+                    metadata_json=unit.metadata_json,
+                )
+            if strict_embeddings:
+                for embedding in ctx.embeddings:
+                    _insert_document_embedding(asset_db, embedding, unit_ids)
+        else:
+            persisted_segments = asset_db.get_segments_by_snapshot(snapshot_id)
+            segment_ids = {
+                str(item["segment_key"]): str(item["id"])
+                for item in persisted_segments
+            }
+
+        output = ctx.with_updates(
+            document_id=document_id,
+            snapshot_id=snapshot_id,
+            seg_ids=segment_ids,
+        )
+        if graph_store is not None and ontology_store is not None:
+            from contextlib import ExitStack
+
+            from knowledge_mining.mining.stages.graph_write import (
+                aggregate_build,
+                persist_document_mentions,
+            )
+
+            graph = aggregate_build([output], domain_id=cfg.domain)
+            with ExitStack() as participants:
+                for store in (graph_store, ontology_store):
+                    join = getattr(store, "join_transaction", None)
+                    if join is not None:
+                        participants.enter_context(join(asset_db))
+                persist_document_mentions(
+                    graph_store,
+                    ontology_store,
+                    graph,
+                    domain_id=cfg.domain,
+                    run_id=run_id or "",
+                    node_id=node_id,
+                    run_document_id=ctx.run_document_id or "",
+                )
+        if cfg.tracker is not None and ctx.run_document_id:
+            runtime_join = getattr(cfg.runtime_db, "join_transaction", None)
+            if runtime_join is None:
+                cfg.tracker.commit_document(
+                    ctx.run_document_id, document_id, snapshot_id
+                )
+            else:
+                with runtime_join(asset_db):
+                    cfg.tracker.commit_document(
+                        ctx.run_document_id, document_id, snapshot_id
+                    )
+                    cfg.runtime_db.commit()
+
+    if not strict_embeddings and ctx.embeddings and unit_ids:
+        try:
+            for embedding in ctx.embeddings:
+                _insert_document_embedding(asset_db, embedding, unit_ids)
+        except Exception as exc:
+            logger.warning(
+                "Embedding insert failed for %s (document still committed): %s",
+                getattr(ctx.raw_file, "file_path", "?"),
+                exc,
+            )
+    return output
+
+
+def db_write_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+    """Legacy Stage 7 wrapper preserving skip and best-effort semantics."""
     tracker = cfg.tracker
-    batch_id = cfg.batch_id
-    run_id = None  # not available in ctx; tracker uses run_document_id
-
     rd_id = ctx.run_document_id
-    raw = ctx.raw_file
-    doc_profile = ctx.profile
-
-    # Skip if upstream error
     if ctx.error:
         if tracker and rd_id:
             tracker.fail_document(rd_id, ctx.error)
@@ -760,8 +929,6 @@ def db_write_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext
             except Exception:
                 pass
         return ctx
-
-    # Skip if no parse tree
     if ctx.tree is None:
         if tracker and rd_id:
             reason, detail = _classify_parse_skip(ctx)
@@ -771,163 +938,27 @@ def db_write_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext
             except Exception:
                 pass
         return ctx
-
+    if not ctx.segments:
+        if tracker and rd_id:
+            tracker.skip_document(rd_id, reason="no_segments")
+            try:
+                cfg.runtime_db.commit()
+            except Exception:
+                pass
+        return ctx
     try:
-        segments = list(ctx.segments)
-        relations = list(ctx.relations)
-        seg_id_map = ctx.seg_ids
-        retrieval_units = list(ctx.retrieval_units)
-
-        # --- empty-content guard: 0 segments → skip, do NOT create a snapshot ---
-        # A document that parsed but produced no segments must not leave an empty
-        # snapshot behind (that is exactly what triggered the "Snapshot has no
-        # segments" build failure). Skip it; the runtime ledger records it.
-        if not segments:
-            if tracker and rd_id:
-                tracker.skip_document(rd_id, reason="no_segments")
-                try:
-                    cfg.runtime_db.commit()
-                except Exception:
-                    pass
-            return ctx
-
-        # --- resolve run_id (runtime DB, outside the asset transaction) ---
-        if tracker and rd_id:
-            _run_id = tracker._db._fetchone(
-                "SELECT run_id FROM mining_run_documents WHERE id = %s", (rd_id,)
-            )
-            run_id = _run_id["run_id"] if _run_id else None
-
-        ru_id_map: dict[str, str] = {}  # declared before the transaction for use by embeddings
-
-        # ===================== atomic per-document write =====================
-        # Everything that lands in asset_core for this document happens inside one
-        # transaction: snapshot/link, segments, relations,
-        # retrieval units. On any error the whole block rolls back, leaving no
-        # half-written ("snapshot but no segments") state behind.
-        with asset_db.transaction():
-            document_id, snapshot_id, link_id = select_or_create_snapshot(
-                asset_db, raw, doc_profile, domain=cfg.domain, batch_id=batch_id,
-            )
-
-            # --- only write content when the snapshot is empty ---
-            # existing_count > 0 means this exact content (same hash) was already
-            # ingested by another document; the snapshot is shared, so we reuse it
-            # and keep only the freshly-created link. existing_count == 0 covers
-            # both brand-new snapshots and self-healing of prior empty shells.
-            existing_count = asset_db.count_segments_by_snapshot(snapshot_id)
-            if existing_count == 0:
-                # --- commit_segments ---
-                for seg in segments:
-                    seg_key = f"{seg.document_key}#{seg.segment_index}"
-                    seg_id = seg_id_map.get(seg_key, uuid.uuid4().hex)
-                    asset_db.insert_raw_segment(
-                        segment_id=seg_id,
-                        document_snapshot_id=snapshot_id,
-                        segment_key=seg_key,
-                        segment_index=seg.segment_index,
-                        block_type=seg.block_type,
-                        semantic_role=seg.semantic_role,
-                        section_path=seg.section_path,
-                        section_title=seg.section_title,
-                        raw_text=seg.raw_text,
-                        normalized_text=seg.normalized_text,
-                        content_hash=seg.content_hash,
-                        normalized_hash=seg.normalized_hash,
-                        token_count=seg.token_count,
-                        structure_json=seg.structure_json,
-                        source_offsets_json=seg.source_offsets_json,
-                        entity_refs_json=seg.entity_refs_json,
-                        metadata_json=seg.metadata_json,
-                    )
-
-                # --- build_relations ---
-                for rel in relations:
-                    src_id = seg_id_map.get(rel.source_segment_key, "")
-                    tgt_id = seg_id_map.get(rel.target_segment_key, "")
-                    if src_id and tgt_id:
-                        asset_db.insert_segment_relation(
-                            relation_id=uuid.uuid4().hex,
-                            document_snapshot_id=snapshot_id,
-                            source_segment_id=src_id,
-                            target_segment_id=tgt_id,
-                            relation_type=rel.relation_type,
-                            weight=rel.weight,
-                            confidence=rel.confidence,
-                            distance=rel.distance,
-                            metadata_json=rel.metadata_json,
-                        )
-
-                # --- build_retrieval_units ---
-                for ru in retrieval_units:
-                    unit_id = uuid.uuid4().hex
-                    ru_id_map[ru.unit_key] = unit_id
-                    asset_db.insert_retrieval_unit(
-                        unit_id=unit_id,
-                        document_snapshot_id=snapshot_id,
-                        unit_key=ru.unit_key,
-                        unit_type=ru.unit_type,
-                        target_type=ru.target_type,
-                        target_ref_json=ru.target_ref_json,
-                        title=ru.title,
-                        text=ru.text,
-                        search_text=ru.search_text,
-                        block_type=ru.block_type,
-                        semantic_role=ru.semantic_role,
-                        facets_json=ru.facets_json,
-                        entity_refs_json=ru.entity_refs_json,
-                        source_refs_json=ru.source_refs_json,
-                        llm_result_refs_json=ru.llm_result_refs_json,
-                        source_segment_id=ru.source_segment_id,
-                        weight=ru.weight,
-                        metadata_json=ru.metadata_json,
-                    )
-        # ===================== transaction committed here ====================
-
-        # --- insert embeddings (outside the transaction, best-effort) ---
-        # Embeddings are an auxiliary product: a document is valid without them,
-        # so a failure here must NOT fail the document. Skipped on snapshot reuse
-        # (ru_id_map empty) because those embeddings already exist.
-        if ctx.embeddings and ru_id_map:
-            try:
-                for emb in ctx.embeddings:
-                    unit_key = emb["unit_key"]
-                    embedding_vec = emb["vector"]
-                    if unit_key in ru_id_map and embedding_vec:
-                        asset_db.insert_retrieval_embedding(
-                            embedding_id=uuid.uuid4().hex,
-                            retrieval_unit_id=ru_id_map[unit_key],
-                            embedding_model="managed",
-                            embedding_provider="llm_service",
-                            text_kind="full",
-                            embedding_dim=len(embedding_vec),
-                            embedding_vector=_json.dumps(embedding_vec),
-                            content_hash="",
-                        )
-            except Exception as emb_err:
-                logger.warning(
-                    "Embedding insert failed for %s (document still committed): %s",
-                    getattr(raw, "file_path", "?"), emb_err,
-                )
-
-        # --- commit_document (runtime ledger) ---
-        if tracker and rd_id:
-            tracker.commit_document(rd_id, document_id, snapshot_id)
-            cfg.runtime_db.commit()
-
-        return ctx.with_updates(
-            document_id=document_id,
-            snapshot_id=snapshot_id,
+        return persist_document_assets(ctx, cfg, strict_embeddings=False)
+    except Exception as exc:
+        error = str(exc)[:500]
+        logger.exception(
+            "db_write_stage failed for %s: %s",
+            getattr(ctx.raw_file, "file_path", "?"),
+            error,
         )
-
-    except Exception as e:
-        err_msg = str(e)[:500]
-        logger.exception("db_write_stage failed for %s: %s",
-                         getattr(raw, "file_path", "?"), err_msg)
         if tracker and rd_id:
             try:
-                tracker.fail_document(rd_id, err_msg)
+                tracker.fail_document(rd_id, error)
                 cfg.runtime_db.commit()
             except Exception:
                 logger.exception("tracker.fail_document also failed")
-        return ctx.with_updates(error=err_msg)
+        return ctx.with_updates(error=error)
