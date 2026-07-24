@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { MiningRun, MiningRunStage, MiningRunDocument } from '@/types'
+import type { CreateMiningRunRequest, MiningRun, MiningRunStage, MiningRunDocument } from '@/types'
 import { useMiningApi } from '@/api/mining'
 import { useDomainStore } from '@/stores/domain'
 
@@ -71,7 +71,7 @@ export const useMiningStore = defineStore('mining', () => {
     }
   }
 
-  async function createRun(config: Record<string, unknown>) {
+  async function createRun(config: CreateMiningRunRequest) {
     try {
       await miningApi.createRun(config)
       await fetchRuns()

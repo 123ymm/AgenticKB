@@ -6,6 +6,7 @@ import type {
   RunTrace, OntologyVersion, OntologyNodeType, OntologyRelationType, ActiveOntology, OntologyDraft, OntologyCandidate,
   PendingMention, GraphEntity, EntityNeighbors, GraphEvidence,
   EntityMutationResult,
+  CreateMiningRunRequest, CreateMiningRunResponse,
 } from '@/types'
 import type { PaginatedResponse } from '@/types'
 import { createProxyClient, extractItems, extractOne } from '@/api/proxyClient'
@@ -58,9 +59,9 @@ export function useMiningApi() {
       return data
     },
 
-    async createRun(config: Record<string, unknown>): Promise<MiningRun> {
+    async createRun(config: CreateMiningRunRequest): Promise<CreateMiningRunResponse> {
       const { data } = await client.post('/api/runs', config)
-      return extractOne<MiningRun>(data)
+      return extractOne<CreateMiningRunResponse>(data)
     },
 
     async cancelRun(runId: string): Promise<void> {

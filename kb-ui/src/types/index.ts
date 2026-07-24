@@ -1,3 +1,5 @@
+import type { FrozenMiningWorkflowSummary } from '@/types/miningWorkflow'
+
 export interface DomainInfo {
   domain_id: string
   display_name: string
@@ -33,7 +35,7 @@ export interface KnowledgeStats {
 
 export interface MiningRun {
   id: string
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'awaiting_review'
+  status: 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'awaiting_review'
   subloop_stage?: string | null
   ontology_version_id?: string | null
   input_path?: string
@@ -49,6 +51,37 @@ export interface MiningRun {
   build_id?: string
   error_message?: string
   config?: Record<string, unknown>
+  execution_engine?: 'legacy' | 'workflow'
+  workflow_id?: string | null
+  workflow_version?: number | null
+  workflow_graph_hash?: string | null
+  workflow?: FrozenMiningWorkflowSummary | null
+}
+
+export type MiningSubmissionEngine = 'legacy' | 'workflow'
+
+interface CreateMiningRunBase {
+  domain: string
+  max_workers?: number
+  phase1_only?: boolean
+  publish_on_partial_failure?: boolean
+  workflow_id?: string
+  workflow_version?: number
+}
+
+export type CreateMiningRunRequest =
+  | (CreateMiningRunBase & { upload_batch_id: string; input_path?: never })
+  | (CreateMiningRunBase & { input_path: string; upload_batch_id?: never })
+
+export interface CreateMiningRunResponse {
+  run_id: string
+  status: string
+  current_stage: string
+  started_at?: string | null
+  execution_engine: MiningSubmissionEngine
+  workflow_id: string | null
+  workflow_version: number | null
+  workflow_graph_hash: string | null
 }
 
 export interface MiningRunStage {
@@ -286,6 +319,7 @@ export interface UploadConfig {
   max_archive_size_mb: number
   accepted_extensions: string[]
   archive_extensions: string[]
+  mining_run_submission_engine: MiningSubmissionEngine
 }
 
 export interface UploadResult {

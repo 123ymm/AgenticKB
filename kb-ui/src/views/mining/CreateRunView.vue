@@ -1,17 +1,17 @@
 <template>
   <div class="create-run">
-    <!-- Header -->
-    <div class="create-run__header">
-      <el-button text @click="$router.push('/mining')">
-        <el-icon><ArrowLeft /></el-icon> 返回列表
-      </el-button>
-      <h2 class="create-run__title">新建挖掘任务</h2>
-    </div>
+    <header class="create-run__header">
+      <el-button text @click="router.push('/mining')">返回列表</el-button>
+      <div>
+        <h2>上传文件并创建挖掘 Run</h2>
+        <p>文件先形成 Domain 内上传批次，再绑定全局 Workflow 的精确已发布版本。</p>
+      </div>
+    </header>
 
     <div class="create-run__body">
-      <!-- Left: Upload -->
-      <div class="create-run__upload-zone"
-        :class="{ 'create-run__upload-zone--dragover': isDragOver }"
+      <section
+        class="create-run__upload-zone"
+        :class="{ 'is-dragover': isDragOver }"
         @dragover.prevent="isDragOver = true"
         @dragleave.prevent="isDragOver = false"
         @drop.prevent="handleDrop"
@@ -21,73 +21,97 @@
           type="file"
           multiple
           :accept="acceptedExtensionsStr"
-          style="display: none"
+          hidden
           @change="handleFileSelect"
         />
-        <template v-if="files.length === 0">
-          <div class="upload-empty">
-            <div class="upload-empty__icon">+</div>
-            <div class="upload-empty__text">拖拽文件到此处或点击上传</div>
-            <div class="upload-empty__hint">
-              支持 {{ acceptedExtensionsStr }}，可多选
-              <br>ZIP 压缩包将自动解压
-            </div>
-          </div>
-          <el-button @click="(fileInput as HTMLInputElement)?.click()">选择文件</el-button>
+        <template v-if="!files.length">
+          <div class="create-run__upload-icon">+</div>
+          <strong>拖拽文件到此处</strong>
+          <p>支持 {{ acceptedExtensionsStr }}；ZIP 会在服务端解压为同一批次。</p>
+          <el-button @click="fileInput?.click()">选择文件</el-button>
         </template>
         <template v-else>
-          <div class="upload-file-list">
-            <div v-for="(f, idx) in files" :key="idx" class="upload-file">
-              <span class="upload-file__name">{{ f.name }}</span>
-              <span class="upload-file__size">{{ formatFileSize(f.size) }}</span>
-              <el-button text size="small" @click="removeFile(idx)">&times;</el-button>
+          <div class="create-run__files">
+            <div v-for="(file, index) in files" :key="`${file.name}-${index}`" class="create-run__file">
+              <span>{{ file.name }}</span>
+              <small>{{ formatFileSize(file.size) }}</small>
+              <el-button text size="small" @click="removeFile(index)">×</el-button>
             </div>
           </div>
-          <div class="upload-actions">
-            <el-button size="small" @click="(fileInput as HTMLInputElement)?.click()">添加更多</el-button>
+          <div>
+            <el-button size="small" @click="fileInput?.click()">添加更多</el-button>
             <el-button size="small" text type="danger" @click="files = []">清空</el-button>
           </div>
         </template>
-      </div>
+      </section>
 
-      <!-- Right: Config -->
       <div class="create-run__config">
-        <div class="config-section">
-          <h4 class="config-section__title">基本配置</h4>
-          <el-form label-width="90px" label-position="top">
-            <el-form-item label="知识域">
+        <section class="config-card">
+          <h3>运行范围</h3>
+          <el-form label-position="top">
+            <el-form-item label="Domain（提交开始时锁定）">
               <el-input :model-value="domainStore.currentDomain" disabled />
             </el-form-item>
-            <el-form-item label="或输入路径">
-              <el-input v-model="inputPath" placeholder="手动输入目录路径（可选，优先使用上传）" />
+            <el-form-item v-if="submissionEngine === 'legacy'" label="或使用服务端路径（兼容模式）">
+              <el-input v-model="inputPath" placeholder="未上传文件时可填写旧 input_path" />
             </el-form-item>
           </el-form>
-        </div>
+        </section>
 
-        <div class="config-section">
-          <h4 class="config-section__title">高级选项</h4>
-          <el-form label-width="90px" label-position="top">
-            <el-form-item label="并发数">
-              <el-input-number v-model="maxWorkers" :min="1" :max="8" />
+        <section v-if="submissionEngine === 'workflow'" data-test="workflow-selector" class="config-card">
+          <div class="config-card__title-row">
+            <h3>挖掘 Workflow</h3>
+            <el-tag size="small" type="success">全局已发布</el-tag>
+          </div>
+          <el-form label-position="top">
+            <el-form-item label="Workflow">
+              <el-select v-model="selectedWorkflowId" :loading="workflowLoading" style="width: 100%">
+                <el-option
+                  v-for="option in workflowOptions"
+                  :key="option.id"
+                  :value="option.id"
+                  :label="`${option.name}${option.is_system_default ? '（默认 FULL）' : ''}`"
+                />
+              </el-select>
             </el-form-item>
-            <el-form-item label="仅执行 Phase 1">
-              <el-switch v-model="phase1Only" />
+            <el-form-item label="已发布版本（精确绑定）">
+              <el-select v-model="selectedWorkflowVersion" :loading="versionLoading" style="width: 100%">
+                <el-option
+                  v-for="version in workflowVersions"
+                  :key="version.version"
+                  :value="version.version"
+                  :label="`v${version.version}${version.version === selectedWorkflowCurrentVersion ? '（当前）' : ''}`"
+                />
+              </el-select>
             </el-form-item>
           </el-form>
-        </div>
+          <p class="config-card__hint">Run 创建后会冻结 Workflow Manifest；后续编辑或发布不影响该 Run。</p>
+          <div v-if="ontologyWarning" class="config-card__warning">
+            当前 Domain 未发布本体；本体相关节点运行时将按不适用跳过，不阻止创建 Run。
+          </div>
+        </section>
 
-        <!-- Upload progress -->
-        <div v-if="uploadProgress > 0" class="config-section">
-          <h4 class="config-section__title">上传进度</h4>
+        <section v-else class="config-card config-card--legacy">
+          当前为 legacy 提交模式：暂不展示 Workflow 选择，沿用旧 Pipeline 请求。
+        </section>
+
+        <section class="config-card">
+          <h3>安全运行覆盖</h3>
+          <el-form label-position="top">
+            <el-form-item label="并发数"><el-input-number v-model="maxWorkers" :min="1" :max="8" /></el-form-item>
+            <el-form-item label="仅产出资产（Phase 1 兼容项）"><el-switch v-model="phase1Only" /></el-form-item>
+          </el-form>
+        </section>
+
+        <section v-if="uploadProgress > 0" class="config-card">
+          <h3>上传进度</h3>
           <el-progress :percentage="uploadProgress" :status="uploadProgress >= 100 ? 'success' : ''" />
-          <div v-if="extractInfo" class="extract-info">{{ extractInfo }}</div>
-        </div>
+          <p v-if="extractInfo" class="config-card__hint">{{ extractInfo }}</p>
+        </section>
 
-        <div class="config-actions">
-          <el-button @click="$router.push('/mining')">取消</el-button>
-          <el-button type="primary" @click="handleCreate" :loading="creating">
-            创建任务
-          </el-button>
+        <div class="create-run__actions">
+          <el-button @click="router.push('/mining')">取消</el-button>
+          <el-button type="primary" :loading="creating" @click="handleCreate">上传并创建 Run</el-button>
         </div>
       </div>
     </div>
@@ -95,19 +119,25 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useDomainStore } from '@/stores/domain'
 import { useMiningStore } from '@/stores/mining'
 import { useMiningApi } from '@/api/mining'
-import type { UploadConfig } from '@/types'
+import { useMiningWorkflowApi } from '@/api/miningWorkflow'
+import type {
+  CreateMiningRunRequest,
+  MiningSubmissionEngine,
+  UploadConfig,
+} from '@/types'
+import type { MiningWorkflowOption, MiningWorkflowVersion } from '@/types/miningWorkflow'
 
 const router = useRouter()
 const domainStore = useDomainStore()
 const miningStore = useMiningStore()
 const miningApi = useMiningApi()
+const workflowApi = useMiningWorkflowApi()
 
 const files = ref<File[]>([])
 const inputPath = ref('')
@@ -118,298 +148,259 @@ const isDragOver = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const uploadProgress = ref(0)
 const extractInfo = ref('')
-
 const uploadConfig = ref<UploadConfig | null>(null)
+const submissionEngine = ref<MiningSubmissionEngine>('legacy')
 
-const acceptedExtensions = computed(() => {
-  if (uploadConfig.value) return uploadConfig.value.accepted_extensions
-  return ['.md', '.txt', '.pdf', '.html', '.htm', '.doc', '.docx', '.zip', '.chm', '.hdx']
-})
+const workflowOptions = ref<MiningWorkflowOption[]>([])
+const workflowVersions = ref<MiningWorkflowVersion[]>([])
+const selectedWorkflowId = ref('')
+const selectedWorkflowVersion = ref(0)
+const selectedWorkflowCurrentVersion = ref(0)
+const selectedVersionDetail = ref<MiningWorkflowVersion | null>(null)
+const workflowLoading = ref(false)
+const versionLoading = ref(false)
+const ontologyAvailable = ref<boolean | null>(null)
+let workflowSelectionGeneration = 0
 
+const acceptedExtensions = computed(() => uploadConfig.value?.accepted_extensions
+  ?? ['.md', '.txt', '.pdf', '.html', '.htm', '.doc', '.docx', '.zip', '.chm', '.hdx'])
 const acceptedExtensionsStr = computed(() => acceptedExtensions.value.join(','))
+const archiveExtensions = computed(() => new Set(uploadConfig.value?.archive_extensions ?? ['.zip']))
+const ontologyWarning = computed(() => submissionEngine.value === 'workflow'
+  && ontologyAvailable.value === false
+  && (selectedVersionDetail.value?.graph_json.nodes ?? []).some(node => ONTOLOGY_OPERATOR_TYPES.has(node.operatorType)))
 
-const archiveExtensions = computed(() => {
-  if (uploadConfig.value) return new Set(uploadConfig.value.archive_extensions)
-  return new Set(['.zip'])
-})
+const ONTOLOGY_OPERATOR_TYPES = new Set([
+  'entity_extract', 'entity_resolve', 'entity_relation_extract', 'entity_review_gate',
+  'ontology_induction', 'ontology_review_gate', 'graph_write',
+])
 
 onMounted(async () => {
   try {
     uploadConfig.value = await miningApi.getUploadConfig()
+    submissionEngine.value = uploadConfig.value.mining_run_submission_engine ?? 'legacy'
   } catch {
-    // Config fetch failed — use defaults
+    submissionEngine.value = 'legacy'
+  }
+  if (submissionEngine.value === 'workflow') {
+    await Promise.all([loadWorkflowOptions(), checkActiveOntology(domainStore.currentDomain)])
   }
 })
 
-function getFileExt(name: string): string {
-  const dotIdx = name.lastIndexOf('.')
-  return dotIdx >= 0 ? name.slice(dotIdx).toLowerCase() : ''
+watch(selectedWorkflowId, async (workflowId, previous) => {
+  if (!workflowId || workflowId === previous) return
+  await loadWorkflowVersions(workflowId)
+})
+
+watch(selectedWorkflowVersion, async version => {
+  if (version > 0 && selectedWorkflowId.value) await loadSelectedVersion(selectedWorkflowId.value, version)
+})
+
+async function loadWorkflowOptions() {
+  workflowLoading.value = true
+  try {
+    workflowOptions.value = await workflowApi.options()
+    const selected = workflowOptions.value.find(option => option.is_system_default)
+      ?? workflowOptions.value.find(option => option.id === 'system-full-baseline')
+      ?? workflowOptions.value[0]
+    if (!selected) {
+      ElMessage.error('没有可用的已发布 Workflow')
+      return
+    }
+    selectedWorkflowId.value = selected.id
+    selectedWorkflowCurrentVersion.value = selected.current_version
+    selectedWorkflowVersion.value = selected.current_version
+    await loadWorkflowVersions(selected.id, selected.current_version)
+  } catch (error) {
+    ElMessage.error(`加载 Workflow 选项失败：${errorMessage(error)}`)
+  } finally {
+    workflowLoading.value = false
+  }
+}
+
+async function loadWorkflowVersions(workflowId: string, preferredVersion?: number) {
+  const generation = ++workflowSelectionGeneration
+  versionLoading.value = true
+  try {
+    const versions = await workflowApi.listVersions(workflowId)
+    if (generation !== workflowSelectionGeneration || workflowId !== selectedWorkflowId.value) return
+    workflowVersions.value = versions
+    const current = workflowOptions.value.find(option => option.id === workflowId)?.current_version ?? versions[0]?.version ?? 0
+    selectedWorkflowCurrentVersion.value = current
+    const exact = preferredVersion && versions.some(version => version.version === preferredVersion)
+      ? preferredVersion
+      : current
+    selectedWorkflowVersion.value = exact
+    if (exact) await loadSelectedVersion(workflowId, exact, generation)
+  } catch (error) {
+    if (generation === workflowSelectionGeneration) ElMessage.error(`加载 Workflow 版本失败：${errorMessage(error)}`)
+  } finally {
+    if (generation === workflowSelectionGeneration) versionLoading.value = false
+  }
+}
+
+async function loadSelectedVersion(workflowId: string, version: number, generation = workflowSelectionGeneration) {
+  try {
+    const detail = await workflowApi.getVersion(workflowId, version)
+    if (
+      generation === workflowSelectionGeneration
+      && workflowId === selectedWorkflowId.value
+      && version === selectedWorkflowVersion.value
+    ) selectedVersionDetail.value = detail
+  } catch {
+    selectedVersionDetail.value = null
+  }
+}
+
+async function checkActiveOntology(domain: string) {
+  try {
+    const active = await miningApi.getActiveOntology(domain)
+    ontologyAvailable.value = Boolean(active.version)
+  } catch {
+    ontologyAvailable.value = false
+  }
+}
+
+function getFileExtension(name: string): string {
+  const index = name.lastIndexOf('.')
+  return index >= 0 ? name.slice(index).toLowerCase() : ''
 }
 
 function isArchive(name: string): boolean {
-  return archiveExtensions.value.has(getFileExt(name))
+  return archiveExtensions.value.has(getFileExtension(name))
 }
 
-function sizeLimitFor(name: string): number {
-  if (!uploadConfig.value) return 100 * 1024 * 1024
-  return isArchive(name) ? uploadConfig.value.max_archive_size : uploadConfig.value.max_file_size
-}
-
-function sizeLimitMbFor(name: string): number {
-  if (!uploadConfig.value) return 100
-  return isArchive(name) ? uploadConfig.value.max_archive_size_mb : uploadConfig.value.max_file_size_mb
-}
-
-function validateFiles(newFiles: File[]): File[] {
+function validateFiles(incoming: File[]): File[] {
   const valid: File[] = []
-  for (const f of newFiles) {
-    const ext = getFileExt(f.name)
-    if (!acceptedExtensions.value.includes(ext)) {
-      ElMessage.warning(`不支持的文件格式: ${f.name}`)
+  for (const file of incoming) {
+    const extension = getFileExtension(file.name)
+    if (!acceptedExtensions.value.includes(extension)) {
+      ElMessage.warning(`不支持的文件格式：${file.name}`)
       continue
     }
-    const limit = sizeLimitFor(f.name)
-    if (f.size > limit) {
-      ElMessage.warning(`${f.name} 超过 ${sizeLimitMbFor(f.name)}MB 限制`)
+    const limit = isArchive(file.name)
+      ? uploadConfig.value?.max_archive_size
+      : uploadConfig.value?.max_file_size
+    if (limit !== undefined && file.size > limit) {
+      ElMessage.warning(`${file.name} 超过上传大小限制`)
       continue
     }
-    valid.push(f)
+    valid.push(file)
   }
   return valid
 }
 
-function handleDrop(e: DragEvent) {
+function handleDrop(event: DragEvent) {
   isDragOver.value = false
-  const dropped = e.dataTransfer?.files
-  if (!dropped) return
-  const valid = validateFiles(Array.from(dropped))
-  if (valid.length === 0) return
-  files.value = [...files.value, ...valid]
+  if (!event.dataTransfer?.files) return
+  files.value = [...files.value, ...validateFiles(Array.from(event.dataTransfer.files))]
 }
 
-function handleFileSelect(e: Event) {
-  const target = e.target as HTMLInputElement
-  if (!target.files) return
-  const valid = validateFiles(Array.from(target.files))
-  files.value = [...files.value, ...valid]
-  target.value = ''
+function handleFileSelect(event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.files) files.value = [...files.value, ...validateFiles(Array.from(input.files))]
+  input.value = ''
 }
 
-function removeFile(idx: number) {
-  files.value = files.value.filter((_, i) => i !== idx)
+function removeFile(index: number) {
+  files.value = files.value.filter((_, itemIndex) => itemIndex !== index)
 }
 
-function formatFileSize(bytes: number) {
-  if (bytes < 1024) return `${bytes}B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
 async function handleCreate() {
+  const capturedDomain = domainStore.currentDomain
   creating.value = true
   uploadProgress.value = 0
   extractInfo.value = ''
   try {
-    let path = inputPath.value
+    let uploaded: Awaited<ReturnType<typeof miningApi.uploadFiles>> | null = null
+    if (files.value.length) {
+      uploaded = await miningApi.uploadFiles(capturedDomain, files.value, event => {
+        uploadProgress.value = event.progress
+      })
+      renderExtractionSummary(uploaded.extracted_archives)
+    }
 
-    if (files.value.length > 0) {
-      const result = await miningApi.uploadFiles(
-        domainStore.currentDomain,
-        files.value,
-        (e) => { uploadProgress.value = e.progress },
-      )
-      path = result.storage_path
-
-      // Show extraction info
-      if (result.extracted_archives?.length) {
-        const parts = result.extracted_archives
-          .filter(a => a.error === null)
-          .map(a => `${a.archive} → ${a.file_count} 个文件`)
-        if (parts.length) extractInfo.value = `已解压: ${parts.join(', ')}`
-        const errors = result.extracted_archives.filter(a => a.error !== null)
-        for (const e of errors) {
-          ElMessage.warning(`解压失败 ${e.archive}: ${e.error}`)
-        }
+    let request: CreateMiningRunRequest
+    if (submissionEngine.value === 'workflow') {
+      if (!uploaded) {
+        ElMessage.warning('Workflow 模式请先选择并上传文件')
+        return
+      }
+      if (!selectedWorkflowId.value || selectedWorkflowVersion.value <= 0) {
+        ElMessage.warning('请选择一个已发布的 Workflow 精确版本')
+        return
+      }
+      request = {
+        domain: capturedDomain,
+        upload_batch_id: uploaded.upload_batch_id,
+        workflow_id: selectedWorkflowId.value,
+        workflow_version: selectedWorkflowVersion.value,
+        max_workers: maxWorkers.value,
+        phase1_only: phase1Only.value,
+      }
+    } else {
+      const path = uploaded?.storage_path || inputPath.value.trim()
+      if (!path) {
+        ElMessage.warning('请上传文件或输入服务端路径')
+        return
+      }
+      request = {
+        domain: capturedDomain,
+        input_path: path,
+        max_workers: maxWorkers.value,
+        phase1_only: phase1Only.value,
       }
     }
 
-    if (!path) {
-      ElMessage.warning('请上传文件或输入路径')
-      creating.value = false
-      return
-    }
-
-    await miningStore.createRun({
-      domain: domainStore.currentDomain,
-      input_path: path,
-      max_workers: maxWorkers.value,
-      phase1_only: phase1Only.value,
-    })
-    ElMessage.success('任务已创建')
-    router.push('/mining')
-  } catch (e: unknown) {
-    ElMessage.error(e instanceof Error ? e.message : '创建失败')
+    await miningStore.createRun(request)
+    ElMessage.success('Run 已创建')
+    await router.push('/mining')
+  } catch (error) {
+    ElMessage.error(`创建失败：${errorMessage(error)}`)
   } finally {
     creating.value = false
   }
 }
+
+function renderExtractionSummary(items: Array<{ archive: string; error: string | null; file_count: number }>) {
+  const completed = items.filter(item => !item.error)
+  if (completed.length) extractInfo.value = `已解压：${completed.map(item => `${item.archive} → ${item.file_count} 个文件`).join('，')}`
+  for (const item of items.filter(item => item.error)) ElMessage.warning(`解压失败 ${item.archive}：${item.error}`)
+}
+
+function errorMessage(error: unknown): string {
+  const value = error as { response?: { data?: { detail?: { message?: string } | string } }; message?: string }
+  const detail = value?.response?.data?.detail
+  return (typeof detail === 'string' ? detail : detail?.message) || value?.message || '未知错误'
+}
 </script>
 
 <style scoped>
-.create-run {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.create-run__header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.create-run__title {
-  font-size: 16px;
-  font-weight: 650;
-  color: var(--kb-text-primary);
-  margin: 0;
-}
-
-.create-run__body {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  align-items: start;
-}
-
-/* Upload zone */
-.create-run__upload-zone {
-  background: var(--kb-bg-card);
-  border: 2px dashed var(--kb-border);
-  border-radius: var(--kb-radius);
-  padding: 32px 24px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  min-height: 300px;
-  transition: all var(--kb-duration) var(--kb-ease);
-}
-
-.create-run__upload-zone--dragover {
-  border-color: var(--kb-accent);
-  background: var(--kb-accent-soft);
-}
-
-.upload-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.upload-empty__icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: var(--kb-border-light);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 24px;
-  color: var(--kb-text-tertiary);
-}
-
-.upload-empty__text {
-  font-size: 14px;
-  color: var(--kb-text-secondary);
-  font-weight: 500;
-}
-
-.upload-empty__hint {
-  font-size: 12px;
-  color: var(--kb-text-tertiary);
-  text-align: center;
-  line-height: 1.6;
-}
-
-.upload-file-list {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.upload-file {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--kb-bg-card);
-  border: 1px solid var(--kb-border-light);
-  border-radius: var(--kb-radius-sm);
-}
-
-.upload-file__name {
-  flex: 1;
-  font-size: 13px;
-  color: var(--kb-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.upload-file__size {
-  font-size: 11px;
-  color: var(--kb-text-tertiary);
-}
-
-.upload-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.extract-info {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--kb-text-secondary);
-}
-
-/* Config */
-.create-run__config {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.config-section {
-  background: var(--kb-bg-card);
-  border: 1px solid var(--kb-border-light);
-  border-radius: var(--kb-radius);
-  padding: 20px;
-}
-
-.config-section__title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--kb-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin: 0 0 16px;
-}
-
-.config-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-@media (max-width: 768px) {
-  .create-run__body {
-    grid-template-columns: 1fr;
-  }
-}
+.create-run { display: flex; flex-direction: column; gap: 16px; }
+.create-run__header { display: flex; align-items: flex-start; gap: 12px; }
+.create-run__header h2 { margin: 0; font-size: 18px; }
+.create-run__header p { margin: 4px 0 0; color: var(--kb-text-tertiary); font-size: 12px; }
+.create-run__body { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr); gap: 16px; align-items: start; }
+.create-run__upload-zone { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 28px; border: 2px dashed var(--kb-border); border-radius: var(--kb-radius); background: var(--kb-bg-card); }
+.create-run__upload-zone.is-dragover { border-color: var(--kb-accent); background: var(--kb-accent-soft); }
+.create-run__upload-zone > p { max-width: 420px; margin: 0; color: var(--kb-text-tertiary); text-align: center; line-height: 1.6; }
+.create-run__upload-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; background: var(--kb-border-light); color: var(--kb-text-tertiary); font-size: 25px; }
+.create-run__files { width: 100%; max-height: 250px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.create-run__file { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--kb-border-light); border-radius: 6px; }
+.create-run__file small { color: var(--kb-text-tertiary); }
+.create-run__config { display: flex; flex-direction: column; gap: 14px; }
+.config-card { padding: 18px; border: 1px solid var(--kb-border-light); border-radius: var(--kb-radius); background: var(--kb-bg-card); }
+.config-card h3 { margin: 0 0 13px; color: var(--kb-text-secondary); font-size: 13px; text-transform: uppercase; letter-spacing: .4px; }
+.config-card__title-row { display: flex; justify-content: space-between; align-items: center; }
+.config-card__hint { margin: 0; color: var(--kb-text-tertiary); font-size: 11px; line-height: 1.5; }
+.config-card__warning { margin-top: 10px; padding: 9px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; font-size: 12px; line-height: 1.5; }
+.config-card--legacy { color: var(--kb-text-secondary); background: #f8fafc; font-size: 12px; }
+.create-run__actions { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 850px) { .create-run__body { grid-template-columns: 1fr; } }
 </style>
