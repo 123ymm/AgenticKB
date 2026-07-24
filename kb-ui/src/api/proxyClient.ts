@@ -6,7 +6,12 @@ import { useDomainStore } from '@/stores/domain'
  * reverse proxy. The baseURL is resolved on every request via an interceptor,
  * so domain switching is reflected immediately.
  */
-export function createProxyClient(service: string) {
+export interface ProxyClientOptions {
+  includeDomainQuery?: boolean
+}
+
+export function createProxyClient(service: string, options: ProxyClientOptions = {}) {
+  const includeDomainQuery = options.includeDomainQuery ?? true
   const client = axios.create()
   client.interceptors.request.use((config) => {
     const domainStore = useDomainStore()
@@ -19,7 +24,7 @@ export function createProxyClient(service: string) {
     const explicitDomain = typeof params.domain === 'string' ? params.domain.trim() : ''
     const requestedDomain = explicitDomain || domainStore.currentDomain
     config.baseURL = `/api/control-plane/api/v1/proxy/${encodeURIComponent(requestedDomain)}/${service}`
-    if (service === 'mining') {
+    if (service === 'mining' && includeDomainQuery) {
       config.params = { ...params, domain: requestedDomain }
     }
     return config

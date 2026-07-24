@@ -45,6 +45,7 @@ declare module 'vue' {
     EvidenceCard: typeof import('./src/components/search/EvidenceCard.vue')['default']
     ForceGraph: typeof import('./src/components/charts/ForceGraph.vue')['default']
     Header: typeof import('./src/components/layout/Header.vue')['default']
+    JsonSchemaParamForm: typeof import('./src/components/workflow/JsonSchemaParamForm.vue')['default']
     LineChart: typeof import('./src/components/charts/LineChart.vue')['default']
     OntologyDiGraph: typeof import('./src/components/charts/OntologyDiGraph.vue')['default']
     OperatorNode: typeof import('./src/components/paradigm/OperatorNode.vue')['default']
@@ -63,6 +64,7 @@ declare module 'vue' {
     StatsCard: typeof import('./src/components/common/StatsCard.vue')['default']
     StatusBadge: typeof import('./src/components/common/StatusBadge.vue')['default']
     SystemConfigTab: typeof import('./src/components/settings/SystemConfigTab.vue')['default']
+    WorkflowOperatorNodeBase: typeof import('./src/components/workflow/WorkflowOperatorNodeBase.vue')['default']
     YamlEditor: typeof import('./src/components/common/YamlEditor.vue')['default']
   }
   export interface GlobalDirectives {
