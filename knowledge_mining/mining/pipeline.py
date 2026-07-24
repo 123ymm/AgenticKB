@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from queue import Queue
 from threading import Thread
 from typing import Any, Callable
@@ -26,6 +26,15 @@ from knowledge_mining.mining.contracts.models import (
 )
 from knowledge_mining.mining.contracts.protocols import Segmenter
 from knowledge_mining.mining.snapshot import select_or_create_snapshot
+from knowledge_mining.mining.workflow.operators.options import (
+    DiscourseOptions,
+    EmbeddingOptions,
+    EnrichOptions,
+    EntityExtractOptions,
+    EntityResolveOptions,
+    ParseSegmentOptions,
+    RetrievalUnitOptions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -399,7 +408,12 @@ def parse_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
     return ctx.with_updates(tree=tree)
 
 
-def segment_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+def segment_stage(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: ParseSegmentOptions | None = None,
+) -> DocumentContext:
     """Stage 2: Segment tree into raw segments + assign stable seg UUIDs.
 
     seg_ids are computed here (not in a separate stage) because the work is
@@ -409,7 +423,47 @@ def segment_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
     seg = cfg.segmenter
     if seg is None or ctx.tree is None or ctx.profile is None:
         return ctx
-    segments = seg.segment(ctx.tree, ctx.profile, domain_profile=cfg.domain_profile)
+    from knowledge_mining.mining.stages.segment import SegmentPolicyOverride
+
+    profile_policy = getattr(cfg.domain_profile, "retrieval_policy", None)
+    if options is None:
+        policy_override = SegmentPolicyOverride(
+            min_segment_tokens=(
+                profile_policy.min_chunk_tokens if profile_policy else 128
+            ),
+            max_segment_tokens=(
+                profile_policy.max_chunk_tokens if profile_policy else 512
+            ),
+            structural_context_mode=(
+                profile_policy.structural_context_mode
+                if profile_policy else "breadcrumb"
+            ),
+            merge_small_segments=True,
+            absorb_child_orphans=(
+                profile_policy.cross_section_merge if profile_policy else True
+            ),
+            merge_lead_into_child=(
+                profile_policy.cross_section_merge if profile_policy else True
+            ),
+            # Preserve the legacy within-section thresholds.
+            merge_small_min_tokens=100,
+            merge_small_max_tokens=512,
+        )
+    else:
+        policy_override = SegmentPolicyOverride(
+            min_segment_tokens=options.min_segment_tokens,
+            max_segment_tokens=options.max_segment_tokens,
+            structural_context_mode=options.structural_context_mode,
+            merge_small_segments=options.merge_small_segments,
+            absorb_child_orphans=options.absorb_child_orphans,
+            merge_lead_into_child=options.merge_lead_into_child,
+        )
+    segments = seg.segment(
+        ctx.tree,
+        ctx.profile,
+        domain_profile=cfg.domain_profile,
+        policy_override=policy_override,
+    )
     if not segments:
         return ctx.with_updates(segments=tuple(segments))
     from knowledge_mining.mining.stages.relations import build_seg_ids
@@ -419,29 +473,77 @@ def segment_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
     )
 
 
-def enrich_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+def enrich_stage(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: EnrichOptions | None = None,
+) -> DocumentContext:
     """Stage 3: Enrich segments (LLM or rule-based)."""
     enricher = cfg.enricher
     if enricher is None or not ctx.segments:
         return ctx
-    enriched = enricher.enrich_batch(list(ctx.segments))
-    return ctx.with_updates(segments=tuple(enriched))
+    if options is None:
+        enriched = enricher.enrich_batch(list(ctx.segments))
+        return ctx.with_updates(segments=tuple(enriched))
+    substantial = [
+        item
+        for item in ctx.segments
+        if (item.token_count or 0) >= options.min_enrich_tokens
+    ]
+    if not substantial:
+        return ctx
+    enriched_by_index = {
+        item.segment_index: item
+        for item in enricher.enrich_batch(substantial)
+    }
+    return ctx.with_updates(segments=tuple(
+        enriched_by_index.get(item.segment_index, item) for item in ctx.segments
+    ))
 
 
-def entity_extract_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+def entity_extract_stage(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: EntityExtractOptions | None = None,
+) -> DocumentContext:
     """Stage 3a: 本体线实体抽取（双通道，独立 LLM 调用，L4 §15）。"""
     extractor = cfg.entity_extractor
     if extractor is None or not ctx.segments:
         return ctx
-    extracted = extractor.extract_batch(list(ctx.segments))
+    kwargs = {}
+    if options is not None:
+        kwargs = {
+            "min_confidence": options.min_confidence,
+            "allow_out_of_schema": options.allow_out_of_schema,
+            "max_entities_per_segment": options.max_entities_per_segment,
+        }
+    extracted = extractor.extract_batch(list(ctx.segments), **kwargs)
     return ctx.with_updates(segments=tuple(extracted))
 
 
-def resolve_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+def resolve_stage(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: EntityResolveOptions | None = None,
+) -> DocumentContext:
     """Stage 3b: 实体归一 + 人审分流（给每个 mention 打 canonical_name + resolve_status）。"""
     resolver = cfg.resolver
     if resolver is None or not ctx.segments:
         return ctx
+    if options is not None and not options.auto_resolve_aliases:
+        pending = []
+        for segment in ctx.segments:
+            refs = []
+            for ref in segment.entity_refs_json:
+                copied = dict(ref)
+                copied["canonical_name"] = None
+                copied["resolve_status"] = "pending"
+                refs.append(copied)
+            pending.append(replace(segment, entity_refs_json=refs))
+        return ctx.with_updates(segments=tuple(pending))
     resolved = resolver.resolve_batch(list(ctx.segments))
     return ctx.with_updates(segments=tuple(resolved))
 
@@ -455,23 +557,86 @@ def entity_relations_stage(ctx: DocumentContext, cfg: PipelineConfig) -> Documen
     return ctx.with_updates(segments=tuple(built))
 
 
-def discourse_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+def discourse_stage(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: DiscourseOptions | None = None,
+) -> DocumentContext:
     """Stage 4b: Build discourse relations (LLM-driven RST analysis)."""
     drb = cfg.discourse_relation_builder
     if drb is None or not ctx.segments:
         return ctx
-    discourse_relations = drb.build(list(ctx.segments), seg_ids=ctx.seg_ids)
+    kwargs: dict[str, Any] = {"seg_ids": ctx.seg_ids}
+    if options is not None:
+        kwargs.update(
+            window_size=options.window_size,
+            min_confidence=options.min_confidence,
+        )
+    discourse_relations = drb.build(list(ctx.segments), **kwargs)
     if discourse_relations:
         return ctx.with_updates(relations=tuple(discourse_relations))
     return ctx
 
 
-def retrieval_units_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+def contextual_retrieval_stage(
+    ctx: DocumentContext, cfg: PipelineConfig
+) -> DocumentContext:
+    """Generate contextual descriptions once and freeze them on segment metadata."""
+    contextualizer = cfg.contextualizer
+    if contextualizer is None or not ctx.segments:
+        return ctx
+    document_text = "\n".join(item.raw_text for item in ctx.segments)
+    try:
+        context_map = contextualizer.contextualize(
+            [item for item in ctx.segments if item.raw_text.strip()], document_text
+        )
+    except Exception as exc:
+        logger.warning("Contextualization failed: %s", exc)
+        return ctx
+    task_ids = (
+        contextualizer.last_task_ids
+        if hasattr(contextualizer, "last_task_ids")
+        else {}
+    )
+    enriched = []
+    for segment in ctx.segments:
+        segment_key = f"{segment.document_key}#{segment.segment_index}"
+        context = context_map.get(segment_key)
+        task_id = task_ids.get(segment_key)
+        if not context and not task_id:
+            enriched.append(segment)
+            continue
+        metadata = dict(segment.metadata_json)
+        if context:
+            metadata["context_description"] = context
+        if task_id:
+            metadata["context_task_id"] = task_id
+        enriched.append(replace(segment, metadata_json=metadata))
+    return ctx.with_updates(segments=tuple(enriched))
+
+
+def retrieval_units_stage(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: RetrievalUnitOptions | None = None,
+) -> DocumentContext:
     """Stage 5: Build retrieval units."""
     if not ctx.segments:
         return ctx
     from knowledge_mining.mining.stages.retrieval_units import build_retrieval_units
     profile = ctx.profile
+    kwargs: dict[str, Any] = {}
+    if options is not None:
+        kwargs = {
+            "raw_text_unit": options.raw_text_unit,
+            "generated_question_unit": options.generated_question_unit,
+            "table_row_unit": options.table_row_unit,
+            "max_questions_per_segment": options.max_questions_per_segment,
+            "min_questionworthy_tokens": options.min_questionworthy_tokens,
+            "apply_contextualizer": False,
+        }
     units = build_retrieval_units(
         list(ctx.segments),
         seg_ids=ctx.seg_ids,
@@ -479,11 +644,17 @@ def retrieval_units_stage(ctx: DocumentContext, cfg: PipelineConfig) -> Document
         question_generator=cfg.question_generator,
         contextualizer=cfg.contextualizer,
         profile=cfg.domain_profile,
+        **kwargs,
     )
     return ctx.with_updates(retrieval_units=tuple(units))
 
 
-def embedding_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+def embedding_stage(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: EmbeddingOptions | None = None,
+) -> DocumentContext:
     """Stage 6: Generate embeddings for retrieval units (parallel HTTP to embedding API).
 
     Designed to run with multiple workers — each invocation is stateless and only
@@ -493,8 +664,14 @@ def embedding_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContex
     if gen is None or not ctx.retrieval_units:
         return ctx
     try:
-        texts = [ru.text for ru in ctx.retrieval_units if ru.text]
-        keys = [ru.unit_key for ru in ctx.retrieval_units if ru.text]
+        allowed_types = set(options.unit_types) if options is not None else None
+        selected = [
+            unit
+            for unit in ctx.retrieval_units
+            if unit.text and (allowed_types is None or unit.unit_type in allowed_types)
+        ]
+        texts = [ru.text for ru in selected]
+        keys = [ru.unit_key for ru in selected]
         if not texts:
             return ctx
         embeddings = gen.embed_batch(texts)

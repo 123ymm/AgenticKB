@@ -100,6 +100,14 @@ class EntityExtractor:
                 tiny_indices.add(idx)
 
         substantial_segments = [seg for idx, seg in enumerate(segments) if idx not in tiny_indices]
+        strict_options = any(
+            key in kwargs
+            for key in (
+                "min_confidence",
+                "allow_out_of_schema",
+                "max_entities_per_segment",
+            )
+        )
 
         # Phase 1: 仅提交实质段落
         seg_tasks: dict[str, str] = {}
@@ -128,7 +136,18 @@ class EntityExtractor:
 
         # Phase 3: 应用结果（仅实质段落；tiny 原样返回，不抽实体）
         enriched_substantial = [
-            _apply_entity_result(seg, llm_results[sub_idx], allowed_types)
+            _apply_entity_result(
+                seg,
+                llm_results[sub_idx],
+                allowed_types,
+                min_confidence=(kwargs.get("min_confidence") if strict_options else None),
+                allow_out_of_schema=(
+                    kwargs.get("allow_out_of_schema") if strict_options else None
+                ),
+                max_entities=(
+                    kwargs.get("max_entities_per_segment") if strict_options else None
+                ),
+            )
             if sub_idx in llm_results
             else seg
             for sub_idx, seg in enumerate(substantial_segments)
@@ -151,6 +170,10 @@ def _apply_entity_result(
     seg: RawSegmentData,
     result: dict[str, Any],
     allowed_types: frozenset[str],
+    *,
+    min_confidence: float | None = None,
+    allow_out_of_schema: bool | None = None,
+    max_entities: int | None = None,
 ) -> RawSegmentData:
     """把双通道抽取结果落进 segment.entity_refs_json（N1 重排，L1 §12 / L2 §15.2）。
 
@@ -163,6 +186,24 @@ def _apply_entity_result(
     经 graph_write 落成一条 node_type='__untyped__' 的 pending mention，天然进 Gate2。
     人确认后由 ontology_induction（N3）从这批干净实体归纳正式类型。
     """
+    if any(
+        value is not None
+        for value in (min_confidence, allow_out_of_schema, max_entities)
+    ):
+        return _apply_entity_result_with_options(
+            seg,
+            result,
+            allowed_types,
+            min_confidence=(
+                _MIN_ENTITY_CONFIDENCE
+                if min_confidence is None else min_confidence
+            ),
+            allow_out_of_schema=(
+                True if allow_out_of_schema is None else allow_out_of_schema
+            ),
+            max_entities=max_entities or 20,
+        )
+
     entity_refs: list[dict[str, Any]] = []
 
     def _add_untyped(name: str, proposed_type: str | None, reason: str,
@@ -219,3 +260,76 @@ def _apply_entity_result(
         return seg
 
     return dataclasses.replace(seg, entity_refs_json=changes["entity_refs_json"])
+
+
+def _apply_entity_result_with_options(
+    seg: RawSegmentData,
+    result: dict[str, Any],
+    allowed_types: frozenset[str],
+    *,
+    min_confidence: float,
+    allow_out_of_schema: bool,
+    max_entities: int,
+) -> RawSegmentData:
+    candidates: list[tuple[float, dict[str, Any]]] = []
+
+    def confidence_of(item: dict[str, Any]) -> float:
+        value = item.get("confidence")
+        return float(value) if isinstance(value, (int, float)) else 1.0
+
+    for item in result.get("entities", []) or []:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        confidence = confidence_of(item)
+        if confidence < min_confidence:
+            continue
+        name = str(item["name"])
+        entity_type = str(item.get("type") or "unknown")
+        if not allowed_types or entity_type in allowed_types:
+            ref = {"type": entity_type, "name": name}
+        elif allow_out_of_schema:
+            ref = {
+                "type": UNTYPED_NODE_TYPE,
+                "name": name,
+                "proposed_type": entity_type,
+                "off_schema_reason": "off_schema_type",
+            }
+        else:
+            continue
+        candidates.append((confidence, ref))
+
+    if allow_out_of_schema:
+        for item in result.get("out_of_schema", []) or []:
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            confidence = confidence_of(item)
+            if confidence < min_confidence:
+                continue
+            ref: dict[str, Any] = {
+                "type": UNTYPED_NODE_TYPE,
+                "name": str(item["name"]),
+                "off_schema_reason": "llm_out_of_schema",
+            }
+            proposed_type = item.get("proposed_type") or item.get("type")
+            if proposed_type:
+                ref["proposed_type"] = proposed_type
+            if item.get("reason"):
+                ref["proposed_reason"] = item["reason"]
+            if item.get("evidence"):
+                ref["evidence"] = item["evidence"]
+            candidates.append((confidence, ref))
+
+    candidates.sort(key=lambda pair: (-pair[0], str(pair[1]["name"])))
+    selected = [ref for _, ref in candidates[:max_entities]]
+    if not selected:
+        return seg
+    existing = {
+        (item.get("type"), item.get("name")) for item in seg.entity_refs_json
+    }
+    merged = list(seg.entity_refs_json)
+    merged.extend(
+        item
+        for item in selected
+        if (item.get("type"), item.get("name")) not in existing
+    )
+    return dataclasses.replace(seg, entity_refs_json=merged)

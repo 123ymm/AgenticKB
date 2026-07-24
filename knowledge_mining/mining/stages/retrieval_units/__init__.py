@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from knowledge_mining.mining.contracts.models import RawSegmentData, RetrievalUnitData
@@ -209,6 +210,12 @@ def build_retrieval_units(
     question_generator: QuestionGenerator | None = None,
     contextualizer: Contextualizer | None = None,
     profile: DomainProfile | None = None,
+    raw_text_unit: bool | None = None,
+    generated_question_unit: bool | None = None,
+    table_row_unit: bool | None = None,
+    max_questions_per_segment: int | None = None,
+    min_questionworthy_tokens: int | None = None,
+    apply_contextualizer: bool = True,
 ) -> list[RetrievalUnitData]:
     """Build retrieval units from segments.
 
@@ -234,8 +241,26 @@ def build_retrieval_units(
 
     strong_types = profile.strong_entity_types
     policy = profile.retrieval_policy
-    max_questions = policy.max_questions_per_segment
+    max_questions = (
+        policy.max_questions_per_segment
+        if max_questions_per_segment is None
+        else max_questions_per_segment
+    )
     max_entity_cards = policy.max_entity_cards_per_segment
+    question_policy = (
+        policy
+        if min_questionworthy_tokens is None
+        else replace(policy, min_questionworthy_tokens=min_questionworthy_tokens)
+    )
+    include_raw_text = True if raw_text_unit is None else raw_text_unit
+    include_questions = (
+        True if generated_question_unit is None else generated_question_unit
+    )
+    include_table_rows = (
+        profile.retrieval_policy.table_row != "off"
+        if table_row_unit is None
+        else table_row_unit
+    )
 
     qgen = question_generator
     ctxer = contextualizer
@@ -245,8 +270,10 @@ def build_retrieval_units(
     # Phase 1: Batch-generate all questions (submit all -> poll all)
     question_map: dict[str, list[str]] = {}
     qgen_task_ids: dict[str, str] = {}
-    if qgen is not None:
-        questionworthy = [s for s in segments if _is_questionworthy(s, policy)]
+    if qgen is not None and include_questions and max_questions > 0:
+        questionworthy = [
+            s for s in segments if _is_questionworthy(s, question_policy)
+        ]
         raw_question_map = qgen.generate_batch(questionworthy)
         # v1.5: prune invalid questions from LLM output
         for seg_key, questions in raw_question_map.items():
@@ -259,7 +286,11 @@ def build_retrieval_units(
     # Phase 1b: Batch-generate contextual descriptions (for search_text enrichment)
     context_map: dict[str, str] = {}
     ctxer_task_ids: dict[str, str] = {}
-    if ctxer is not None and profile.retrieval_policy.contextual_retrieval != "off":
+    if (
+        apply_contextualizer
+        and ctxer is not None
+        and profile.retrieval_policy.contextual_retrieval != "off"
+    ):
         document_text = "\n".join(s.raw_text for s in segments)
         try:
             context_map = ctxer.contextualize(
@@ -270,6 +301,14 @@ def build_retrieval_units(
                 ctxer_task_ids = ctxer.last_task_ids
         except Exception as e:
             logger.warning("Contextualization failed: %s", e)
+    elif not apply_contextualizer:
+        for segment in segments:
+            segment_key = f"{segment.document_key}#{segment.segment_index}"
+            context, task_id = _context_from_segment(segment)
+            if context:
+                context_map[segment_key] = context
+            if task_id:
+                ctxer_task_ids[segment_key] = task_id
 
     # Phase 2: Build units for each segment
     for seg in segments:
@@ -284,7 +323,10 @@ def build_retrieval_units(
         # 1. raw_text unit — enriched with section context + optional LLM context
         llm_context = context_map.get(seg_key, "")
         ctx_task_id = ctxer_task_ids.get(seg_key)
-        units.append(_make_raw_text_unit(seg, source_seg_id, llm_context, ctx_task_id))
+        if include_raw_text:
+            units.append(
+                _make_raw_text_unit(seg, source_seg_id, llm_context, ctx_task_id)
+            )
 
         # 2. entity_card units — only if policy enables it
         if profile.retrieval_policy.entity_card != "off":
@@ -305,7 +347,7 @@ def build_retrieval_units(
                         break
 
         # 3. table_row units — only if policy enables it
-        if profile.retrieval_policy.table_row != "off":
+        if include_table_rows:
             units.extend(_make_table_row_units(seg, source_seg_id))
 
         # 4. generated_question units (capped by profile policy, already pruned)
@@ -317,6 +359,14 @@ def build_retrieval_units(
             ))
 
     return units
+
+
+def _context_from_segment(seg: RawSegmentData) -> tuple[str, str | None]:
+    metadata = seg.metadata_json or {}
+    return (
+        str(metadata.get("context_description") or ""),
+        metadata.get("context_task_id"),
+    )
 
 
 # ---------------------------------------------------------------------------
