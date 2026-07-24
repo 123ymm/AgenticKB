@@ -5,6 +5,7 @@ from .document_executor import (
     WorkflowPaused,
     WorkflowRunFailed,
 )
+from .global_executor import GlobalExecutionResult, GlobalExecutor
 
 __all__ = [
     "DocumentExecutionResult",
@@ -12,4 +13,6 @@ __all__ = [
     "WorkflowCancelled",
     "WorkflowPaused",
     "WorkflowRunFailed",
+    "GlobalExecutionResult",
+    "GlobalExecutor",
 ]

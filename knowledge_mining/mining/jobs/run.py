@@ -424,6 +424,144 @@ def _has_proposed_candidates(asset_db: AssetCoreDB, domain_id: str) -> bool:
     return OntologyStore(asset_db.pool).count_proposed_candidates(domain_id) > 0
 
 
+def workflow_count_pending_entity_mentions(
+    asset_db: AssetCoreDB, run_id: str
+) -> int:
+    """Strict Workflow service: count pending mentions in the current Run."""
+    from knowledge_mining.mining.infra.ontology_store import GraphStore
+
+    return GraphStore(asset_db.pool).count_pending_mentions_for_run(run_id)
+
+
+def workflow_count_pending_ontology_candidates(
+    asset_db: AssetCoreDB, domain_id: str
+) -> int:
+    """Strict Workflow service: count all pending candidates in one Domain."""
+    from knowledge_mining.mining.infra.ontology_store import OntologyStore
+
+    return OntologyStore(asset_db.pool).count_proposed_candidates(domain_id)
+
+
+def workflow_run_induction_strict(
+    asset_db: AssetCoreDB,
+    *,
+    run_id: str,
+    node_id: str,
+    profile: DomainProfile,
+    llm_base_url: str | None,
+) -> dict[str, int]:
+    """Run ontology induction without the legacy error-swallowing boundary."""
+    del run_id, node_id
+    if not llm_base_url:
+        return {"candidates": 0}
+    from contextlib import ExitStack
+
+    from knowledge_mining.mining.infra.ontology_store import GraphStore, OntologyStore
+    from knowledge_mining.mining.stages.ontology_induction import OntologyInductor
+
+    ontology_store = OntologyStore(asset_db.pool)
+    graph_store = GraphStore(asset_db.pool)
+    if ontology_store.active_version(profile.domain_id) is None:
+        return {"candidates": 0}
+    inductor = OntologyInductor(
+        base_url=llm_base_url,
+        graph_store=graph_store,
+        ontology_store=ontology_store,
+        domain_id=profile.domain_id,
+        knowledge_domain=profile.domain_id,
+    )
+    with asset_db.transaction():
+        with ExitStack() as participants:
+            participants.enter_context(graph_store.join_transaction(asset_db))
+            participants.enter_context(ontology_store.join_transaction(asset_db))
+            summary = inductor.induce()
+    return dict(summary or {})
+
+
+def workflow_write_graph_strict(
+    asset_db: AssetCoreDB,
+    *,
+    run_id: str,
+    profile: DomainProfile,
+) -> dict[str, int]:
+    """Recount and write the final graph atomically; never swallow failure."""
+    from contextlib import ExitStack
+
+    from knowledge_mining.mining.infra.ontology_store import GraphStore, OntologyStore
+    from knowledge_mining.mining.stages.entity_relations import EntityRelationBuilder
+    from knowledge_mining.mining.stages.graph_write import (
+        persist_edges,
+        reaggregate_edges,
+    )
+
+    ontology_store = OntologyStore(asset_db.pool)
+    graph_store = GraphStore(asset_db.pool)
+    with asset_db.transaction():
+        with ExitStack() as participants:
+            participants.enter_context(graph_store.join_transaction(asset_db))
+            participants.enter_context(ontology_store.join_transaction(asset_db))
+            active = ontology_store.active_version(profile.domain_id)
+            if active is None:
+                raise RuntimeError("frozen ontology is no longer available")
+            members = ontology_store.accepted_node_type_members(profile.domain_id)
+            rebound = (
+                graph_store.rebind_untyped_entities(profile.domain_id, members)
+                if members
+                else 0
+            )
+            rows = graph_store.resolved_mentions_for_run(run_id)
+            recounted = _recount_entities(graph_store, rows)
+            relation_builder = EntityRelationBuilder(
+                ontology_store=ontology_store,
+                domain_id=profile.domain_id,
+            )
+            graph, entity_ids = reaggregate_edges(
+                rows,
+                domain_id=profile.domain_id,
+                relation_builder=relation_builder,
+            )
+            edges = persist_edges(
+                graph_store,
+                graph,
+                entity_ids,
+                domain_id=profile.domain_id,
+                ontology_version_id=active["id"],
+            )
+    return {"rebound": rebound, "recounted": recounted, "edges": edges}
+
+
+def workflow_finalize_mining_strict(
+    asset_db: AssetCoreDB,
+    runtime_db: MiningRuntimeDB,
+    tracker: Any,
+    *,
+    run_id: str,
+    profile: DomainProfile,
+    channel: str,
+    execution_mode: str,
+    publish_on_partial_failure: bool,
+) -> dict[str, Any]:
+    """Build, validate, publish, and converge one Workflow Run."""
+    run_data = runtime_db.get_run(run_id)
+    if run_data is None:
+        raise LookupError(f"Run {run_id} not found")
+    decisions, counts = _rebuild_from_run_documents(runtime_db, run_id)
+    return _finalize_run(
+        asset_db,
+        runtime_db,
+        tracker,
+        run_id,
+        run_data.get("source_batch_id"),
+        decisions,
+        counts,
+        int(run_data.get("total_documents") or len(decisions)),
+        execution_mode == "assets_only",
+        publish_on_partial_failure,
+        profile,
+        channel=channel,
+    )
+
+
 def _run_induction(
     asset_db: AssetCoreDB,
     tracker: Any,
