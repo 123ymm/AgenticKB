@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -35,6 +36,7 @@ class MiningConfig(BaseSettings):
     domain: str = "cloud_core_network"
     domain_pack: str = ""
     max_workers: int = 4
+    mining_run_submission_engine: Literal["legacy", "workflow"] = "legacy"
 
     model_config = {
         "env_prefix": "",

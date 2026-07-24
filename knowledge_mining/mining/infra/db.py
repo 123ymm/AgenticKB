@@ -1006,14 +1006,21 @@ class MiningRuntimeDB(_DB):
                    (id, source_batch_id, input_path, domain, channel, status, current_stage, build_id,
                     total_documents, new_count, updated_count, skipped_count,
                     failed_count, committed_count, started_at, finished_at,
-                    error_summary, metadata_json)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    error_summary, metadata_json, execution_engine, workflow_id,
+                    workflow_version, workflow_version_id, workflow_graph_hash,
+                    workflow_manifest_json)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                       %s, %s, %s, %s, %s, %s)""",
             (
                 data.id, data.source_batch_id, data.input_path, data.domain, data.channel,
                 data.status, data.current_stage, data.build_id,
                 data.total_documents, data.new_count, data.updated_count, data.skipped_count,
                 data.failed_count, data.committed_count, data.started_at or _utcnow(),
                 data.finished_at, data.error_summary, _json_dumps(data.metadata_json),
+                data.execution_engine, data.workflow_id, data.workflow_version,
+                data.workflow_version_id, data.workflow_graph_hash,
+                _json_dumps(data.workflow_manifest_json)
+                if data.workflow_manifest_json is not None else None,
             ),
         )
         return data.id

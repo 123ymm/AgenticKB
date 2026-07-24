@@ -314,6 +314,12 @@ class MiningRunData:
     channel: str | None = None
     status: str = "queued"
     current_stage: str = "queued"
+    execution_engine: str = "legacy"
+    workflow_id: str | None = None
+    workflow_version: int | None = None
+    workflow_version_id: str | None = None
+    workflow_graph_hash: str | None = None
+    workflow_manifest_json: dict[str, Any] | None = None
     build_id: str | None = None
     total_documents: int = 0
     new_count: int = 0

@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from knowledge_mining.mining.infra.archive_extractor import extract_archive
+from knowledge_mining.mining.infra.mining_config import MiningConfig
 from knowledge_mining.mining.infra.upload_config import UploadConfig
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 _cfg = UploadConfig()
 
 _DOMAIN_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+_BATCH_PATTERN = re.compile(r"^[a-f0-9]{12}$")
 
 _ACCEPTED_EXTENSIONS = [
     ".md", ".txt", ".pdf", ".html", ".htm", ".doc", ".docx", ".zip",
@@ -59,7 +61,19 @@ async def get_upload_config() -> dict[str, Any]:
         "max_archive_size_mb": _cfg.max_archive_size_mb,
         "accepted_extensions": _ACCEPTED_EXTENSIONS,
         "archive_extensions": list(_cfg.archive_exts_set),
+        "mining_run_submission_engine": MiningConfig().mining_run_submission_engine,
     }
+
+
+def resolve_upload_batch_path(domain: str, upload_batch_id: str) -> Path:
+    safe_domain = _validate_domain(domain)
+    if not _BATCH_PATTERN.fullmatch(upload_batch_id):
+        raise HTTPException(422, "Invalid upload_batch_id")
+    root = _cfg.upload_root_path.resolve()
+    candidate = (root / safe_domain / upload_batch_id).resolve()
+    if root not in candidate.parents or not candidate.is_dir():
+        raise HTTPException(404, "Upload batch not found")
+    return candidate
 
 
 @router.post("")
