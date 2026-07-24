@@ -548,8 +548,14 @@ def resolve_stage(
     return ctx.with_updates(segments=tuple(resolved))
 
 
-def entity_relations_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext:
+def entity_relations_stage(
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: Any | None = None,
+) -> DocumentContext:
     """Stage 3c: 概念关系抽取（pattern 约束，产候选边写进 segment metadata）。"""
+    del options
     builder = cfg.entity_relation_builder
     if builder is None or not ctx.segments:
         return ctx
@@ -580,9 +586,13 @@ def discourse_stage(
 
 
 def contextual_retrieval_stage(
-    ctx: DocumentContext, cfg: PipelineConfig
+    ctx: DocumentContext,
+    cfg: PipelineConfig,
+    *,
+    options: Any | None = None,
 ) -> DocumentContext:
     """Generate contextual descriptions once and freeze them on segment metadata."""
+    del options
     contextualizer = cfg.contextualizer
     if contextualizer is None or not ctx.segments:
         return ctx

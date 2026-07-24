@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -52,6 +53,185 @@ class ErrorPolicy(str, Enum):
     SKIP_WITH_EMPTY = "SKIP_WITH_EMPTY"
     FALLBACK = "FALLBACK"
     PAUSE_FOR_REVIEW = "PAUSE_FOR_REVIEW"
+
+
+class OperatorStatus(StrEnum):
+    SUCCESS = "success"
+    SKIPPED = "skipped"
+    FALLBACK = "fallback"
+    FAILED = "failed"
+    PAUSED = "paused"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True)
+class OperatorWarning:
+    code: str
+    message: str
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "details", _freeze_value(self.details))
+
+
+@dataclass(frozen=True)
+class OperatorResult:
+    outputs: object | None
+    capabilities: frozenset[str]
+    status: OperatorStatus
+    warnings: tuple[OperatorWarning, ...] = ()
+    error_code: str | None = None
+    error_message: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "capabilities", frozenset(self.capabilities))
+        object.__setattr__(self, "warnings", tuple(self.warnings))
+
+
+@dataclass(frozen=True)
+class DocumentState:
+    run_document_id: str
+    doc_key: str
+    context: Any
+    capabilities: frozenset[str] = frozenset()
+    tags: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.run_document_id:
+            raise ValueError("run_document_id is required")
+        if not self.doc_key:
+            raise ValueError("doc_key is required")
+        object.__setattr__(self, "capabilities", frozenset(self.capabilities))
+        object.__setattr__(self, "tags", tuple(self.tags))
+
+    def fork(self) -> "DocumentState":
+        return DocumentState(
+            self.run_document_id,
+            self.doc_key,
+            deepcopy(self.context),
+            self.capabilities,
+            self.tags,
+        )
+
+    def with_context(
+        self, context: Any, *, capabilities: frozenset[str] = frozenset()
+    ) -> "DocumentState":
+        return DocumentState(
+            self.run_document_id,
+            self.doc_key,
+            context,
+            self.capabilities | capabilities,
+            self.tags,
+        )
+
+    @staticmethod
+    def batch(states: list["DocumentState"] | tuple["DocumentState", ...]) -> tuple["DocumentState", ...]:
+        result = tuple(states)
+        identities = [item.run_document_id for item in result]
+        if len(identities) != len(set(identities)):
+            raise ValueError("duplicate run_document_id in document batch")
+        return result
+
+    @staticmethod
+    def merge_batches(
+        batches: list[tuple["DocumentState", ...]],
+    ) -> tuple["DocumentState", ...]:
+        if not batches:
+            return ()
+        normalized = [DocumentState.batch(batch) for batch in batches]
+        first = normalized[0]
+        order = [item.run_document_id for item in first]
+        expected = set(order)
+        indexes = [
+            {item.run_document_id: item for item in batch} for batch in normalized
+        ]
+        for index in indexes[1:]:
+            if set(index) != expected:
+                raise ValueError("document branch identity set mismatch")
+
+        merged: list[DocumentState] = []
+        for identity in order:
+            states = [index[identity] for index in indexes]
+            doc_key = states[0].doc_key
+            if any(item.doc_key != doc_key for item in states[1:]):
+                raise ValueError(f"doc_key drift for {identity}")
+            tags: list[str] = []
+            capabilities: set[str] = set()
+            for item in states:
+                capabilities.update(item.capabilities)
+                for tag in item.tags:
+                    if tag not in tags:
+                        tags.append(tag)
+            context = deepcopy(states[0].context)
+            for item in states[1:]:
+                context = _merge_document_context(context, item.context)
+            merged.append(DocumentState(
+                identity, doc_key, context, frozenset(capabilities), tuple(tags)
+            ))
+        return tuple(merged)
+
+
+def _merge_document_context(left: Any, right: Any) -> Any:
+    if left == right:
+        return left
+    if not hasattr(left, "with_updates") or not hasattr(right, "with_updates"):
+        return deepcopy(right)
+    updates: dict[str, Any] = {}
+    for name in (
+        "raw_file",
+        "profile",
+        "tree",
+        "action",
+        "existing_doc",
+        "document_id",
+        "snapshot_id",
+    ):
+        left_value = getattr(left, name, None)
+        right_value = getattr(right, name, None)
+        if left_value is None and right_value is not None:
+            updates[name] = deepcopy(right_value)
+    for name, key in (
+        ("relations", lambda item: (
+            item.source_segment_key, item.target_segment_key, item.relation_type
+        )),
+        ("retrieval_units", lambda item: item.unit_key),
+        ("embeddings", lambda item: item.get("unit_key")),
+    ):
+        combined = list(getattr(left, name, ()) or ())
+        seen = {key(item) for item in combined}
+        for item in getattr(right, name, ()) or ():
+            if key(item) not in seen:
+                combined.append(deepcopy(item))
+                seen.add(key(item))
+        if combined:
+            updates[name] = tuple(combined)
+    left_ids = dict(getattr(left, "seg_ids", {}) or {})
+    left_ids.update(deepcopy(getattr(right, "seg_ids", {}) or {}))
+    if left_ids:
+        updates["seg_ids"] = left_ids
+    left_segments = tuple(getattr(left, "segments", ()) or ())
+    right_segments = tuple(getattr(right, "segments", ()) or ())
+    if not left_segments and right_segments:
+        updates["segments"] = deepcopy(right_segments)
+    return left.with_updates(**updates) if updates else left
+
+
+@dataclass(frozen=True)
+class OperatorRuntimeContext:
+    domain: str
+    channel: str
+    domain_profile: Any
+    ontology_version_id: str | None
+    asset_repository: Any
+    runtime_repository: Any
+    tracker: Any
+    services: Any
+    publish_lock_provider: Any
+    cancellation_check: Any
+    manifest: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "manifest", _freeze_value(self.manifest))
 
 
 @dataclass(frozen=True)
