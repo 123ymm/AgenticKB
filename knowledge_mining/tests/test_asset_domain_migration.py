@@ -154,16 +154,31 @@ def test_schema_runner_applies_domain_migration_transactionally(monkeypatch) -> 
 
     paths = [
         DdlPath(name)
-        for name in ("asset", "runtime", "runtime_v3", "runtime_v4", "domain", "ontology")
+        for name in (
+            "asset",
+            "runtime",
+            "runtime_v3",
+            "runtime_v4",
+            "runtime_v5",
+            "domain",
+            "ontology",
+            "workflow_control",
+        )
     ]
     monkeypatch.setattr(pg_schema, "_ASSET_DDL", paths[0])
     monkeypatch.setattr(pg_schema, "_RUNTIME_DDL", paths[1])
     monkeypatch.setattr(pg_schema, "_RUNTIME_DDL_V3", paths[2])
     monkeypatch.setattr(pg_schema, "_RUNTIME_DDL_V4", paths[3])
-    monkeypatch.setattr(pg_schema, "_ASSET_DOMAIN_DDL", paths[4], raising=False)
-    monkeypatch.setattr(pg_schema, "_ONTOLOGY_DDL", paths[5])
+    monkeypatch.setattr(pg_schema, "_RUNTIME_DDL_V5", paths[4])
+    monkeypatch.setattr(pg_schema, "_ASSET_DOMAIN_DDL", paths[5], raising=False)
+    monkeypatch.setattr(pg_schema, "_ONTOLOGY_DDL", paths[6])
+    monkeypatch.setattr(pg_schema, "_WORKFLOW_CONTROL_DDL", paths[7])
     monkeypatch.setattr(pg_schema, "ensure_database", lambda cfg: None)
-    monkeypatch.setattr(pg_schema.psycopg, "connect", lambda *args, **kwargs: Connection())
+    monkeypatch.setattr(
+        pg_schema,
+        "_connect_safely",
+        lambda *args, **kwargs: Connection(),
+    )
     calls: list[tuple[str, bool]] = []
 
     def record_ddl(connection, ddl: str, *, transactional: bool = False) -> None:
@@ -177,8 +192,10 @@ def test_schema_runner_applies_domain_migration_transactionally(monkeypatch) -> 
         ("runtime", False),
         ("runtime_v3", False),
         ("runtime_v4", True),
+        ("runtime_v5", True),
         ("domain", True),
         ("ontology", False),
+        ("workflow_control", False),
     ]
 
 
