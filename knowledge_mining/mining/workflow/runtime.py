@@ -66,6 +66,24 @@ class MiningWorkflowRuntime:
     def publish(self) -> WorkflowRuntimeResult:
         manifest = self.context.runtime_repository.load_manifest(self.run_id)
         plan = self._verify_and_build_plan(manifest)
+        published = self._published_capabilities(plan)
+        if published is not None:
+            return WorkflowRuntimeResult(
+                self.run_id,
+                "completed",
+                frozenset({"assets_persisted"}) | published,
+            )
+        if not self.context.services.claim_manual_publish():
+            published = self._published_capabilities(plan)
+            if published is not None:
+                return WorkflowRuntimeResult(
+                    self.run_id,
+                    "completed",
+                    frozenset({"assets_persisted"}) | published,
+                )
+            raise ValueError(
+                f"Run {self.run_id} could not be claimed for publishing"
+            )
         document_states = self._execute_input(plan)
         document_result = DocumentExecutor(self.context).execute(
             plan,
@@ -78,9 +96,14 @@ class MiningWorkflowRuntime:
         if not document_result.outcomes:
             capabilities.add("assets_persisted")
         self.context.services.initial_global_capabilities = frozenset(capabilities)
-        replay_nodes = self._publish_replay_nodes(plan)
+        finalize_node_id = self._finalize_node_id(plan)
         global_result = GlobalExecutor(self.context).execute(
-            plan, replay_nodes=replay_nodes
+            plan,
+            replay_nodes=(
+                frozenset({finalize_node_id})
+                if finalize_node_id is not None
+                else frozenset()
+            ),
         )
         capabilities.update(global_result.capabilities)
         return WorkflowRuntimeResult(
@@ -90,27 +113,34 @@ class MiningWorkflowRuntime:
             global_result.pause_step,
         )
 
-    def _publish_replay_nodes(self, plan: ExecutionPlan) -> frozenset[str]:
-        finalize = next(
+    @staticmethod
+    def _finalize_node_id(plan: ExecutionPlan) -> str | None:
+        return next(
             (
-                plan.node(node_id)
+                node_id
                 for node_id in plan.global_order
                 if plan.node(node_id).operator_type == "mining_finalize"
             ),
             None,
         )
-        if finalize is None:
-            return frozenset()
+
+    def _published_capabilities(
+        self, plan: ExecutionPlan
+    ) -> frozenset[str] | None:
+        finalize_node_id = self._finalize_node_id(plan)
+        if finalize_node_id is None:
+            return None
         loader = getattr(
             self.context.runtime_repository, "reusable_node_result", None
         )
         if loader is not None:
-            reusable = loader(self.run_id, finalize.node_id, None)
-            if reusable is not None and "release_published" in set(
-                reusable.get("capabilities") or ()
-            ):
-                return frozenset()
-        return frozenset({finalize.node_id})
+            reusable = loader(self.run_id, finalize_node_id, None)
+            capabilities = frozenset(
+                (reusable or {}).get("capabilities") or ()
+            )
+            if "release_published" in capabilities:
+                return capabilities
+        return None
 
     def _execute_input(self, plan: ExecutionPlan) -> tuple[DocumentState, ...]:
         value = getattr(self.context.services, "input_spec", None)

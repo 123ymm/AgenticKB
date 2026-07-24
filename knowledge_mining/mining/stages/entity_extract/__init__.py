@@ -62,12 +62,21 @@ class EntityExtractor:
         """抽取允许的对象类型：优先读 active 本体点类型，回落 domain.yaml。"""
         store = self._ontology_store
         if store is not None and self._domain_id:
+            if self._ontology_version_id:
+                try:
+                    rows = store.node_types_for_version(
+                        self._ontology_version_id
+                    )
+                    return frozenset(r["name"] for r in rows)
+                except Exception:
+                    logger.warning(
+                        "frozen node type lookup failed for %s; using empty schema",
+                        self._ontology_version_id,
+                        exc_info=True,
+                    )
+                    return frozenset()
             try:
-                rows = (
-                    store.node_types_for_version(self._ontology_version_id)
-                    if self._ontology_version_id
-                    else store.active_node_types(self._domain_id)
-                )
+                rows = store.active_node_types(self._domain_id)
                 if rows:
                     return frozenset(r["name"] for r in rows)
             except Exception:
@@ -153,6 +162,7 @@ class EntityExtractor:
                 max_entities=(
                     kwargs.get("max_entities_per_segment") if strict_options else None
                 ),
+                enforce_allowed_types=self._ontology_version_id is not None,
             )
             if sub_idx in llm_results
             else seg
@@ -180,6 +190,7 @@ def _apply_entity_result(
     min_confidence: float | None = None,
     allow_out_of_schema: bool | None = None,
     max_entities: int | None = None,
+    enforce_allowed_types: bool = False,
 ) -> RawSegmentData:
     """把双通道抽取结果落进 segment.entity_refs_json（N1 重排，L1 §12 / L2 §15.2）。
 
@@ -208,6 +219,7 @@ def _apply_entity_result(
                 True if allow_out_of_schema is None else allow_out_of_schema
             ),
             max_entities=max_entities or 20,
+            enforce_allowed_types=enforce_allowed_types,
         )
 
     entity_refs: list[dict[str, Any]] = []
@@ -232,7 +244,11 @@ def _apply_entity_result(
         etype = e.get("type", "unknown")
         conf = e.get("confidence")
         conf_ok = not isinstance(conf, (int, float)) or conf >= _MIN_ENTITY_CONFIDENCE
-        type_ok = not allowed_types or etype in allowed_types
+        type_ok = (
+            etype in allowed_types
+            if enforce_allowed_types
+            else not allowed_types or etype in allowed_types
+        )
         if type_ok and conf_ok:
             entity_refs.append({"type": etype, "name": name})
         elif not type_ok:
@@ -276,6 +292,7 @@ def _apply_entity_result_with_options(
     min_confidence: float,
     allow_out_of_schema: bool,
     max_entities: int,
+    enforce_allowed_types: bool = False,
 ) -> RawSegmentData:
     candidates: list[tuple[float, dict[str, Any]]] = []
 
@@ -291,7 +308,12 @@ def _apply_entity_result_with_options(
             continue
         name = str(item["name"])
         entity_type = str(item.get("type") or "unknown")
-        if not allowed_types or entity_type in allowed_types:
+        type_ok = (
+            entity_type in allowed_types
+            if enforce_allowed_types
+            else not allowed_types or entity_type in allowed_types
+        )
+        if type_ok:
             ref = {"type": entity_type, "name": name}
         elif allow_out_of_schema:
             ref = {

@@ -155,6 +155,7 @@ def runtime_context(manifest, registry, calls):
         active_operator_type=None,
         initial_global_capabilities=frozenset(),
         execution_mode="publish",
+        claim_manual_publish=lambda: True,
     )
     return SimpleNamespace(
         domain="odn",
@@ -278,6 +279,31 @@ def test_manual_publish_replays_finalize_after_assets_only_execution() -> None:
     assert "release_published" in published.capabilities
     assert "release_published" in published_again.capabilities
     assert [name for name, _ in calls].count("mining_finalize") == 2
+    assert [name for name, _ in calls].count("input_ingest") == 2
+
+
+def test_manual_publish_claim_conflict_stops_before_reading_input() -> None:
+    manifest = minimal_manifest()
+    calls = []
+    registry = HandlerRegistry()
+    context, input_handler, document_handler, finalize_handler = runtime_context(
+        manifest, registry, calls
+    )
+    registry.register("input_ingest", "1", input_handler)
+    registry.register("parse_segment", "1", document_handler("parse_segment"))
+    registry.register("asset_persist", "1", document_handler("asset_persist"))
+    registry.register("mining_finalize", "1", finalize_handler)
+    runtime = MiningWorkflowRuntime(context, run_id="run-1")
+    context.services.execution_mode = "assets_only"
+    runtime.execute()
+    calls_before_publish = list(calls)
+    context.services.execution_mode = "publish"
+    context.services.claim_manual_publish = lambda: False
+
+    with pytest.raises(ValueError, match="claimed for publishing"):
+        runtime.publish()
+
+    assert calls == calls_before_publish
 
 
 @pytest.mark.parametrize(

@@ -660,6 +660,14 @@ class _WorkflowJobServices:
             ontology_version_id=self.ontology_version_id,
         )
 
+    def claim_manual_publish(self) -> bool:
+        claimed = self.tracker.begin_manual_publish(
+            self.run_id, domain=self.profile.domain_id
+        )
+        if claimed:
+            self.runtime_db.commit()
+        return claimed
+
     def finalize_mining(
         self,
         run_id: str,
@@ -667,16 +675,6 @@ class _WorkflowJobServices:
         execution_mode: str,
         publish_on_partial_failure: bool,
     ):
-        if self.action == "publish":
-            current = self.runtime_db.get_run(run_id) or {}
-            if current.get("status") == "completed":
-                if not self.tracker.begin_manual_publish(
-                    run_id, domain=self.profile.domain_id
-                ):
-                    raise RuntimeError(
-                        f"Run {run_id} could not be claimed for publishing"
-                    )
-                self.runtime_db.commit()
         return workflow_finalize_mining_strict(
             self.asset_db,
             self.runtime_db,

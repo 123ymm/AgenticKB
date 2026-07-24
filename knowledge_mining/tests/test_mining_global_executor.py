@@ -349,17 +349,12 @@ def test_workflow_services_forward_frozen_ontology_version(monkeypatch) -> None:
     ]
 
 
-def test_workflow_service_claims_assets_only_run_before_manual_publish(
-    monkeypatch,
-) -> None:
+def test_workflow_service_claims_assets_only_run_before_manual_publish() -> None:
     from knowledge_mining.mining.jobs import run as run_job
 
     calls = []
 
     class RuntimeDB:
-        def get_run(self, run_id):
-            return {"status": "completed"}
-
         def commit(self):
             calls.append("commit")
 
@@ -368,22 +363,13 @@ def test_workflow_service_claims_assets_only_run_before_manual_publish(
             calls.append(("claim", run_id, domain))
             return True
 
-    monkeypatch.setattr(
-        run_job,
-        "workflow_finalize_mining_strict",
-        lambda *args, **kwargs: calls.append(("finalize", kwargs)) or {},
-    )
     services = object.__new__(run_job._WorkflowJobServices)
-    services.action = "publish"
-    services.asset_db = object()
     services.runtime_db = RuntimeDB()
     services.tracker = Tracker()
     services.profile = SimpleNamespace(domain_id="odn")
-    services.channel = "prod"
+    services.run_id = "run-1"
 
-    services.finalize_mining(
-        "run-1", execution_mode="publish", publish_on_partial_failure=False
-    )
+    claimed = services.claim_manual_publish()
 
-    assert calls[:2] == [("claim", "run-1", "odn"), "commit"]
-    assert calls[2][0] == "finalize"
+    assert claimed is True
+    assert calls == [("claim", "run-1", "odn"), "commit"]
