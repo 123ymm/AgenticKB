@@ -8,12 +8,47 @@
 """
 from __future__ import annotations
 
-from knowledge_mining.mining.stages.ontology_induction import _build_type_candidates
+from knowledge_mining.mining.stages.ontology_induction import (
+    OntologyInductor,
+    _build_type_candidates,
+)
 
 
 def _ent(eid: str, name: str, *, docs: int, mentions: int) -> dict:
     return {"id": eid, "canonical_name": name, "document_count": docs,
             "mention_count": mentions, "members": []}
+
+
+def test_induction_prompt_reads_types_from_frozen_ontology_version() -> None:
+    class GraphStore:
+        def confirmed_untyped_entities(self, domain_id):
+            return [
+                _ent("e1", "A", docs=1, mentions=1),
+                _ent("e2", "B", docs=1, mentions=1),
+            ]
+
+    class OntologyStore:
+        def node_types_for_version(self, version_id):
+            assert version_id == "ontology-frozen"
+            return [{"name": "frozen_type"}]
+
+        def active_node_types(self, domain_id):
+            raise AssertionError("current active ontology must not be read")
+
+    class Client:
+        def submit_task(self, **kwargs):
+            assert kwargs["input"]["existing_types"] == "frozen_type"
+            return None
+
+    inductor = OntologyInductor(
+        graph_store=GraphStore(),
+        ontology_store=OntologyStore(),
+        domain_id="odn",
+        ontology_version_id="ontology-frozen",
+    )
+    inductor._client = Client()
+
+    assert inductor.induce() == {"entities": 2, "candidates": 0}
 
 
 def test_members_mapped_to_ids_and_kept() -> None:

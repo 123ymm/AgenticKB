@@ -48,6 +48,7 @@ class EntityExtractor:
         knowledge_domain: str | None = None,
         ontology_store: "OntologyStore | None" = None,
         domain_id: str | None = None,
+        ontology_version_id: str | None = None,
     ) -> None:
         from knowledge_mining.mining.infra.llm_client import LlmClient
         self._client = LlmClient(base_url=base_url)
@@ -55,13 +56,18 @@ class EntityExtractor:
         self._knowledge_domain = knowledge_domain or (profile.domain_id if profile else None)
         self._ontology_store = ontology_store
         self._domain_id = domain_id or (profile.domain_id if profile else None)
+        self._ontology_version_id = ontology_version_id
 
     def _resolve_allowed_types(self) -> frozenset[str]:
         """抽取允许的对象类型：优先读 active 本体点类型，回落 domain.yaml。"""
         store = self._ontology_store
         if store is not None and self._domain_id:
             try:
-                rows = store.active_node_types(self._domain_id)
+                rows = (
+                    store.node_types_for_version(self._ontology_version_id)
+                    if self._ontology_version_id
+                    else store.active_node_types(self._domain_id)
+                )
                 if rows:
                     return frozenset(r["name"] for r in rows)
             except Exception:

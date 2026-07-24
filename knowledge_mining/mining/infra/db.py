@@ -1064,6 +1064,8 @@ class MiningRuntimeDB(_DB):
         current_stage: str | None = None,
         domain: str | None = None,
         expected_statuses: tuple[str, ...] | None = None,
+        clear_finished_at: bool = False,
+        clear_error_summary: bool = False,
         **counters: int,
     ) -> bool:
         parts = ["status = %s"]
@@ -1074,6 +1076,10 @@ class MiningRuntimeDB(_DB):
         if error_summary is not None:
             parts.append("error_summary = %s")
             params.append(error_summary)
+        elif clear_error_summary:
+            parts.append("error_summary = NULL")
+        if clear_finished_at:
+            parts.append("finished_at = NULL")
         if build_id is not None:
             parts.append("build_id = %s")
             params.append(build_id)

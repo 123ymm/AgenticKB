@@ -64,7 +64,53 @@ class MiningWorkflowRuntime:
         return self.execute()
 
     def publish(self) -> WorkflowRuntimeResult:
-        return self.execute()
+        manifest = self.context.runtime_repository.load_manifest(self.run_id)
+        plan = self._verify_and_build_plan(manifest)
+        document_states = self._execute_input(plan)
+        document_result = DocumentExecutor(self.context).execute(
+            plan,
+            document_states,
+            max_workers=int(getattr(self.context.services, "max_workers", 1)),
+        )
+        capabilities: set[str] = set()
+        for outcome in document_result.outcomes:
+            capabilities.update(outcome.state.capabilities)
+        if not document_result.outcomes:
+            capabilities.add("assets_persisted")
+        self.context.services.initial_global_capabilities = frozenset(capabilities)
+        replay_nodes = self._publish_replay_nodes(plan)
+        global_result = GlobalExecutor(self.context).execute(
+            plan, replay_nodes=replay_nodes
+        )
+        capabilities.update(global_result.capabilities)
+        return WorkflowRuntimeResult(
+            self.run_id,
+            "awaiting_review" if global_result.paused else "completed",
+            frozenset(capabilities),
+            global_result.pause_step,
+        )
+
+    def _publish_replay_nodes(self, plan: ExecutionPlan) -> frozenset[str]:
+        finalize = next(
+            (
+                plan.node(node_id)
+                for node_id in plan.global_order
+                if plan.node(node_id).operator_type == "mining_finalize"
+            ),
+            None,
+        )
+        if finalize is None:
+            return frozenset()
+        loader = getattr(
+            self.context.runtime_repository, "reusable_node_result", None
+        )
+        if loader is not None:
+            reusable = loader(self.run_id, finalize.node_id, None)
+            if reusable is not None and "release_published" in set(
+                reusable.get("capabilities") or ()
+            ):
+                return frozenset()
+        return frozenset({finalize.node_id})
 
     def _execute_input(self, plan: ExecutionPlan) -> tuple[DocumentState, ...]:
         value = getattr(self.context.services, "input_spec", None)

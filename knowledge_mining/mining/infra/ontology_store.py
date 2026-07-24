@@ -70,6 +70,19 @@ class OntologyStore(_DB):
             (domain_id,),
         )
 
+    def version(
+        self, version_id: str, domain_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Return an immutable ontology version by id, optionally domain-scoped."""
+        if domain_id is None:
+            return self._fetchone(
+                "SELECT * FROM ontology_versions WHERE id = %s", (version_id,)
+            )
+        return self._fetchone(
+            "SELECT * FROM ontology_versions WHERE id = %s AND domain_id = %s",
+            (version_id, domain_id),
+        )
+
     def list_versions(self, domain_id: str) -> list[dict[str, Any]]:
         return self._fetchall(
             "SELECT * FROM ontology_versions WHERE domain_id = %s ORDER BY version_no DESC",
@@ -337,6 +350,7 @@ class OntologyStore(_DB):
             "WHERE domain_id = %s AND kind = %s AND proposed_name = %s",
             (domain_id, kind, proposed_name),
         )
+
         contributions = list((existing or {}).get("evidence_json") or [])
         key = (run_id, node_id, run_document_id)
         retained = []

@@ -1137,13 +1137,29 @@ class ResumeRunRequest(BaseModel):
     publish_on_partial_failure: bool = False
 
 
+def _is_run_resumable(
+    *,
+    execution_engine: str,
+    status: str,
+    subloop_stage: str | None,
+    finished_at: Any,
+) -> bool:
+    if status == "awaiting_review":
+        return True
+    if execution_engine == "workflow":
+        return status in {"failed", "interrupted"} or (
+            status == "running" and finished_at is None
+        )
+    return status == "running" and subloop_stage == "done" and finished_at is None
+
+
 @router.post("/{run_id}/resume")
 async def resume_run(
     run_id: str, request: Request,
     domain: str = Query(..., min_length=1),
     body: ResumeRunRequest | None = None,
 ) -> dict:
-    """B6/B7：人审提交后续跑一个 awaiting_review 的 run。
+    """Resume a review-paused or recoverable interrupted mining Run.
 
     重新评估两道检查点：仍有待办 → 保持 awaiting_review 刷新 subloop_stage；
     都清空 → 从 graph_write 之后续跑（建库 + 发布），不重抽文档。
@@ -1159,7 +1175,8 @@ async def resume_run(
     # 快速读当前 run 状态（同时拿 domain，避免再查一次）
     async with pool.connection() as conn:
         cur = await conn.execute(
-            "SELECT domain, status, subloop_stage, finished_at FROM mining_runs WHERE id = %s",
+            "SELECT domain, status, subloop_stage, finished_at, execution_engine "
+            "FROM mining_runs WHERE id = %s",
             [run_id],
         )
         row = await cur.fetchone()
@@ -1175,8 +1192,14 @@ async def resume_run(
     if status == "completed":
         return {"run_id": run_id, "status": "completed", "message": "该 run 已完成，无需继续"}
 
-    # 可续跑：① 人审暂停；② 收尾中断卡在 running/done（finished_at 仍空）的恢复。
-    resumable = status == "awaiting_review" or (status == "running" and stage == "done" and finished is None)
+    # Workflow additionally resumes failed/interrupted/crashed running states;
+    # legacy keeps its historical awaiting_review and running/done policy.
+    resumable = _is_run_resumable(
+        execution_engine=str(row.get("execution_engine") or "legacy"),
+        status=status,
+        subloop_stage=stage,
+        finished_at=finished,
+    )
     if not resumable:
         raise HTTPException(
             400, f"Run {run_id} 当前状态为 {status}{f'/{stage}' if stage else ''}，无法继续挖掘")

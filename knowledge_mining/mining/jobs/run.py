@@ -558,6 +558,7 @@ class _WorkflowJobServices:
         llm_base_url: str | None,
         max_workers: int,
         execution_mode: str,
+        ontology_version_id: str | None,
         manifest: dict[str, Any],
     ) -> None:
         from types import SimpleNamespace
@@ -577,6 +578,7 @@ class _WorkflowJobServices:
         self.llm_base_url = llm_base_url
         self.max_workers = max_workers
         self.execution_mode = execution_mode
+        self.ontology_version_id = ontology_version_id
         self.manifest = manifest
         self.handler_registry = builtin_handler_registry()
         self.input_spec = {
@@ -592,6 +594,7 @@ class _WorkflowJobServices:
             profile,
             knowledge_domain=profile.domain_id,
             ontology_store=self.ontology_store,
+            ontology_version_id=ontology_version_id,
         ) or {}
         has_ontology = (
             (manifest.get("runtimeBinding") or {}).get("ontologyApplicable")
@@ -605,7 +608,11 @@ class _WorkflowJobServices:
             entity_extractor=llm.get("entity_extractor") if has_ontology else None,
             resolver=_init_resolver(asset_db, profile) if has_ontology else None,
             entity_relation_builder=(
-                _init_relation_builder(asset_db, profile)
+                _init_relation_builder(
+                    asset_db,
+                    profile,
+                    ontology_version_id=ontology_version_id,
+                )
                 if has_ontology
                 else None
             ),
@@ -642,11 +649,15 @@ class _WorkflowJobServices:
             node_id=node_id,
             profile=self.profile,
             llm_base_url=self.llm_base_url,
+            ontology_version_id=self.ontology_version_id,
         )
 
     def write_graph_strict(self, run_id: str):
         return workflow_write_graph_strict(
-            self.asset_db, run_id=run_id, profile=self.profile
+            self.asset_db,
+            run_id=run_id,
+            profile=self.profile,
+            ontology_version_id=self.ontology_version_id,
         )
 
     def finalize_mining(
@@ -656,6 +667,16 @@ class _WorkflowJobServices:
         execution_mode: str,
         publish_on_partial_failure: bool,
     ):
+        if self.action == "publish":
+            current = self.runtime_db.get_run(run_id) or {}
+            if current.get("status") == "completed":
+                if not self.tracker.begin_manual_publish(
+                    run_id, domain=self.profile.domain_id
+                ):
+                    raise RuntimeError(
+                        f"Run {run_id} could not be claimed for publishing"
+                    )
+                self.runtime_db.commit()
         return workflow_finalize_mining_strict(
             self.asset_db,
             self.runtime_db,
@@ -862,18 +883,23 @@ def _execute_workflow_job(
         frozen_input = Path(run_data.get("input_path") or input_path or "")
         overrides = manifest.get("runOverrides") or {}
         workers = int(overrides.get("maxWorkers") or max_workers or config.max_workers)
-        execution_mode = str(
-            overrides.get("executionMode")
-            or ("assets_only" if phase1_only else "publish")
+        execution_mode = (
+            "publish"
+            if action == "publish"
+            else str(
+                overrides.get("executionMode")
+                or ("assets_only" if phase1_only else "publish")
+            )
         )
         partial = bool(
             overrides.get("publishOnPartialFailure", publish_on_partial_failure)
         )
-        if action == "resume" and run_data.get("status") == "awaiting_review":
+        if action == "resume":
             if not tracker.resume_running(
                 run_id,
                 subloop_stage=run_data.get("subloop_stage"),
                 domain=frozen_domain,
+                recover_workflow=True,
             ):
                 current = runtime_db.get_run(run_id) or {}
                 return {
@@ -896,6 +922,7 @@ def _execute_workflow_job(
             llm_base_url=llm_base_url or config.llm_service_url,
             max_workers=workers,
             execution_mode=execution_mode,
+            ontology_version_id=binding.get("ontologyVersionId"),
             manifest=manifest,
         )
         context = OperatorRuntimeContext(
@@ -998,6 +1025,7 @@ def workflow_run_induction_strict(
     node_id: str,
     profile: DomainProfile,
     llm_base_url: str | None,
+    ontology_version_id: str | None,
 ) -> dict[str, int]:
     """Run ontology induction without the legacy error-swallowing boundary."""
     del run_id, node_id
@@ -1010,14 +1038,17 @@ def workflow_run_induction_strict(
 
     ontology_store = OntologyStore(asset_db.pool)
     graph_store = GraphStore(asset_db.pool)
-    if ontology_store.active_version(profile.domain_id) is None:
+    if ontology_version_id is None:
         return {"candidates": 0}
+    if ontology_store.version(ontology_version_id, profile.domain_id) is None:
+        raise RuntimeError("frozen ontology is no longer available")
     inductor = OntologyInductor(
         base_url=llm_base_url,
         graph_store=graph_store,
         ontology_store=ontology_store,
         domain_id=profile.domain_id,
         knowledge_domain=profile.domain_id,
+        ontology_version_id=ontology_version_id,
     )
     with asset_db.transaction():
         with ExitStack() as participants:
@@ -1032,6 +1063,7 @@ def workflow_write_graph_strict(
     *,
     run_id: str,
     profile: DomainProfile,
+    ontology_version_id: str | None,
 ) -> dict[str, int]:
     """Recount and write the final graph atomically; never swallow failure."""
     from contextlib import ExitStack
@@ -1049,8 +1081,9 @@ def workflow_write_graph_strict(
         with ExitStack() as participants:
             participants.enter_context(graph_store.join_transaction(asset_db))
             participants.enter_context(ontology_store.join_transaction(asset_db))
-            active = ontology_store.active_version(profile.domain_id)
-            if active is None:
+            if ontology_version_id is None or ontology_store.version(
+                ontology_version_id, profile.domain_id
+            ) is None:
                 raise RuntimeError("frozen ontology is no longer available")
             members = ontology_store.accepted_node_type_members(profile.domain_id)
             rebound = (
@@ -1063,6 +1096,7 @@ def workflow_write_graph_strict(
             relation_builder = EntityRelationBuilder(
                 ontology_store=ontology_store,
                 domain_id=profile.domain_id,
+                ontology_version_id=ontology_version_id,
             )
             graph, entity_ids = reaggregate_edges(
                 rows,
@@ -1074,7 +1108,7 @@ def workflow_write_graph_strict(
                 graph,
                 entity_ids,
                 domain_id=profile.domain_id,
-                ontology_version_id=active["id"],
+                ontology_version_id=ontology_version_id,
             )
     return {"rebound": rebound, "recounted": recounted, "edges": edges}
 
@@ -1287,6 +1321,7 @@ def _init_llm(
     *,
     knowledge_domain: str | None = None,
     ontology_store: Any | None = None,
+    ontology_version_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Initialize LLM services if URL provided.
 
@@ -1340,6 +1375,7 @@ def _init_llm(
             knowledge_domain=knowledge_domain,
             ontology_store=ontology_store,
             domain_id=knowledge_domain or (profile.domain_id if profile else None),
+            ontology_version_id=ontology_version_id,
         )
     except (ImportError, Exception):
         pass
@@ -1384,7 +1420,12 @@ def _init_resolver(asset_db: AssetCoreDB, profile: DomainProfile | None) -> Any 
         return None
 
 
-def _init_relation_builder(asset_db: AssetCoreDB, profile: DomainProfile | None) -> Any | None:
+def _init_relation_builder(
+    asset_db: AssetCoreDB,
+    profile: DomainProfile | None,
+    *,
+    ontology_version_id: str | None = None,
+) -> Any | None:
     """B4 概念关系抽取器：读 active 本体关系类型拿 allowed_pairs，共用 asset_db 连接池。"""
     if profile is None:
         return None
@@ -1394,6 +1435,7 @@ def _init_relation_builder(asset_db: AssetCoreDB, profile: DomainProfile | None)
         return EntityRelationBuilder(
             ontology_store=OntologyStore(asset_db.pool),
             domain_id=profile.domain_id,
+            ontology_version_id=ontology_version_id,
         )
     except Exception:
         logger.warning("relation builder init failed; skipping entity relations", exc_info=True)

@@ -335,6 +335,93 @@ def test_resume_running_moves_run_phase_back_to_mining():
     ]
 
 
+@pytest.mark.parametrize(
+    ("engine", "status", "stage", "finished_at", "expected"),
+    [
+        ("workflow", "awaiting_review", "entity_review", None, True),
+        ("workflow", "failed", "mining", "2026-07-25T00:00:00Z", True),
+        ("workflow", "interrupted", "mining", "2026-07-25T00:00:00Z", True),
+        ("workflow", "running", "graph_write", None, True),
+        ("legacy", "failed", "mining", "2026-07-25T00:00:00Z", False),
+        ("legacy", "running", "graph_write", None, False),
+        ("legacy", "running", "done", None, True),
+        ("workflow", "cancelled", "mining", None, False),
+    ],
+)
+def test_public_resume_policy_exposes_workflow_crash_recovery(
+    engine, status, stage, finished_at, expected
+):
+    assert runs._is_run_resumable(
+        execution_engine=engine,
+        status=status,
+        subloop_stage=stage,
+        finished_at=finished_at,
+    ) is expected
+
+
+def test_workflow_recovery_claim_clears_terminal_fields_and_accepts_failed():
+    calls = []
+
+    class DB:
+        def update_run_status(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return True
+
+    updated = RuntimeTracker(DB()).resume_running(
+        "failed-run",
+        subloop_stage="graph_write",
+        domain="odn",
+        recover_workflow=True,
+    )
+
+    assert updated is True
+    assert calls == [
+        (
+            ("failed-run", "running"),
+            {
+                "subloop_stage": "graph_write",
+                "current_stage": "mining",
+                "domain": "odn",
+                "expected_statuses": (
+                    "awaiting_review",
+                    "running",
+                    "failed",
+                    "interrupted",
+                ),
+                "clear_finished_at": True,
+                "clear_error_summary": True,
+            },
+        )
+    ]
+
+
+def test_manual_workflow_publish_claims_completed_assets_run():
+    calls = []
+
+    class DB:
+        def update_run_status(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return True
+
+    updated = RuntimeTracker(DB()).begin_manual_publish(
+        "assets-run", domain="odn"
+    )
+
+    assert updated is True
+    assert calls == [
+        (
+            ("assets-run", "running"),
+            {
+                "current_stage": "mining",
+                "domain": "odn",
+                "expected_statuses": ("completed",),
+                "clear_finished_at": True,
+                "clear_error_summary": True,
+            },
+        )
+    ]
+
+
 @pytest.mark.parametrize("pending_gate", ["entity_review", "ontology_review", None])
 def test_resume_cas_returns_concurrent_cancel_status(monkeypatch, pending_gate):
     class RuntimeDB:

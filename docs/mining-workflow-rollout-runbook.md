@@ -89,6 +89,13 @@ $env:KB_ALLOW_TEST_TRUNCATE='1'
 
 验证点：全局定义与 Domain Run 不跨池；发布并发只有一个成功；历史版本不可变；Run 仅从冻结 Manifest 执行；已提交文档跳过，未提交文档从 parse 重试；审核恢复只重跑未完成节点；图谱写失败不进入 finalize；完成后的恢复不会生成第二个 Release。
 
+恢复与手动发布还需验证以下边界：
+
+- Workflow Run 在 `failed`、`interrupted`，以及未写 `finished_at` 的 `running` 状态下可通过公开 `/resume` 入口恢复；legacy Run 仍只保留原有的审核恢复与 `running/done` 收尾恢复规则。
+- 恢复时以节点事件和文档提交标记为准，清理旧的 `finished_at/error_summary` 后只重跑未完成节点，不修改冻结 Manifest。
+- `assets_only` Run 调用 `/publish` 时只重放 `mining_finalize`，把 Run 原子认领回 `running` 后创建 Build/Release；已有 `release_published` 能力的重复请求直接复用结果。
+- Manifest 中冻结的 `ontologyVersionId` 必须贯穿实体抽取、关系模式、归纳和最终图写入；即使 Domain 的 active ontology 在排队或审核期间切换，也不得把边写到新版本。
+
 成功指标：节点事件的 `(run_id, node_id, run_document_id, attempt_no)` 唯一；无跨 Domain 行；恢复后的 Workflow 版本/哈希不变；没有孤立 active release。
 
 停止条件：任何跨池写入、Manifest 漂移、重复 Release、已提交文档重写或未提交事务残留。

@@ -45,7 +45,12 @@ class GlobalExecutor:
         self.repository = runtime.runtime_repository
         self.registry = runtime.services.handler_registry
 
-    def execute(self, plan: ExecutionPlan) -> GlobalExecutionResult:
+    def execute(
+        self,
+        plan: ExecutionPlan,
+        *,
+        replay_nodes: frozenset[str] = frozenset(),
+    ) -> GlobalExecutionResult:
         run_id = self._run_id()
         state = GlobalState(frozenset(getattr(
             self.runtime.services,
@@ -56,7 +61,11 @@ class GlobalExecutor:
         for node_id in plan.global_order:
             self._check_cancellation()
             planned = plan.node(node_id)
-            reusable = self._reusable_result(run_id, planned)
+            reusable = (
+                None
+                if node_id in replay_nodes
+                else self._reusable_result(run_id, planned)
+            )
             if reusable is not None:
                 state = state.with_capabilities(reusable[1])
                 statuses[node_id] = reusable[0]

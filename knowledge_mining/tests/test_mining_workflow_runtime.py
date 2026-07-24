@@ -57,6 +57,26 @@ class RuntimeRepository:
             for item in self.events
         )
 
+    def reusable_node_result(self, run_id, node_id, run_document_id):
+        reusable = {"completed", "skipped", "fallback", "not_applicable"}
+        matching = [
+            item
+            for item in self.events
+            if item["run_id"] == run_id
+            and item["node_id"] == node_id
+            and item["run_document_id"] == run_document_id
+            and item["status"] in reusable
+        ]
+        if not matching:
+            return None
+        event = matching[-1]
+        return {
+            "status": event["status"],
+            "capabilities": event.get("output_summary", {}).get(
+                "capabilities", ()
+            ),
+        }
+
     def document_persist_marker(self, run_document_id):
         return self.markers.get(run_document_id)
 
@@ -118,9 +138,12 @@ def runtime_context(manifest, registry, calls):
 
     def finalize_handler(state, params, runtime):
         calls.append(("mining_finalize", dict(params)))
+        capabilities = {"finalized"}
+        if getattr(runtime.services, "execution_mode", "publish") == "publish":
+            capabilities.add("release_published")
         return OperatorResult(
             state,
-            frozenset({"finalized", "release_published"}),
+            frozenset(capabilities),
             OperatorStatus.SUCCESS,
         )
 
@@ -131,6 +154,7 @@ def runtime_context(manifest, registry, calls):
         run_id="run-1",
         active_operator_type=None,
         initial_global_capabilities=frozenset(),
+        execution_mode="publish",
     )
     return SimpleNamespace(
         domain="odn",
@@ -229,6 +253,31 @@ def test_safe_run_override_changes_finalize_without_changing_node_hash() -> None
 
     finalize_call = next(item for item in calls if item[0] == "mining_finalize")
     assert finalize_call[1]["publishOnPartialFailure"] is True
+
+
+def test_manual_publish_replays_finalize_after_assets_only_execution() -> None:
+    manifest = minimal_manifest()
+    calls = []
+    registry = HandlerRegistry()
+    context, input_handler, document_handler, finalize_handler = runtime_context(
+        manifest, registry, calls
+    )
+    registry.register("input_ingest", "1", input_handler)
+    registry.register("parse_segment", "1", document_handler("parse_segment"))
+    registry.register("asset_persist", "1", document_handler("asset_persist"))
+    registry.register("mining_finalize", "1", finalize_handler)
+    runtime = MiningWorkflowRuntime(context, run_id="run-1")
+
+    context.services.execution_mode = "assets_only"
+    assets = runtime.execute()
+    context.services.execution_mode = "publish"
+    published = runtime.publish()
+    published_again = runtime.publish()
+
+    assert "release_published" not in assets.capabilities
+    assert "release_published" in published.capabilities
+    assert "release_published" in published_again.capabilities
+    assert [name for name, _ in calls].count("mining_finalize") == 2
 
 
 @pytest.mark.parametrize(

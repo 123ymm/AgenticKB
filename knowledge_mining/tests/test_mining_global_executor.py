@@ -292,6 +292,21 @@ def test_completed_finalize_is_not_called_twice_on_resume() -> None:
     assert "finalized" in result.capabilities
 
 
+def test_explicit_publish_replays_only_completed_finalize() -> None:
+    context = runtime(ontology=None)
+    context.services.execution_mode = "assets_only"
+    executor = GlobalExecutor(context)
+    executor.execute(global_plan())
+
+    context.services.execution_mode = "publish"
+    result = executor.execute(
+        global_plan(), replay_nodes=frozenset({"mining_finalize"})
+    )
+
+    assert "release_published" in result.capabilities
+    assert context.runtime_repository.attempts["mining_finalize"] == 2
+
+
 def test_finalize_requires_all_manifest_applicable_capabilities() -> None:
     context = runtime()
     context.manifest["executionPlan"] = {
@@ -303,3 +318,72 @@ def test_finalize_requires_all_manifest_applicable_capabilities() -> None:
         GlobalExecutor(context).execute(global_plan(("mining_finalize",)))
 
     assert context.services.calls == []
+
+
+def test_workflow_services_forward_frozen_ontology_version(monkeypatch) -> None:
+    from knowledge_mining.mining.jobs import run as run_job
+
+    calls = []
+    monkeypatch.setattr(
+        run_job,
+        "workflow_run_induction_strict",
+        lambda *args, **kwargs: calls.append(("induction", kwargs)) or {},
+    )
+    monkeypatch.setattr(
+        run_job,
+        "workflow_write_graph_strict",
+        lambda *args, **kwargs: calls.append(("graph", kwargs)) or {},
+    )
+    services = object.__new__(run_job._WorkflowJobServices)
+    services.asset_db = object()
+    services.profile = SimpleNamespace(domain_id="odn")
+    services.llm_base_url = "http://llm"
+    services.ontology_version_id = "ontology-frozen"
+
+    services.run_ontology_induction("run-1", "ontology_induction")
+    services.write_graph_strict("run-1")
+
+    assert [item[1]["ontology_version_id"] for item in calls] == [
+        "ontology-frozen",
+        "ontology-frozen",
+    ]
+
+
+def test_workflow_service_claims_assets_only_run_before_manual_publish(
+    monkeypatch,
+) -> None:
+    from knowledge_mining.mining.jobs import run as run_job
+
+    calls = []
+
+    class RuntimeDB:
+        def get_run(self, run_id):
+            return {"status": "completed"}
+
+        def commit(self):
+            calls.append("commit")
+
+    class Tracker:
+        def begin_manual_publish(self, run_id, *, domain):
+            calls.append(("claim", run_id, domain))
+            return True
+
+    monkeypatch.setattr(
+        run_job,
+        "workflow_finalize_mining_strict",
+        lambda *args, **kwargs: calls.append(("finalize", kwargs)) or {},
+    )
+    services = object.__new__(run_job._WorkflowJobServices)
+    services.action = "publish"
+    services.asset_db = object()
+    services.runtime_db = RuntimeDB()
+    services.tracker = Tracker()
+    services.profile = SimpleNamespace(domain_id="odn")
+    services.channel = "prod"
+
+    services.finalize_mining(
+        "run-1", execution_mode="publish", publish_on_partial_failure=False
+    )
+
+    assert calls[:2] == [("claim", "run-1", "odn"), "commit"]
+    assert calls[2][0] == "finalize"
