@@ -14,7 +14,6 @@ also contains human-readable notes and evaluation questions.
 ## Source Basis
 
 The corpus is derived from existing files in `cloud_core_coldstart_md/`:
-
 - `02_commands/05_add_apn.md`
 - `02_commands/03_add_dnn.md`
 - `02_commands/07_add_n4peer.md`
