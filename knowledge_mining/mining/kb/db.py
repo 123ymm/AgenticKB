@@ -355,3 +355,74 @@ class KbDB:
             if row["removed"]:
                 return "withdrawn"
             return "uploaded"
+
+    # ------------------------------------------------------------- folders (kb_folders)
+
+    async def get_folder(self, folder_id: str) -> dict[str, Any] | None:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT id, kb_id, parent_id, name, path, created_at, created_by
+                   FROM kb_folders WHERE id = %s""",
+                [folder_id],
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def list_folders(self, kb_id: str) -> list[dict[str, Any]]:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT id, kb_id, parent_id, name, path, created_at, created_by
+                   FROM kb_folders WHERE kb_id = %s ORDER BY path""",
+                [kb_id],
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def find_folder_by_parent(
+        self, *, kb_id: str, parent_id: str | None, name: str
+    ) -> dict[str, Any] | None:
+        """同父同名查找（parent_id NULL 用 IS NOT DISTINCT FROM 视作相等）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT id, kb_id, parent_id, name, path FROM kb_folders
+                   WHERE kb_id = %s AND parent_id IS NOT DISTINCT FROM %s AND name = %s""",
+                [kb_id, parent_id, name],
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def insert_folder(
+        self, *, folder_id: str, kb_id: str, parent_id: str | None, name: str,
+        path: str, created_by: str | None = None,
+    ) -> dict[str, Any]:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """INSERT INTO kb_folders (id, kb_id, parent_id, name, path, created_at, created_by)
+                   VALUES (%(id)s, %(kb)s, %(p)s, %(n)s, %(path)s, %(t)s, %(cb)s)
+                   RETURNING id, kb_id, parent_id, name, path, created_at, created_by""",
+                {"id": folder_id, "kb": kb_id, "p": parent_id, "n": name,
+                 "path": path, "t": _utcnow(), "cb": created_by},
+            )
+            return dict(await cur.fetchone())  # type: ignore[arg-type]
+
+    async def count_child_folders(self, *, kb_id: str, parent_id: str) -> int:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM kb_folders WHERE kb_id = %s AND parent_id = %s",
+                [kb_id, parent_id],
+            )
+            return int((await cur.fetchone())["n"])
+
+    async def count_docs_under_path(self, *, kb_id: str, path: str) -> int:
+        """统计某文件夹下（含子文件夹）的文档数。path 非空（根删除由上层处理）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT COUNT(*) AS n FROM asset_documents
+                   WHERE kb_id = %s
+                     AND (directory_path = %s OR directory_path LIKE %s)""",
+                [kb_id, path, path + "/%"],
+            )
+            return int((await cur.fetchone())["n"])
+
+    async def delete_folder_row(self, folder_id: str) -> None:
+        async with self._pool.connection() as conn:
+            await conn.execute("DELETE FROM kb_folders WHERE id = %s", [folder_id])
