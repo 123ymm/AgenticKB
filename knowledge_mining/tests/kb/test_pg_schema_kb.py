@@ -44,8 +44,9 @@ def test_asset_documents_unique_is_kb_scoped(db_config, _ensure_schema):
             )
             uniq_names = {r[0] for r in cur.fetchall()}
             assert "uq_asset_documents_kb_key" in uniq_names
-            # 旧约束应已删除
+            # 旧约束应已删除（002 内联自动名 + 003 命名约束两个名字）
             assert "asset_documents_domain_document_key_key" not in uniq_names
+            assert "uq_asset_documents_domain_document_key" not in uniq_names
 
 
 def test_knowledge_bases_soft_delete_columns(db_config, _ensure_schema):

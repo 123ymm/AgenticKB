@@ -621,6 +621,7 @@ def db_write_stage(ctx: DocumentContext, cfg: PipelineConfig) -> DocumentContext
         with asset_db.transaction():
             document_id, snapshot_id, link_id = select_or_create_snapshot(
                 asset_db, raw, doc_profile, domain=cfg.domain, batch_id=batch_id,
+                existing_doc=ctx.existing_doc,
             )
 
             # --- only write content when the snapshot is empty ---

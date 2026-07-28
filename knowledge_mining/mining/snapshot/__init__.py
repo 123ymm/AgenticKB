@@ -21,6 +21,7 @@ def select_or_create_snapshot(
     *,
     domain: str,
     batch_id: str | None = None,
+    existing_doc: dict[str, Any] | None = None,
 ) -> tuple[str, str, str]:
     """Select existing or create new snapshot for a document.
 
@@ -32,13 +33,9 @@ def select_or_create_snapshot(
     mime_type = get_mime_type(doc.file_type)
 
     # 1. Resolve document identity.
-    # KB 路径：文档已由 KB 预建（asset_documents 身份由 KB 独占写，设计铁律 1）→
-    #          直接复用 id，不再 upsert（mining 对 asset_documents 零写）。
-    # Legacy 路径（旧 /api/runs，文档未预建）→ upsert 创建身份（deprecated 例外，设计 §3.3）。
-    existing_doc = asset_db.get_document_by_key(
-        domain=domain,
-        document_key=profile.document_key,
-    )
+    # KB 路径：身份已由 KB 预建，且 walk 阶段已按 storage_path 解析为 existing_doc（G1）→
+    #          直接复用 id，不再按 document_key 二次查找（消解多库同 key 歧义）。
+    # Legacy 路径（/api/runs，未预建身份）：existing_doc 为 None → upsert 建身份（deprecated 例外）。
     if existing_doc:
         document_id = existing_doc["id"]
     else:

@@ -3,10 +3,10 @@
 镜像 api/routes/runs.py:create_run，但 input_path 锁定到 KB 的上传目录，
 run metadata 带 kb_id。复用 _domain_run_lock（与旧 /api/runs 共享域级 mutex）。
 
-⚠️ 已知限制（设计 §10）：pipeline 用 (domain, document_key) 经 get_document_by_key
-定位文档身份。P1 把 UNIQUE 改成 (kb_id, document_key) 后，同域多 KB 同 document_key
-的场景下该查询会歧义（可能挂到别的 KB 文档）。常见场景（单 KB 或键不撞）正常；
-多 KB 同 key 的彻底解需把 kb_id 纳入 document_key 或显式透传 document_id（后续）。
+身份定位（G1 已修复）：pipeline 按 ``storage_path``（= input_path/relative_path，
+含 ``<kb_id>`` 前缀、全库唯一）查文档身份，而非按 ``(domain, document_key)``。
+故同域多 KB 同 document_key 不再歧义；文件移动/改名后（位置变、document_key 冻结）
+仍能命中同一身份，挖掘历史不断链。详见 docs/kb-filesystem-plan.md §1。
 """
 from __future__ import annotations
 

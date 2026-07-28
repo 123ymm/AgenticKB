@@ -250,6 +250,9 @@ $$;
 
 DO $$
 BEGIN
+    -- KB 模式下身份唯一是 (kb_id, document_key)（见 004_kb_isolation）；此时不应再建
+    -- (domain, document_key) 域级唯一——否则同域多库无法同名文件。仅在非 KB 模式
+    -- （无 kb_id 唯一）时才补建 legacy 域级唯一。
     IF NOT EXISTS (
         SELECT 1
         FROM pg_constraint AS constraints
@@ -263,6 +266,19 @@ BEGIN
                AND attributes.attnum = keys.attnum
               ORDER BY attributes.attname
           ) = ARRAY['document_key', 'domain']::name[]
+    ) AND NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint AS constraints
+        WHERE constraints.conrelid = 'asset_documents'::regclass
+          AND constraints.contype = 'u'
+          AND ARRAY(
+              SELECT attributes.attname
+              FROM unnest(constraints.conkey) AS keys(attnum)
+              JOIN pg_attribute AS attributes
+                ON attributes.attrelid = constraints.conrelid
+               AND attributes.attnum = keys.attnum
+              ORDER BY attributes.attname
+          ) = ARRAY['document_key', 'kb_id']::name[]
     ) THEN
         ALTER TABLE asset_documents
             ADD CONSTRAINT uq_asset_documents_domain_document_key

@@ -878,13 +878,21 @@ def _run_pipeline(
         _check_cancelled(runtime_db, run_id)
         rd_id = uuid.uuid4().hex
         doc_key = f"doc:/{doc.relative_path}"
+        # 身份/位置分离（G1）：按落盘绝对路径查身份。storage_path 含 <kb_id> 前缀，
+        # 全库唯一，消解「多库同 document_key」歧义；文件移动后位置变、document_key
+        # 冻结不变，仍能命中同一身份 → 挖掘历史不断链。
+        storage_path = str(input_path / doc.relative_path)
 
         lifecycle_state = asset_db.get_document_lifecycle_state(
             domain=profile.domain_id,
             channel=channel,
-            document_key=doc_key,
+            storage_path=storage_path,
             normalized_content_hash=doc.normalized_content_hash,
         )
+        # 命中已存在身份 → 用其冻结 document_key 写 mining_run_documents，保证跨 run
+        # 记录同一键（derive_document_status 的 join 不变、不断链）。新文档沿用 walk 派生值。
+        if lifecycle_state is not None:
+            doc_key = lifecycle_state["document_key"]
         lifecycle_action = decide_document_lifecycle_action(
             lifecycle_state,
             normalized_content_hash=doc.normalized_content_hash,
