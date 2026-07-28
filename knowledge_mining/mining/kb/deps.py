@@ -13,3 +13,8 @@ async def get_kb_db(request: Request) -> KbDB:
 
 async def get_kb_service(request: Request) -> KbService:
     return KbService(KbDB(request.app.state.pg_pool))
+
+
+async def get_document_service(request: Request) -> DocumentService:
+    from knowledge_mining.mining.kb.services.document_service import DocumentService
+    return DocumentService(KbDB(request.app.state.pg_pool))

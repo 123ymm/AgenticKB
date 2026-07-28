@@ -221,3 +221,123 @@ class KbDB:
                 [kb_id, user_id, user_id],
             )
             return (await cur.fetchone()) is not None
+
+    # --------------------------------------------- documents (asset_documents identity)
+
+    async def insert_document_identity(
+        self, *, domain: str, kb_id: str, document_key: str, document_name: str,
+        storage_path: str, directory_path: str | None = None,
+        document_type: str | None = None, owner_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict[str, Any]:
+        """KB 上传：建文档身份行（不计算 hash、不建 snapshot——挖掘时才算）。
+
+        写方归属：asset_documents 身份由 KB package 独占（设计铁律 1）。
+        """
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """INSERT INTO asset_documents
+                     (id, domain, document_key, document_name, document_type, metadata_json,
+                      created_at, kb_id, storage_path, directory_path, owner_id)
+                   VALUES
+                     (%(id)s, %(dom)s, %(k)s, %(n)s, %(t)s, %(m)s::jsonb, %(now)s,
+                      %(kb)s, %(sp)s, %(dp)s, %(own)s)
+                   RETURNING id, domain, kb_id, document_key, document_name, document_type,
+                             storage_path, directory_path, owner_id, created_at""",
+                {
+                    "id": _new_id(), "dom": domain, "k": document_key, "n": document_name,
+                    "t": document_type, "m": _json(metadata), "now": _utcnow(),
+                    "kb": kb_id, "sp": storage_path, "dp": directory_path, "own": owner_id,
+                },
+            )
+            return dict(await cur.fetchone())  # type: ignore[arg-type]
+
+    async def list_documents_in_kb(
+        self, *, kb_id: str, directory: str | None = None,
+        limit: int = 200, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clause = "kb_id = %s"
+        params: list[Any] = [kb_id]
+        if directory is not None:
+            clause += " AND directory_path = %s"
+            params.append(directory)
+        params.extend([limit, offset])
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                f"""SELECT id, domain, kb_id, document_key, document_name, document_type,
+                           storage_path, directory_path, owner_id, created_at
+                    FROM asset_documents WHERE {clause}
+                    ORDER BY created_at DESC LIMIT %s OFFSET %s""",
+                params,
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_document_identity(self, document_id: str) -> dict[str, Any] | None:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT id, domain, kb_id, document_key, document_name, document_type,
+                          storage_path, directory_path, owner_id, metadata_json, created_at
+                   FROM asset_documents WHERE id = %s""",
+                [document_id],
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def update_document_identity(
+        self, document_id: str, *,
+        document_name: str | None = None, document_type: str | None = None,
+    ) -> dict[str, Any] | None:
+        fields: list[str] = []
+        params: dict[str, Any] = {"id": document_id}
+        if document_name is not None:
+            fields.append("document_name = %(n)s")
+            params["n"] = document_name
+        if document_type is not None:
+            fields.append("document_type = %(t)s")
+            params["t"] = document_type
+        if not fields:
+            return await self.get_document_identity(document_id)
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "UPDATE asset_documents SET " + ", ".join(fields) + " WHERE id = %(id)s "
+                "RETURNING id, document_key, document_name, document_type, storage_path, directory_path",
+                params,
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def derive_document_status(self, document_id: str) -> str:
+        """派生文档状态（设计 §3.4）：published > failed > mining > withdrawn > uploaded。
+
+        表达「对外可见的当前能检索性」。re-mine 中 / failed 重试中的细粒度走运行态时间线 API。
+        """
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT
+                     (SELECT r.status FROM mining_run_documents r
+                      WHERE r.document_key = d.document_key
+                      ORDER BY r.finished_at DESC NULLS LAST,
+                               r.started_at DESC NULLS LAST, r.id DESC LIMIT 1) AS rd_status,
+                     EXISTS(SELECT 1 FROM asset_publish_releases rel
+                            JOIN asset_build_document_snapshots bs ON bs.build_id = rel.build_id
+                            WHERE rel.domain = d.domain AND rel.status = 'active'
+                              AND bs.document_id = d.id AND bs.selection_status = 'active') AS published,
+                     EXISTS(SELECT 1 FROM asset_publish_releases rel
+                            JOIN asset_build_document_snapshots bs ON bs.build_id = rel.build_id
+                            WHERE rel.domain = d.domain AND rel.status = 'active'
+                              AND bs.document_id = d.id AND bs.selection_status = 'removed') AS removed
+                   FROM asset_documents d WHERE d.id = %s""",
+                [document_id],
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return "unknown"
+            if row["published"]:
+                return "published"
+            if row["rd_status"] == "failed":
+                return "failed"
+            if row["rd_status"] in ("pending", "processing"):
+                return "mining"
+            if row["removed"]:
+                return "withdrawn"
+            return "uploaded"
