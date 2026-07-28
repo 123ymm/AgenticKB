@@ -110,17 +110,14 @@ class DocumentService:
         self, *, kb_id: str, user_id: str, directory: str | None = None,
     ) -> list[dict[str, Any]]:
         await self._svc._assert_read(kb_id, user_id)
-        docs = await self._db.list_documents_in_kb(kb_id=kb_id, directory=directory)
-        for d in docs:
-            d["status"] = await self._db.derive_document_status(d["id"])
-        return docs
+        # 状态由 list_documents_in_kb 内联派生（一条 SQL），不再 N+1。
+        return await self._db.list_documents_in_kb(kb_id=kb_id, directory=directory)
 
     async def get_document(self, *, document_id: str, user_id: str) -> dict[str, Any]:
         doc = await self._db.get_document_identity(document_id)
         if doc is None:
             raise NotFound(document_id)
         await self._svc._assert_read(doc["kb_id"], user_id)
-        doc["status"] = await self._db.derive_document_status(document_id)
         return doc
 
     async def patch_document(

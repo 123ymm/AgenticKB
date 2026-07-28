@@ -122,8 +122,12 @@ async function load() {
   loading.value = true
   cleanup()
   try {
-    doc.value = await kbApi.getDocument(props.kbId, props.docId)
-    const blob = await kbApi.downloadDocument(props.kbId, props.docId)
+    // 元信息与字节相互独立，并行取（省一个串行往返）
+    const [d, blob] = await Promise.all([
+      kbApi.getDocument(props.kbId, props.docId),
+      kbApi.downloadDocument(props.kbId, props.docId),
+    ])
+    doc.value = d
     blobSize.value = blob.size
     const k = kind.value
     if (k === 'md') html.value = DOMPurify.sanitize(await marked(await blob.text()))

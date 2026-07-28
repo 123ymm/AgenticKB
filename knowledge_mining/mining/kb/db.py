@@ -31,6 +31,44 @@ def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
+# ── 文档状态派生 SQL 片段（alias d = asset_documents）────────────────────────
+# CASE 在 SELECT；LATERAL 在 FROM。优先级与原 derive_document_status 一致：
+# published > failed > mining(pending/processing) > withdrawn(removed) > uploaded。
+# 折进列表/详情查询，避免对每个文档单独查（N+1，远程库下 2-3s 卡顿的根因）。
+_STATUS_CASE_SQL = """CASE
+    WHEN COALESCE(pub.published, FALSE) THEN 'published'
+    WHEN rs.rd_status = 'failed' THEN 'failed'
+    WHEN rs.rd_status IN ('pending', 'processing') THEN 'mining'
+    WHEN COALESCE(rm.removed, FALSE) THEN 'withdrawn'
+    ELSE 'uploaded'
+END"""
+
+_STATUS_JOIN_SQL = """
+LEFT JOIN LATERAL (
+    SELECT r.status AS rd_status
+    FROM mining_run_documents r
+    WHERE r.document_key = d.document_key
+    ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC NULLS LAST, r.id DESC
+    LIMIT 1
+) rs ON TRUE
+LEFT JOIN LATERAL (
+    SELECT EXISTS (
+        SELECT 1 FROM asset_publish_releases rel
+        JOIN asset_build_document_snapshots bs ON bs.build_id = rel.build_id
+        WHERE rel.domain = d.domain AND rel.status = 'active'
+          AND bs.document_id = d.id AND bs.selection_status = 'active'
+    ) AS published
+) pub ON TRUE
+LEFT JOIN LATERAL (
+    SELECT EXISTS (
+        SELECT 1 FROM asset_publish_releases rel
+        JOIN asset_build_document_snapshots bs ON bs.build_id = rel.build_id
+        WHERE rel.domain = d.domain AND rel.status = 'active'
+          AND bs.document_id = d.id AND bs.selection_status = 'removed'
+    ) AS removed
+) rm ON TRUE"""
+
+
 class KbDB:
     """Async repository over kb_users / knowledge_bases / kb_members.
 
@@ -275,30 +313,41 @@ class KbDB:
         self, *, kb_id: str, directory: str | None = None,
         limit: int = 200, offset: int = 0,
     ) -> list[dict[str, Any]]:
-        clause = "kb_id = %s"
+        """列 KB 内文档，**状态内联派生**（一次 SQL，避免 N+1 远程查询）。
+
+        状态优先级与原 derive_document_status 一致：published > failed > mining > withdrawn > uploaded。
+        """
+        clause = "d.kb_id = %s"
         params: list[Any] = [kb_id]
         if directory is not None:
-            clause += " AND directory_path = %s"
+            clause += " AND d.directory_path = %s"
             params.append(directory)
         params.extend([limit, offset])
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                f"""SELECT id, domain, kb_id, document_key, document_name, document_type,
-                           storage_path, directory_path, owner_id, created_at,
-                           file_size, modified_at
-                    FROM asset_documents WHERE {clause}
-                    ORDER BY created_at DESC LIMIT %s OFFSET %s""",
+                f"""SELECT d.id, d.domain, d.kb_id, d.document_key, d.document_name,
+                           d.document_type, d.storage_path, d.directory_path, d.owner_id,
+                           d.created_at, d.file_size, d.modified_at,
+                           {_STATUS_CASE_SQL} AS status
+                    FROM asset_documents d
+                    {_STATUS_JOIN_SQL}
+                    WHERE {clause}
+                    ORDER BY d.created_at DESC LIMIT %s OFFSET %s""",
                 params,
             )
             return [dict(r) for r in await cur.fetchall()]
 
     async def get_document_identity(self, document_id: str) -> dict[str, Any] | None:
+        """单文档身份 + 内联派生状态（一次 SQL）。"""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                """SELECT id, domain, kb_id, document_key, document_name, document_type,
-                          storage_path, directory_path, owner_id, metadata_json, created_at,
-                          file_size, modified_at
-                   FROM asset_documents WHERE id = %s""",
+                f"""SELECT d.id, d.domain, d.kb_id, d.document_key, d.document_name,
+                           d.document_type, d.storage_path, d.directory_path, d.owner_id,
+                           d.metadata_json, d.created_at, d.file_size, d.modified_at,
+                           {_STATUS_CASE_SQL} AS status
+                    FROM asset_documents d
+                    {_STATUS_JOIN_SQL}
+                    WHERE d.id = %s""",
                 [document_id],
             )
             row = await cur.fetchone()
@@ -328,40 +377,17 @@ class KbDB:
             return dict(row) if row else None
 
     async def derive_document_status(self, document_id: str) -> str:
-        """派生文档状态（设计 §3.4）：published > failed > mining > withdrawn > uploaded。
-
-        表达「对外可见的当前能检索性」。re-mine 中 / failed 重试中的细粒度走运行态时间线 API。
-        """
+        """单文档状态派生（保留作单点查询；列表/详情已用内联 _STATUS_CASE_SQL 一次取齐）。"""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                """SELECT
-                     (SELECT r.status FROM mining_run_documents r
-                      WHERE r.document_key = d.document_key
-                      ORDER BY r.finished_at DESC NULLS LAST,
-                               r.started_at DESC NULLS LAST, r.id DESC LIMIT 1) AS rd_status,
-                     EXISTS(SELECT 1 FROM asset_publish_releases rel
-                            JOIN asset_build_document_snapshots bs ON bs.build_id = rel.build_id
-                            WHERE rel.domain = d.domain AND rel.status = 'active'
-                              AND bs.document_id = d.id AND bs.selection_status = 'active') AS published,
-                     EXISTS(SELECT 1 FROM asset_publish_releases rel
-                            JOIN asset_build_document_snapshots bs ON bs.build_id = rel.build_id
-                            WHERE rel.domain = d.domain AND rel.status = 'active'
-                              AND bs.document_id = d.id AND bs.selection_status = 'removed') AS removed
-                   FROM asset_documents d WHERE d.id = %s""",
+                f"""SELECT {_STATUS_CASE_SQL} AS status
+                    FROM asset_documents d
+                    {_STATUS_JOIN_SQL}
+                    WHERE d.id = %s""",
                 [document_id],
             )
             row = await cur.fetchone()
-            if row is None:
-                return "unknown"
-            if row["published"]:
-                return "published"
-            if row["rd_status"] == "failed":
-                return "failed"
-            if row["rd_status"] in ("pending", "processing"):
-                return "mining"
-            if row["removed"]:
-                return "withdrawn"
-            return "uploaded"
+            return row["status"] if row else "unknown"
 
     # ------------------------------------------------------------- folders (kb_folders)
 
