@@ -101,19 +101,33 @@ class KbDB:
             return dict(row) if row else None
 
     async def list_visible(self, *, user_id: str, domain: str) -> list[dict[str, Any]]:
-        """KBs visible to user in domain: owned + member + public, status='active'."""
+        """KBs visible to user in domain: owned + member + public, status='active'.
+
+        附带 my_role（owner/editor/viewer 有效访问级别）与 document_count（KB 内文档数），
+        供列表页一次拿全、免 N+1。my_role 语义：owner 优先；否则 editor 成员；否则 viewer
+        （含 viewer 成员与 public 的非成员读者——都是「只读有效角色」）。
+        """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                """SELECT DISTINCT kb.id, kb.domain, kb.name, kb.description,
-                          kb.owner_id, kb.visibility, kb.created_at
+                """SELECT kb.id, kb.domain, kb.name, kb.description,
+                          kb.owner_id, kb.visibility, kb.created_at,
+                          CASE
+                            WHEN kb.owner_id = %(uid)s THEN 'owner'
+                            WHEN EXISTS (SELECT 1 FROM kb_members m
+                                         WHERE m.kb_id = kb.id AND m.user_id = %(uid)s
+                                           AND m.role = 'editor') THEN 'editor'
+                            ELSE 'viewer'
+                          END AS my_role,
+                          (SELECT COUNT(*) FROM asset_documents d
+                           WHERE d.kb_id = kb.id) AS document_count
                    FROM knowledge_bases kb
-                   WHERE kb.domain = %s AND kb.status = 'active'
-                     AND (kb.owner_id = %s
+                   WHERE kb.domain = %(dom)s AND kb.status = 'active'
+                     AND (kb.owner_id = %(uid)s
                           OR kb.visibility = 'public'
                           OR EXISTS (SELECT 1 FROM kb_members m
-                                     WHERE m.kb_id = kb.id AND m.user_id = %s))
+                                     WHERE m.kb_id = kb.id AND m.user_id = %(uid)s))
                    ORDER BY kb.created_at DESC""",
-                [domain, user_id, user_id],
+                {"uid": user_id, "dom": domain},
             )
             return [dict(r) for r in await cur.fetchall()]
 

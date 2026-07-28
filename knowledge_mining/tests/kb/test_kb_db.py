@@ -47,6 +47,37 @@ async def test_list_visible_owner_member_public(async_pool):
     assert visible_to_bob == {"pub"}
 
 
+async def test_list_visible_my_role_and_document_count(async_pool):
+    """list_visible 附带 my_role（owner/editor/viewer）与 document_count。"""
+    db = KbDB(async_pool)
+    alice = await db.upsert_user_by_username("alice")
+    bob = await db.upsert_user_by_username("bob")
+    # alice 自有库（放 2 个文档）；bob 的 public 库（放 1 个文档，加 alice 为 editor）
+    owned = await db.create_kb(domain="cloud_core_network", name="owned", owner_id=alice["id"])
+    pub = await db.create_kb(domain="cloud_core_network", name="pub", owner_id=bob["id"], visibility="public")
+    await db.add_member(kb_id=pub["id"], user_id=alice["id"], role="editor")
+    for fn in ("a.md", "b.md"):
+        await db.insert_document_identity(
+            domain="cloud_core_network", kb_id=owned["id"], document_key=f"doc:/{fn}",
+            document_name=fn, storage_path=f"/tmp/{owned['id']}/{fn}", directory_path="",
+        )
+    await db.insert_document_identity(
+        domain="cloud_core_network", kb_id=pub["id"], document_key="doc:/c.md",
+        document_name="c.md", storage_path=f"/tmp/{pub['id']}/c.md", directory_path="",
+    )
+
+    rows = {k["name"]: k for k in await db.list_visible(user_id=alice["id"], domain="cloud_core_network")}
+    assert rows["owned"]["my_role"] == "owner"
+    assert rows["owned"]["document_count"] == 2
+    assert rows["pub"]["my_role"] == "editor"  # 被加为 editor 成员
+    assert rows["pub"]["document_count"] == 1
+
+    # bob 看自己的 public 库：owner 角色；看不到 alice 的 private（不在列表里）
+    bob_rows = {k["name"]: k for k in await db.list_visible(user_id=bob["id"], domain="cloud_core_network")}
+    assert bob_rows["pub"]["my_role"] == "owner"
+    assert "owned" not in bob_rows
+
+
 async def test_private_invisible_via_is_visible(async_pool):
     db = KbDB(async_pool)
     alice = await db.upsert_user_by_username("alice")
