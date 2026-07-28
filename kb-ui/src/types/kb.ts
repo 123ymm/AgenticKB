@@ -50,6 +50,16 @@ export interface KbMember {
   display_name: string | null
 }
 
+export interface KbFolder {
+  id: string
+  kb_id: string
+  parent_id: string | null
+  name: string
+  path: string
+  created_at: string
+  created_by: string | null
+}
+
 export interface KbDocument {
   id: string
   domain?: string

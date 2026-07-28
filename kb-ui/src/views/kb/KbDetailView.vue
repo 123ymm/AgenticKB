@@ -58,7 +58,7 @@
     <!-- Tabs -->
     <el-tabs v-if="kb" v-model="activeTab" class="kb-detail-view__tabs">
       <el-tab-pane label="文件" name="files">
-        <KbFileTable :kb-id="kbId" :can-write="canWrite" />
+        <KbFileManager :kb-id="kbId" :can-write="canWrite" />
       </el-tab-pane>
       <el-tab-pane label="成员" name="members">
         <KbMembersPanel :kb-id="kbId" :can-write="canWrite" />
@@ -84,7 +84,7 @@ import { useDomainStore } from '@/stores/domain'
 import { useKbApi } from '@/api/kb'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
-import KbFileTable from '@/components/kb/KbFileTable.vue'
+import KbFileManager from '@/components/kb/KbFileManager.vue'
 import KbMembersPanel from '@/components/kb/KbMembersPanel.vue'
 import KbSettingsPanel from '@/components/kb/KbSettingsPanel.vue'
 import { roleLabel, roleTagType, visibilityLabel, visibilityTagType } from '@/views/kb/kbMeta'

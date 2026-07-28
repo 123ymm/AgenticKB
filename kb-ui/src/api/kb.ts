@@ -7,7 +7,7 @@
  */
 import { createProxyClient, extractItems, extractOne } from '@/api/proxyClient'
 import type {
-  KbCreateBody, KbDetail, KbDocument, KbMember, KbMemberRole, KbMineResult,
+  KbCreateBody, KbDetail, KbDocument, KbFolder, KbMember, KbMemberRole, KbMineResult,
   KbSummary, KbUpdateBody,
 } from '@/types/kb'
 
@@ -53,6 +53,51 @@ export function useKbApi() {
 
     async removeMember(kbId: string, userId: string): Promise<void> {
       await client.delete(`/api/kb/${kbId}/members/${userId}`)
+    },
+
+    // ── 文件夹（G2/G3）──
+    async listFolders(kbId: string): Promise<KbFolder[]> {
+      const { data } = await client.get(`/api/kb/${kbId}/folders`)
+      return extractItems<KbFolder>(data)
+    },
+
+    async createFolder(
+      kbId: string,
+      body: { parent_id: string | null; name: string },
+    ): Promise<KbFolder> {
+      const { data } = await client.post(`/api/kb/${kbId}/folders`, body)
+      return extractOne<KbFolder>(data)
+    },
+
+    async renameFolder(kbId: string, folderId: string, name: string): Promise<KbFolder> {
+      const { data } = await client.patch(`/api/kb/${kbId}/folders/${folderId}`, { name })
+      return extractOne<KbFolder>(data)
+    },
+
+    async moveFolder(
+      kbId: string,
+      folderId: string,
+      targetParentId: string | null,
+    ): Promise<KbFolder> {
+      const { data } = await client.post(`/api/kb/${kbId}/folders/${folderId}/move`, {
+        target_parent_id: targetParentId,
+      })
+      return extractOne<KbFolder>(data)
+    },
+
+    async deleteFolder(kbId: string, folderId: string): Promise<void> {
+      await client.delete(`/api/kb/${kbId}/folders/${folderId}`)
+    },
+
+    async moveDocument(
+      kbId: string,
+      docId: string,
+      targetFolderId: string | null,
+    ): Promise<KbDocument> {
+      const { data } = await client.post(`/api/kb/${kbId}/documents/${docId}/move`, {
+        target_folder_id: targetFolderId,
+      })
+      return extractOne<KbDocument>(data)
     },
 
     // ── 文档 ──
