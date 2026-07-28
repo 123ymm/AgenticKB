@@ -22,6 +22,13 @@ _RUNTIME_DDL_V4 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "004
 _ASSET_DOMAIN_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "003_asset_core_domain_isolation.sql"
 # Ontology concept layer — must apply AFTER asset/runtime (FKs target asset_* and mining_runs).
 _ONTOLOGY_DDL = _REPO_ROOT / "databases" / "ontology" / "schemas" / "001_ontology_concept_postgresql.sql"
+# KB management — kb 三表 + asset_documents 004 ALTER。
+# 004_kb_isolation 引用 knowledge_bases（FK），必须在 kb 三表之后；且引用 asset_documents，
+# 必须在 002_asset_core 之后。运行时按序：asset_core → kb 三表 → kb_isolation → runtime → ... → ontology。
+_KB_USERS_DDL = _REPO_ROOT / "databases" / "kb" / "schemas" / "001_kb_users.sql"
+_KB_BASES_DDL = _REPO_ROOT / "databases" / "kb" / "schemas" / "002_knowledge_bases.sql"
+_KB_MEMBERS_DDL = _REPO_ROOT / "databases" / "kb" / "schemas" / "003_kb_members.sql"
+_KB_ISOLATION_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "004_kb_isolation.sql"
 
 
 def _connect_safely(
@@ -79,15 +86,19 @@ def ensure_schema(cfg: MiningDbConfig) -> None:
     )
     try:
         ddl_paths = (
-            _ASSET_DDL, _RUNTIME_DDL, _RUNTIME_DDL_V3, _RUNTIME_DDL_V4,
-            _ASSET_DOMAIN_DDL, _ONTOLOGY_DDL,
+            _ASSET_DDL,
+            _KB_USERS_DDL, _KB_BASES_DDL, _KB_MEMBERS_DDL,  # kb 三表
+            _KB_ISOLATION_DDL,                               # ALTER：kb_id FK → knowledge_bases
+            _RUNTIME_DDL, _RUNTIME_DDL_V3, _RUNTIME_DDL_V4,
+            _ASSET_DOMAIN_DDL,
+            _ONTOLOGY_DDL,
         )
         for ddl_path in ddl_paths:
             ddl = ddl_path.read_text(encoding="utf-8")
             _execute_ddl(
                 conn,
                 ddl,
-                transactional=ddl_path in (_RUNTIME_DDL_V4, _ASSET_DOMAIN_DDL),
+                transactional=ddl_path in (_RUNTIME_DDL_V4, _ASSET_DOMAIN_DDL, _KB_ISOLATION_DDL),
             )
             logger.info("Applied DDL: %s", ddl_path.name)
     finally:
