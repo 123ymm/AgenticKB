@@ -1,0 +1,121 @@
+/**
+ * 知识库管理 API —— 全部经 main_control_service 反向代理转发到 mining 服务。
+ *
+ * 走 createProxyClient('mining')：baseURL 在每次请求时按当前域重算
+ * （/api/control-plane/api/v1/proxy/{domain}/mining），切域即生效。
+ * 当前用户身份由 proxyClient 的请求拦截器注入 X-KB-User 头（见 proxyClient.ts）。
+ */
+import { createProxyClient, extractItems, extractOne } from '@/api/proxyClient'
+import type {
+  KbCreateBody, KbDetail, KbDocument, KbMember, KbMemberRole, KbMineResult,
+  KbSummary, KbUpdateBody,
+} from '@/types/kb'
+
+export function useKbApi() {
+  const client = createProxyClient('mining')
+
+  return {
+    // ── KB CRUD ──
+    async listKbs(domain: string): Promise<KbSummary[]> {
+      const { data } = await client.get('/api/kb', { params: { domain } })
+      return extractItems<KbSummary>(data)
+    },
+
+    async createKb(body: KbCreateBody): Promise<KbDetail> {
+      const { data } = await client.post('/api/kb', body)
+      return extractOne<KbDetail>(data)
+    },
+
+    async getKb(kbId: string): Promise<KbDetail> {
+      const { data } = await client.get(`/api/kb/${kbId}`)
+      return extractOne<KbDetail>(data)
+    },
+
+    async updateKb(kbId: string, body: KbUpdateBody): Promise<KbDetail> {
+      const { data } = await client.patch(`/api/kb/${kbId}`, body)
+      return extractOne<KbDetail>(data)
+    },
+
+    async deleteKb(kbId: string): Promise<void> {
+      await client.delete(`/api/kb/${kbId}`)
+    },
+
+    // ── 成员 ──
+    async addMember(kbId: string, body: { username: string; role: KbMemberRole }): Promise<KbMember> {
+      const { data } = await client.post(`/api/kb/${kbId}/members`, body)
+      return extractOne<KbMember>(data)
+    },
+
+    async listMembers(kbId: string): Promise<KbMember[]> {
+      const { data } = await client.get(`/api/kb/${kbId}/members`)
+      return extractItems<KbMember>(data)
+    },
+
+    async removeMember(kbId: string, userId: string): Promise<void> {
+      await client.delete(`/api/kb/${kbId}/members/${userId}`)
+    },
+
+    // ── 文档 ──
+    /**
+     * 上传单文件。zip 由后端自动解压（走同端点，后端按扩展名分支），
+     * 解压结果用 uploadZip 拿数组；此方法假定非 zip，返回单个文档。
+     */
+    async uploadDocument(
+      kbId: string,
+      file: File,
+      opts?: { directory?: string; documentType?: string },
+    ): Promise<KbDocument> {
+      const form = new FormData()
+      form.append('file', file)
+      if (opts?.directory) form.append('directory', opts.directory)
+      if (opts?.documentType) form.append('document_type', opts.documentType)
+      const { data } = await client.post(`/api/kb/${kbId}/documents`, form)
+      return extractOne<KbDocument>(data)
+    },
+
+    /** 上传 zip（后端解压），返回解压出的文档数组。 */
+    async uploadZip(kbId: string, file: File): Promise<KbDocument[]> {
+      const form = new FormData()
+      form.append('file', file)
+      const { data } = await client.post(`/api/kb/${kbId}/documents`, form)
+      const envelope = data as { documents?: KbDocument[] }
+      if (Array.isArray(envelope.documents)) return envelope.documents
+      // 后端若按单文件处理（非 zip 扩展名），兜底成单元素数组
+      return [extractOne<KbDocument>(data)]
+    },
+
+    async listDocuments(kbId: string, directory?: string): Promise<KbDocument[]> {
+      const { data } = await client.get(`/api/kb/${kbId}/documents`, {
+        params: directory !== undefined ? { directory } : undefined,
+      })
+      return extractItems<KbDocument>(data)
+    },
+
+    async getDocument(kbId: string, docId: string): Promise<KbDocument> {
+      const { data } = await client.get(`/api/kb/${kbId}/documents/${docId}`)
+      return extractOne<KbDocument>(data)
+    },
+
+    async patchDocument(
+      kbId: string,
+      docId: string,
+      body: { document_name?: string; document_type?: string },
+    ): Promise<KbDocument> {
+      const { data } = await client.patch(`/api/kb/${kbId}/documents/${docId}`, body)
+      return extractOne<KbDocument>(data)
+    },
+
+    async downloadDocument(kbId: string, docId: string): Promise<Blob> {
+      const { data } = await client.get(`/api/kb/${kbId}/documents/${docId}/download`, {
+        responseType: 'blob',
+      })
+      return data
+    },
+
+    // ── 挖掘 ──
+    async mineKb(kbId: string): Promise<KbMineResult> {
+      const { data } = await client.post(`/api/kb/${kbId}/mine`)
+      return data
+    },
+  }
+}

@@ -14,6 +14,17 @@ const router = createRouter({
           component: () => import('@/views/DashboardView.vue'),
         },
         {
+          path: 'kb',
+          name: 'kb',
+          component: () => import('@/views/kb/KbListView.vue'),
+        },
+        {
+          path: 'kb/:kbId',
+          name: 'kb-detail',
+          component: () => import('@/views/kb/KbDetailView.vue'),
+          props: true,
+        },
+        {
           path: 'mining',
           name: 'mining',
           component: () => import('@/views/mining/RunsView.vue'),

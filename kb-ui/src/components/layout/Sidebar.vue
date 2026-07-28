@@ -34,7 +34,7 @@
 import { useRoute } from 'vue-router'
 import {
   Monitor, Management, Search, FolderOpened, Share,
-  Cpu, Setting, Collection, Connection, DataLine,
+  Cpu, Setting, Collection, Connection, DataLine, Files,
 } from '@element-plus/icons-vue'
 import { useDomainStore } from '@/stores/domain'
 
@@ -43,6 +43,7 @@ const domainStore = useDomainStore()
 
 const navItems = [
   { path: '/', label: '概览', icon: Monitor },
+  { path: '/kb', label: '知识库', icon: Files },
   { path: '/mining', label: '挖掘管理', icon: Management },
   { path: '/search', label: '检索测试', icon: Search },
   { path: '/paradigm', label: '检索范式', icon: Connection },
