@@ -29,6 +29,7 @@ from knowledge_mining.mining.api.routes.ontology import router as ontology_route
 from knowledge_mining.mining.api.routes.document_lifecycle import (
     router as document_lifecycle_router,
 )
+from knowledge_mining.mining.kb.routes.kbs import router as kb_router
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ def create_app() -> FastAPI:
     app.include_router(uploads_router)
     app.include_router(ontology_router)
     app.include_router(document_lifecycle_router)
+    app.include_router(kb_router)
 
     # Allow cross-origin requests from the dev server and any local UI.
     app.add_middleware(
