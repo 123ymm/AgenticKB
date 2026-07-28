@@ -242,26 +242,31 @@ class KbDB:
         self, *, domain: str, kb_id: str, document_key: str, document_name: str,
         storage_path: str, directory_path: str | None = None,
         document_type: str | None = None, owner_id: str | None = None,
+        file_size: int | None = None, modified_at: str | None = None,
         metadata: dict | None = None,
     ) -> dict[str, Any]:
         """KB 上传：建文档身份行（不计算 hash、不建 snapshot——挖掘时才算）。
 
         写方归属：asset_documents 身份由 KB package 独占（设计铁律 1）。
+        file_size / modified_at 由调用方 stat 落盘文件得到。
         """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """INSERT INTO asset_documents
                      (id, domain, document_key, document_name, document_type, metadata_json,
-                      created_at, kb_id, storage_path, directory_path, owner_id)
+                      created_at, kb_id, storage_path, directory_path, owner_id,
+                      file_size, modified_at)
                    VALUES
                      (%(id)s, %(dom)s, %(k)s, %(n)s, %(t)s, %(m)s::jsonb, %(now)s,
-                      %(kb)s, %(sp)s, %(dp)s, %(own)s)
+                      %(kb)s, %(sp)s, %(dp)s, %(own)s, %(fs)s, %(ma)s)
                    RETURNING id, domain, kb_id, document_key, document_name, document_type,
-                             storage_path, directory_path, owner_id, created_at""",
+                             storage_path, directory_path, owner_id, created_at,
+                             file_size, modified_at""",
                 {
                     "id": _new_id(), "dom": domain, "k": document_key, "n": document_name,
                     "t": document_type, "m": _json(metadata), "now": _utcnow(),
                     "kb": kb_id, "sp": storage_path, "dp": directory_path, "own": owner_id,
+                    "fs": file_size, "ma": modified_at,
                 },
             )
             return dict(await cur.fetchone())  # type: ignore[arg-type]
@@ -279,7 +284,8 @@ class KbDB:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 f"""SELECT id, domain, kb_id, document_key, document_name, document_type,
-                           storage_path, directory_path, owner_id, created_at
+                           storage_path, directory_path, owner_id, created_at,
+                           file_size, modified_at
                     FROM asset_documents WHERE {clause}
                     ORDER BY created_at DESC LIMIT %s OFFSET %s""",
                 params,
@@ -290,7 +296,8 @@ class KbDB:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT id, domain, kb_id, document_key, document_name, document_type,
-                          storage_path, directory_path, owner_id, metadata_json, created_at
+                          storage_path, directory_path, owner_id, metadata_json, created_at,
+                          file_size, modified_at
                    FROM asset_documents WHERE id = %s""",
                 [document_id],
             )

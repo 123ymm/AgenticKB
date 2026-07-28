@@ -71,6 +71,8 @@ export interface KbDocument {
   directory_path?: string | null
   owner_id?: string | null
   created_at?: string
+  file_size?: number | null
+  modified_at?: string | null
   status?: KbDocStatus
 }
 

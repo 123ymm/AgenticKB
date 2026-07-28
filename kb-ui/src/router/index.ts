@@ -25,6 +25,12 @@ const router = createRouter({
           props: true,
         },
         {
+          path: 'kb/:kbId/doc/:docId',
+          name: 'kb-doc-preview',
+          component: () => import('@/views/kb/KbDocPreviewView.vue'),
+          props: true,
+        },
+        {
           path: 'mining',
           name: 'mining',
           component: () => import('@/views/mining/RunsView.vue'),

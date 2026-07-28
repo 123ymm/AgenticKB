@@ -30,6 +30,7 @@ _KB_BASES_DDL = _REPO_ROOT / "databases" / "kb" / "schemas" / "002_knowledge_bas
 _KB_MEMBERS_DDL = _REPO_ROOT / "databases" / "kb" / "schemas" / "003_kb_members.sql"
 _KB_FOLDERS_DDL = _REPO_ROOT / "databases" / "kb" / "schemas" / "004_kb_folders.sql"
 _KB_ISOLATION_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "004_kb_isolation.sql"
+_KB_FILE_META_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "005_kb_file_meta.sql"
 
 
 def _connect_safely(
@@ -91,6 +92,7 @@ def ensure_schema(cfg: MiningDbConfig) -> None:
             _KB_USERS_DDL, _KB_BASES_DDL, _KB_MEMBERS_DDL,  # kb 三表
             _KB_FOLDERS_DDL,                                 # kb_folders（FK → knowledge_bases）
             _KB_ISOLATION_DDL,                               # ALTER：kb_id FK → knowledge_bases
+            _KB_FILE_META_DDL,                               # ALTER：file_size / modified_at
             _RUNTIME_DDL, _RUNTIME_DDL_V3, _RUNTIME_DDL_V4,
             _ASSET_DOMAIN_DDL,
             _ONTOLOGY_DDL,

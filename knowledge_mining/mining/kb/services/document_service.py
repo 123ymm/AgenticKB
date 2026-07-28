@@ -6,6 +6,7 @@ KB 独占 asset_documents 写（身份 + 文件位置）。mining 读文档产 s
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,19 @@ from knowledge_mining.mining.infra.upload_config import UploadConfig
 from knowledge_mining.mining.kb.db import KbDB
 from knowledge_mining.mining.kb.services.kb_service import Forbidden, KbService, NotFound
 from knowledge_mining.mining.kb.storage import build_document_key, build_storage_path
+
+
+def _stat_meta(path: Path) -> tuple[int, str]:
+    """返回 (字节数, ISO 修改时间)。文件管理器列表展示用。"""
+    try:
+        st = path.stat()
+        return st.st_size, datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return 0, _utcnow_iso()
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class DocumentService:
@@ -37,11 +51,13 @@ class DocumentService:
         storage_path = build_storage_path(self._upload_root, kb_id, directory_path, filename)
         storage_path.parent.mkdir(parents=True, exist_ok=True)
         storage_path.write_bytes(content)
+        size, mtime = _stat_meta(storage_path)
         doc = await self._db.insert_document_identity(
             domain=kb["domain"], kb_id=kb_id,
             document_key=build_document_key(directory_path, filename),
             document_name=Path(filename).name, storage_path=str(storage_path),
             directory_path=directory_path or "", document_type=document_type, owner_id=owner_id,
+            file_size=size, modified_at=mtime,
         )
         doc["status"] = "uploaded"
         return doc
@@ -74,11 +90,13 @@ class DocumentService:
             directory_path = "/".join(parts[:-1])
             fn = parts[-1]
             try:
+                size, mtime = _stat_meta(full)
                 d = await self._db.insert_document_identity(
                     domain=kb["domain"], kb_id=kb_id,
                     document_key=build_document_key(directory_path, fn),
                     document_name=fn, storage_path=str(full),
                     directory_path=directory_path, owner_id=owner_id,
+                    file_size=size, modified_at=mtime,
                 )
                 d["status"] = "uploaded"
                 docs.append(d)
