@@ -74,9 +74,14 @@ async def _require_run_domain(pool, run_id: str, domain: str) -> dict:
 
 # ── Routes ──
 
-@router.post("", response_model=RunResponse, status_code=202)
+@router.post("", response_model=RunResponse, status_code=202, deprecated=True)
 async def create_run(body: CreateRunRequest, request: Request) -> dict:
-    """Submit a mining run (async, returns immediately)."""
+    """Submit a mining run (async, returns immediately).
+
+    [deprecated] 过渡期保留：内部仍由 mining 建 asset_documents（kb_id=NULL），
+    违反「KB 独占 asset_documents 写」的不变量。新调用方请走
+    ``POST /api/kb/{kb_id}/mine``。后续阶段删除本端点后不变量完整生效（设计 §3.3）。
+    """
     pool = await request.app.state.domain_pools.async_pool(require_domain(body.domain))
     db_config: MiningDbConfig = request.app.state.db_config
 

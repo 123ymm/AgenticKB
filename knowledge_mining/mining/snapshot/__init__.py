@@ -31,23 +31,25 @@ def select_or_create_snapshot(
 
     mime_type = get_mime_type(doc.file_type)
 
-    # 1. Upsert document (identity)
-    document_id = uuid.uuid4().hex
+    # 1. Resolve document identity.
+    # KB 路径：文档已由 KB 预建（asset_documents 身份由 KB 独占写，设计铁律 1）→
+    #          直接复用 id，不再 upsert（mining 对 asset_documents 零写）。
+    # Legacy 路径（旧 /api/runs，文档未预建）→ upsert 创建身份（deprecated 例外，设计 §3.3）。
     existing_doc = asset_db.get_document_by_key(
         domain=domain,
         document_key=profile.document_key,
     )
     if existing_doc:
         document_id = existing_doc["id"]
-
-    document_id = asset_db.upsert_document(
-        domain=domain,
-        document_id=document_id,
-        document_key=profile.document_key,
-        document_name=doc.file_name,
-        document_type=profile.document_type,
-        metadata_json=doc.metadata_json,
-    )
+    else:
+        document_id = asset_db.upsert_document(
+            domain=domain,
+            document_id=uuid.uuid4().hex,
+            document_key=profile.document_key,
+            document_name=doc.file_name,
+            document_type=profile.document_type,
+            metadata_json=doc.metadata_json,
+        )
 
     # 2. Find or create snapshot
     snapshot_id = uuid.uuid4().hex
