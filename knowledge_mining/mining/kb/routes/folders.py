@@ -24,6 +24,14 @@ class FolderCreate(BaseModel):
     name: str
 
 
+class FolderRename(BaseModel):
+    name: str
+
+
+class FolderMove(BaseModel):
+    target_parent_id: str | None = None  # None = 移到根
+
+
 @router.get("")
 async def list_folders(
     kb_id: str,
@@ -51,6 +59,40 @@ async def create_folder(
         raise _map_error(exc) from None
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
+
+
+@router.patch("/{folder_id}")
+async def rename_folder(
+    kb_id: str,
+    folder_id: str,
+    body: FolderRename,
+    user: dict[str, Any] = Depends(current_user),
+    svc: FolderService = Depends(get_folder_service),
+):
+    try:
+        return await svc.rename_folder(folder_id=folder_id, name=body.name, user_id=user["id"])
+    except (NotFound, Forbidden, Duplicate) as exc:
+        raise _map_error(exc) from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.post("/{folder_id}/move")
+async def move_folder(
+    kb_id: str,
+    folder_id: str,
+    body: FolderMove,
+    user: dict[str, Any] = Depends(current_user),
+    svc: FolderService = Depends(get_folder_service),
+):
+    try:
+        return await svc.move_folder(
+            folder_id=folder_id, target_parent_id=body.target_parent_id, user_id=user["id"],
+        )
+    except (NotFound, Forbidden, Duplicate) as exc:
+        raise _map_error(exc) from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None  # 移入自身/子树 → 400
 
 
 @router.delete("/{folder_id}")

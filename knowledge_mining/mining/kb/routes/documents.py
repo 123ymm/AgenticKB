@@ -13,10 +13,11 @@ from pydantic import BaseModel
 
 from knowledge_mining.mining.infra.upload_config import UploadConfig
 from knowledge_mining.mining.kb.auth import current_user
-from knowledge_mining.mining.kb.deps import get_document_service
+from knowledge_mining.mining.kb.deps import get_document_service, get_folder_service
 from knowledge_mining.mining.kb.routes.kbs import _map_error
 from knowledge_mining.mining.kb.services.document_service import DocumentService
-from knowledge_mining.mining.kb.services.kb_service import Forbidden, NotFound
+from knowledge_mining.mining.kb.services.folder_service import FolderService
+from knowledge_mining.mining.kb.services.kb_service import Duplicate, Forbidden, NotFound
 
 router = APIRouter(prefix="/api/kb/{kb_id}/documents", tags=["kb-documents"])
 
@@ -30,6 +31,10 @@ def _is_archive(filename: str) -> bool:
 class DocPatch(BaseModel):
     document_name: str | None = None
     document_type: str | None = None
+
+
+class DocMove(BaseModel):
+    target_folder_id: str | None = None  # None = 移到根
 
 
 @router.post("", status_code=201)
@@ -130,3 +135,21 @@ async def delete_document(
         raise _map_error(exc) from None
     except NotImplementedError as exc:
         raise HTTPException(501, str(exc)) from None
+
+
+@router.post("/{document_id}/move")
+async def move_document(
+    kb_id: str,
+    document_id: str,
+    body: DocMove,
+    user: dict[str, Any] = Depends(current_user),
+    svc: FolderService = Depends(get_folder_service),
+):
+    try:
+        return await svc.move_document(
+            document_id=document_id, target_folder_id=body.target_folder_id, user_id=user["id"],
+        )
+    except (NotFound, Forbidden, Duplicate) as exc:
+        raise _map_error(exc) from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None

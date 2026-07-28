@@ -426,3 +426,57 @@ class KbDB:
     async def delete_folder_row(self, folder_id: str) -> None:
         async with self._pool.connection() as conn:
             await conn.execute("DELETE FROM kb_folders WHERE id = %s", [folder_id])
+
+    # -- folder move / rename (G3)：身份键不变，只改位置（path / directory_path / storage_path）--
+
+    async def update_folder_name(self, folder_id: str, name: str) -> None:
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                "UPDATE kb_folders SET name = %s WHERE id = %s", [name, folder_id],
+            )
+
+    async def set_folder_parent(self, folder_id: str, parent_id: str | None) -> None:
+        """parent_id 为 None 表示移到根。path 由 rewrite_folder_subtree_paths 处理。"""
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                "UPDATE kb_folders SET parent_id = %s WHERE id = %s", [parent_id, folder_id],
+            )
+
+    async def rewrite_folder_subtree_paths(
+        self, *, kb_id: str, old_prefix: str, new_prefix: str,
+    ) -> int:
+        """把 path == old_prefix 或 LIKE 'old_prefix/%' 的文件夹 path 前缀替换为 new_prefix。
+
+        返回受影响行数。path 是单列、纯前缀关系，SQL substr 重写安全。
+        """
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """UPDATE kb_folders
+                   SET path = %s || substr(path, %s)
+                   WHERE kb_id = %s
+                     AND (path = %s OR path LIKE %s)""",
+                [new_prefix, len(old_prefix) + 1, kb_id, old_prefix, old_prefix + "/%"],
+            )
+            return cur.rowcount if hasattr(cur, "rowcount") else 0
+
+    async def list_docs_under_prefix(self, *, kb_id: str, prefix: str) -> list[dict[str, Any]]:
+        """列出身处某文件夹（含子文件夹）下的文档：directory_path = prefix 或 LIKE 'prefix/%'。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT id, document_name, directory_path, storage_path
+                   FROM asset_documents
+                   WHERE kb_id = %s
+                     AND (directory_path = %s OR directory_path LIKE %s)""",
+                [kb_id, prefix, prefix + "/%"],
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def update_doc_location(
+        self, document_id: str, *, directory_path: str, storage_path: str,
+    ) -> None:
+        """移动/改名文件：更新位置两字段。document_key / id 不变。"""
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                "UPDATE asset_documents SET directory_path = %s, storage_path = %s WHERE id = %s",
+                [directory_path, storage_path, document_id],
+            )
