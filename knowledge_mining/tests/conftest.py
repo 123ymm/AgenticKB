@@ -69,6 +69,12 @@ def _truncate_all(conn):
     conn.execute("TRUNCATE TABLE asset_documents CASCADE")
     conn.execute("TRUNCATE TABLE asset_source_batches CASCADE")
 
+    # KB 管理表（asset_documents 已清，knowledge_bases 无 FK 引用残留，安全）。
+    # 顺序：子表先（kb_members → knowledge_bases → kb_users）。
+    conn.execute("TRUNCATE TABLE kb_members CASCADE")
+    conn.execute("TRUNCATE TABLE knowledge_bases CASCADE")
+    conn.execute("TRUNCATE TABLE kb_users CASCADE")
+
     # 本体/图谱表是 domain 维度（不随 run 销毁），不清会让上批测试残留的待审
     # 候选/实体在下批测试里触发"本体确认"闸口暂停，污染端到端流水线断言。
     # asset_segment_entity_mentions 存待审 mention（按 run 关联）。
