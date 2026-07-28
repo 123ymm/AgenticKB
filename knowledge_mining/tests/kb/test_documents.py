@@ -110,16 +110,22 @@ async def test_other_user_cannot_access_private_kb_docs(async_pool, upload_root)
         assert (await c.patch(f"/api/kb/{kb_id}/documents/{doc_id}", json={"document_name": "h"}, headers=h_b)).status_code == 404
 
 
-async def test_withdraw_returns_501_pending_wiring(async_pool, upload_root):
+async def test_delete_removes_file_and_identity(async_pool, upload_root):
+    """DELETE 真删除：磁盘文件 + 身份行一并移除（撤回是另一个概念，待 release 机制）。"""
     async with await _client(async_pool) as c:
         h = {"X-KB-User": "alice"}
-        kb_id = (await c.post("/api/kb", json={"domain": DOMAIN, "name": "KBw"}, headers=h)).json()["id"]
+        kb_id = (await c.post("/api/kb", json={"domain": DOMAIN, "name": "KBdel"}, headers=h)).json()["id"]
         doc_id = (await c.post(
             f"/api/kb/{kb_id}/documents", files={"file": ("a.txt", b"x")}, headers=h,
         )).json()["id"]
+        p = upload_root / kb_id / "a.txt"
+        assert p.is_file()  # 上传后磁盘有文件
         r = await c.delete(f"/api/kb/{kb_id}/documents/{doc_id}", headers=h)
-        # withdraw stub：release 机制待接（设计 §10）→ 501
-        assert r.status_code == 501
+        assert r.status_code == 200
+        assert r.json() == {"ok": True}
+        assert not p.exists()  # 磁盘文件已删
+        # 身份行已删：再 get → 404
+        assert (await c.get(f"/api/kb/{kb_id}/documents/{doc_id}", headers=h)).status_code == 404
 
 
 async def test_path_traversal_rejected(async_pool, upload_root):

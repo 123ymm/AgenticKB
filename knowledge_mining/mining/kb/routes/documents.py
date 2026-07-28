@@ -128,13 +128,12 @@ async def delete_document(
     user: dict[str, Any] = Depends(current_user),
     svc: DocumentService = Depends(get_document_service),
 ):
+    """删除 KB 文档（磁盘文件 + 身份行）。撤回（从发布中移除）是另一个概念，待 release 机制接线。"""
     try:
-        await svc.withdraw(document_id=document_id, user_id=user["id"])
+        await svc.delete(document_id=document_id, user_id=user["id"])
         return {"ok": True}
     except (NotFound, Forbidden) as exc:
         raise _map_error(exc) from None
-    except NotImplementedError as exc:
-        raise HTTPException(501, str(exc)) from None
 
 
 @router.post("/{document_id}/move")

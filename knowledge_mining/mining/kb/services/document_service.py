@@ -111,14 +111,58 @@ class DocumentService:
     ) -> list[dict[str, Any]]:
         await self._svc._assert_read(kb_id, user_id)
         # 状态由 list_documents_in_kb 内联派生（一条 SQL），不再 N+1。
-        return await self._db.list_documents_in_kb(kb_id=kb_id, directory=directory)
+        docs = await self._db.list_documents_in_kb(kb_id=kb_id, directory=directory)
+        for d in docs:
+            self._fill_meta(d)  # 旧文件 file_size 为空时本地 stat 补（本地磁盘，非远程查询）
+        return docs
+
+    def _fill_meta(self, doc: dict[str, Any]) -> None:
+        """file_size 为空（旧文件 / 005 迁移前上传）时，从本地磁盘 stat 补大小+修改时间。
+
+        纯本地 IO（微秒级），不触远程 DB；新上传已带 file_size，直接跳过。
+        """
+        if doc.get("file_size") is not None or not doc.get("storage_path"):
+            return
+        try:
+            size, mtime = _stat_meta(Path(doc["storage_path"]))
+            doc["file_size"] = size
+            if not doc.get("modified_at"):
+                doc["modified_at"] = mtime
+        except OSError:
+            pass
 
     async def get_document(self, *, document_id: str, user_id: str) -> dict[str, Any]:
         doc = await self._db.get_document_identity(document_id)
         if doc is None:
             raise NotFound(document_id)
         await self._svc._assert_read(doc["kb_id"], user_id)
+        self._fill_meta(doc)
         return doc
+
+    async def delete(self, *, document_id: str, user_id: str) -> None:
+        """删除 KB 文档：删磁盘文件 + 身份行。
+
+        FK CASCADE 清掉该文档的 snapshot_links 与 build_document_snapshots；
+        共享 snapshot 保留（别的文档可能引用）。mining_run_documents 按 document_key
+        留存为历史（无 FK，不阻塞），下次同 document_key 重传再挖会重新关联。
+        """
+        doc = await self._db.get_document_identity(document_id)
+        if doc is None:
+            raise NotFound(document_id)
+        kb_id = doc["kb_id"]
+        await self._svc._assert_write(kb_id, user_id)
+        base = (self._upload_root / kb_id).resolve()
+        sp = doc.get("storage_path")
+        if sp:
+            p = Path(sp)
+            try:
+                resolved = p.resolve()
+                resolved.relative_to(base)  # 越界保护
+                if resolved.is_file():
+                    resolved.unlink()
+            except (ValueError, OSError):
+                pass  # 不在库内或已不存在：仍删 DB 行
+        await self._db.delete_document_identity(document_id)
 
     async def patch_document(
         self, *, document_id: str, user_id: str,

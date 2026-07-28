@@ -128,14 +128,9 @@
         @click.stop
         @contextmenu.prevent
       >
-        <div v-if="ctx.kind === 'file'" class="fm__ctx-item" @click="ctxPreview">预览</div>
         <div v-if="ctx.kind === 'file'" class="fm__ctx-item" @click="ctxDownload">下载</div>
-        <div v-if="canWrite" class="fm__ctx-item" @click="ctxRename">改名</div>
-        <div
-          v-if="canWrite && ctx.kind === 'folder'"
-          class="fm__ctx-item fm__ctx-item--danger"
-          @click="ctxDelete"
-        >删除</div>
+        <div v-if="canWrite" class="fm__ctx-item" @click="ctxRename">重命名</div>
+        <div v-if="canWrite" class="fm__ctx-item fm__ctx-item--danger" @click="ctxDelete">删除</div>
       </div>
     </teleport>
   </div>
@@ -290,6 +285,20 @@ async function download(file: KbDocument) {
     saveBlob(blob, filenameFromDisposition(null, file.document_name))
   } catch (e) { ElMessage.error(await apiErrorDetail(e)) }
 }
+async function deleteFile(file: KbDocument) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除文件「${file.document_name}」？磁盘文件与库内记录一并删除。`,
+      '删除文件',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  try {
+    await kbApi.deleteDocument(props.kbId, file.id)
+    ElMessage.success('已删除')
+    await loadFiles()
+  } catch (e) { ElMessage.error(await apiErrorDetail(e)) }
+}
 
 // ── 拖拽移动 ──
 const dragId = ref<string | null>(null)
@@ -336,10 +345,6 @@ function onVoidContext(e: MouseEvent) {
   if (!target.closest('.fm__row')) return
   e.preventDefault()
 }
-function ctxPreview() {
-  const i = ctx.value?.item; closeCtx()
-  if (i && 'document_name' in i) openPreview(i)
-}
 function ctxDownload() {
   const i = ctx.value?.item; closeCtx()
   if (i && 'document_name' in i) download(i)
@@ -351,7 +356,8 @@ function ctxRename() {
 }
 function ctxDelete() {
   const i = ctx.value?.item; closeCtx()
-  if (i && !('document_name' in i)) deleteFolder(i)
+  if (!i) return
+  if ('document_name' in i) deleteFile(i); else deleteFolder(i)
 }
 
 // ── 辅助 ──
@@ -380,7 +386,7 @@ function fileIconClass(file: KbDocument): string {
 }
 function formatDate(t?: string | null): string {
   if (!t) return '-'
-  return new Date(t).toLocaleDateString('zh-CN')
+  return new Date(t).toLocaleString('zh-CN')  // 含具体时间
 }
 
 onMounted(reload)

@@ -157,6 +157,10 @@ export function useKbApi() {
       return data
     },
 
+    async deleteDocument(kbId: string, docId: string): Promise<void> {
+      await client.delete(`/api/kb/${kbId}/documents/${docId}`)
+    },
+
     // ── 挖掘 ──
     async mineKb(kbId: string): Promise<KbMineResult> {
       const { data } = await client.post(`/api/kb/${kbId}/mine`)

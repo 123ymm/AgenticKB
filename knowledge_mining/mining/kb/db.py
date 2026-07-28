@@ -353,6 +353,12 @@ class KbDB:
             row = await cur.fetchone()
             return dict(row) if row else None
 
+    async def delete_document_identity(self, document_id: str) -> None:
+        """删文档身份行。FK CASCADE 自动清 asset_document_snapshot_links 与
+        asset_build_document_snapshots；共享 snapshot 保留（别的文档可能引用）。"""
+        async with self._pool.connection() as conn:
+            await conn.execute("DELETE FROM asset_documents WHERE id = %s", [document_id])
+
     async def update_document_identity(
         self, document_id: str, *,
         document_name: str | None = None, document_type: str | None = None,
