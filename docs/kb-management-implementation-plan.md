@@ -518,4 +518,4 @@ git commit -m "feat(kb): 存量文档 backfill 到 per-domain 默认 KB（可选
 - `AssetRepository.resolveActiveScope` 加可选 `kb_ids` 参数（设计 §5）。
 - `ScopeResolveOperator` 加 `kb_ids` 到 `PARAM_SCHEMA` + 透传（设计 §4.1）。
 - `SourceRef` 加 `kb_id`/`kb_name` + hydrate 回溯。
-- 范式画布前端（B4）按 `agent_serving_java/docs/下一阶段-算子化统一规划.md` 主线 B 主导。
+- 范式画布前端（B4）按 `docs/下一阶段-算子化统一规划.md` 主线 B 主导。
