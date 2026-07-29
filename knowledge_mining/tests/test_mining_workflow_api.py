@@ -141,6 +141,31 @@ def test_create_uses_strict_request_model(
     assert fake_workflow_service.calls == []
 
 
+@pytest.mark.parametrize(
+    "template_key",
+    [
+        "minimal",
+        "fast_retrieval",
+        "discourse_only",
+        "entity_graph",
+        "hybrid_knowledge",
+        "ontology_only",
+        "full",
+    ],
+)
+def test_create_accepts_all_seven_paradigm_template_keys(
+    fake_workflow_service: FakeWorkflowService,
+    template_key: str,
+) -> None:
+    response = client_for(fake_workflow_service).post(
+        "/api/mining-workflows",
+        json={"name": f"workflow-{template_key}", "template_key": template_key},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["template_key"] == template_key
+
+
 def test_save_draft_requires_expected_revision(
     fake_workflow_service: FakeWorkflowService,
 ) -> None:

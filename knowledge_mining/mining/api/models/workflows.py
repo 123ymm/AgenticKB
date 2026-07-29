@@ -12,9 +12,15 @@ class WorkflowRequest(BaseModel):
 class CreateWorkflowRequest(WorkflowRequest):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = None
-    template_key: Literal["full", "discourse_only", "ontology_only", "minimal"] = (
-        "full"
-    )
+    template_key: Literal[
+        "minimal",
+        "fast_retrieval",
+        "discourse_only",
+        "entity_graph",
+        "hybrid_knowledge",
+        "ontology_only",
+        "full",
+    ] = "full"
     graph: dict[str, Any] | None = None
     created_by: str | None = None
 

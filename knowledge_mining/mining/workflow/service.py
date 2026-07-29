@@ -9,7 +9,11 @@ from psycopg.errors import UniqueViolation
 from .compiler import WorkflowCompileException, WorkflowCompiler
 from .graph import WorkflowGraph
 from .operators.catalog import builtin_catalog
+from .paradigms import ORDINARY_WORKFLOW_PARADIGMS
 from .templates import builtin_templates
+
+
+_PARADIGM_SEED_METADATA_KEY = "workflowParadigmSeed"
 
 
 class WorkflowNotFound(LookupError):
@@ -51,6 +55,7 @@ class WorkflowService:
         workflow_id: str | None = None,
         is_system: bool = False,
         is_system_default: bool = False,
+        metadata_json: dict[str, Any] | None = None,
     ) -> dict:
         normalized_name = name.strip()
         if not normalized_name:
@@ -76,7 +81,7 @@ class WorkflowService:
             "is_system_default": is_system_default,
             "created_by": created_by,
             "updated_by": created_by,
-            "metadata_json": {},
+            "metadata_json": deepcopy(metadata_json or {}),
         }
         try:
             return await self.repository.insert_workflow(record)
@@ -246,22 +251,93 @@ class WorkflowService:
     async def ensure_system_workflows(self) -> dict:
         workflow = await self.repository.get_workflow("system-full-baseline")
         if workflow is None:
-            workflow = await self.create(
-                workflow_id="system-full-baseline",
-                name="system-full-baseline",
-                description="System FULL mining workflow baseline",
-                template_key="full",
-                is_system=True,
-                is_system_default=True,
-            )
+            try:
+                workflow = await self.create(
+                    workflow_id="system-full-baseline",
+                    name="system-full-baseline",
+                    description="System FULL mining workflow baseline",
+                    template_key="full",
+                    is_system=True,
+                    is_system_default=True,
+                )
+            except WorkflowNameConflict:
+                workflow = await self.repository.get_workflow(
+                    "system-full-baseline"
+                )
+                if workflow is None:
+                    raise
         if workflow["current_version"] is None:
+            workflow = await self._ensure_initial_publication(
+                workflow,
+                release_notes="Initial FULL baseline",
+            )
+        return workflow
+
+    async def ensure_workflow_library(self) -> dict:
+        """Create missing published paradigms without owning their lifecycle.
+
+        The compatibility default remains a system Workflow. Every additional
+        paradigm is inserted exactly like an ordinary user-created Workflow:
+        it receives a regular generated ID and can be edited or archived. An
+        existing name, including an archived one, is never changed or revived.
+        """
+        default = await self.ensure_system_workflows()
+        for paradigm in ORDINARY_WORKFLOW_PARADIGMS:
+            workflow = await self.repository.get_by_name(paradigm.name)
+            if workflow is None:
+                try:
+                    workflow = await self.create(
+                        name=paradigm.name,
+                        description=paradigm.description,
+                        template_key=paradigm.template_key,
+                        metadata_json={
+                            _PARADIGM_SEED_METADATA_KEY: paradigm.template_key
+                        },
+                    )
+                except WorkflowNameConflict:
+                    # A concurrent startup may have inserted the same name
+                    # after the existence check. Only continue initialization
+                    # when that winner is one of our own ordinary seeds.
+                    workflow = await self.repository.get_by_name(paradigm.name)
+            if workflow is None:
+                continue
+            if (
+                workflow["status"] != "active"
+                or workflow["current_version"] is not None
+                or workflow.get("metadata_json", {}).get(
+                    _PARADIGM_SEED_METADATA_KEY
+                )
+                != paradigm.template_key
+            ):
+                continue
+            await self._ensure_initial_publication(
+                workflow,
+                release_notes="初始范式版本",
+            )
+        return default
+
+    async def _ensure_initial_publication(
+        self,
+        workflow: dict,
+        *,
+        release_notes: str,
+    ) -> dict:
+        if workflow["current_version"] is not None:
+            return workflow
+        try:
             await self.publish(
                 workflow["id"],
                 expected_revision=workflow["draft_revision"],
-                release_notes="Initial FULL baseline",
+                release_notes=release_notes,
             )
-            workflow = await self.get(workflow["id"])
-        return workflow
+        except DraftRevisionConflict:
+            # Another app instance may have won the publication transaction.
+            # Only absorb the conflict when a published version now exists.
+            refreshed = await self.get(workflow["id"])
+            if refreshed["current_version"] is None:
+                raise
+            return refreshed
+        return await self.get(workflow["id"])
 
     async def _require_active(self, workflow_id: str) -> dict:
         workflow = await self.get(workflow_id)

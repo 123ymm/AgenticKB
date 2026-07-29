@@ -36,7 +36,7 @@ class MiningConfig(BaseSettings):
     domain: str = "cloud_core_network"
     domain_pack: str = ""
     max_workers: int = 4
-    mining_run_submission_engine: Literal["legacy", "workflow"] = "legacy"
+    mining_run_submission_engine: Literal["legacy", "workflow"] = "workflow"
 
     model_config = {
         "env_prefix": "",

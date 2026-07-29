@@ -6,7 +6,7 @@ import type {
   RunTrace, OntologyVersion, OntologyNodeType, OntologyRelationType, ActiveOntology, OntologyDraft, OntologyCandidate,
   PendingMention, GraphEntity, EntityNeighbors, GraphEvidence,
   EntityMutationResult,
-  CreateMiningRunRequest, CreateMiningRunResponse,
+    CreateMiningRunRequest, CreateMiningRunResponse, MiningPreflightResult,
 } from '@/types'
 import type { PaginatedResponse } from '@/types'
 import { createProxyClient, extractItems, extractOne } from '@/api/proxyClient'
@@ -62,6 +62,16 @@ export function useMiningApi() {
     async createRun(config: CreateMiningRunRequest): Promise<CreateMiningRunResponse> {
       const { data } = await client.post('/api/runs', config)
       return extractOne<CreateMiningRunResponse>(data)
+    },
+
+    async preflightRun(config: {
+      domain: string
+      upload_batch_id: string
+      workflow_id: string
+      workflow_version: number
+    }): Promise<MiningPreflightResult> {
+      const { data } = await client.post('/api/runs/preflight', config)
+      return extractOne<MiningPreflightResult>(data)
     },
 
     async cancelRun(runId: string): Promise<void> {

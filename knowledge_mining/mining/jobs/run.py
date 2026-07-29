@@ -627,6 +627,12 @@ class _WorkflowJobServices:
             runtime_db=runtime_db,
             tracker=tracker,
             batch_id=None,
+            workflow_binding={
+                "workflow_id": manifest.get("workflowId"),
+                "workflow_version": manifest.get("workflowVersion"),
+                "workflow_version_id": manifest.get("workflowVersionId"),
+                "workflow_graph_hash": manifest.get("graphHash"),
+            },
         )
         self.document_persist_lock = None
         self.initial_global_capabilities = frozenset()
@@ -721,28 +727,102 @@ class _WorkflowJobServices:
             row["document_key"]: row
             for row in self.runtime_db.get_run_documents(self.run_id)
         }
+        preflight = run_data.get("preflight_manifest_json") or {}
+        if isinstance(preflight, str):
+            preflight = json.loads(preflight)
+        preflight_items = {
+            (item.get("relative_path"), item.get("raw_content_hash")): item
+            for item in (preflight.get("items") or [])
+            if isinstance(item, dict)
+        }
         states = []
         for doc in docs:
             doc_key = f"doc:/{doc.relative_path}"
-            lifecycle = self.asset_db.get_document_lifecycle_state(
-                domain=self.profile.domain_id,
-                channel=self.channel,
-                document_key=doc_key,
-                normalized_content_hash=doc.normalized_content_hash,
-            )
-            lifecycle_action = decide_document_lifecycle_action(
-                lifecycle,
-                normalized_content_hash=doc.normalized_content_hash,
-            )
-            action = (
-                "SKIP"
-                if lifecycle_action in {"SKIP", "RESTORE"}
-                else lifecycle_action
-            )
+            planned = preflight_items.get((doc.relative_path, doc.raw_content_hash))
+            lifecycle = None
+            if planned is not None:
+                preflight_action = str(planned.get("selected_action") or "")
+                if preflight_action == "JOINED_EXISTING":
+                    raise RuntimeError(
+                        f"{doc.relative_path} is already being processed by another Run"
+                    )
+                selected = (
+                    planned.get("matched_snapshot")
+                    if preflight_action in {"REUSED", "RESTORED"}
+                    else planned.get("current_snapshot") or planned.get("matched_snapshot")
+                ) or {}
+                if selected.get("document_id"):
+                    lifecycle = {
+                        "document_id": selected["document_id"],
+                        "document_domain": self.profile.domain_id,
+                        "document_key": selected.get("document_key") or doc_key,
+                    }
+                    doc_key = lifecycle["document_key"]
+                if preflight_action in {"REUSED", "RESTORED", "KEPT_CURRENT"}:
+                    snapshot_id = selected.get("snapshot_id")
+                    document_id = selected.get("document_id")
+                    if not snapshot_id or not document_id:
+                        raise RuntimeError(
+                            f"Preflight action {preflight_action} has no reusable Snapshot"
+                        )
+                    existing = existing_rows.get(doc_key)
+                    if existing is None:
+                        run_document_id = uuid.uuid4().hex
+                        self.tracker.register_document(MiningRunDocumentData(
+                            id=run_document_id,
+                            run_id=self.run_id,
+                            document_key=doc_key,
+                            raw_content_hash=doc.raw_content_hash,
+                            normalized_content_hash=doc.normalized_content_hash,
+                            action="SKIP",
+                            metadata_json={
+                                "file_size": doc.file_size,
+                                "preflight_action": preflight_action,
+                                "lifecycle_action": preflight_action,
+                                "source_batch_id": batch_id,
+                            },
+                        ))
+                        self.asset_db.insert_snapshot_link(
+                            domain=self.profile.domain_id,
+                            link_id=uuid.uuid4().hex,
+                            document_id=document_id,
+                            document_snapshot_id=snapshot_id,
+                            source_batch_id=batch_id,
+                            relative_path=doc.relative_path,
+                            source_uri=doc.source_uri,
+                            title=doc.title,
+                            scope_json=doc.scope_json,
+                            tags_json=doc.tags_json,
+                            metadata_json=doc.metadata_json,
+                        )
+                        self.tracker.commit_document(
+                            run_document_id, document_id, snapshot_id
+                        )
+                    continue
+                lifecycle_action = "UPDATE" if lifecycle else "NEW"
+                action = lifecycle_action
+            else:
+                lifecycle = self.asset_db.get_document_lifecycle_state(
+                    domain=self.profile.domain_id,
+                    channel=self.channel,
+                    document_key=doc_key,
+                    normalized_content_hash=doc.normalized_content_hash,
+                )
+                lifecycle_action = decide_document_lifecycle_action(
+                    lifecycle,
+                    normalized_content_hash=doc.normalized_content_hash,
+                )
+                action = (
+                    "SKIP"
+                    if lifecycle_action in {"SKIP", "RESTORE"}
+                    else lifecycle_action
+                )
             existing = existing_rows.get(doc_key)
             if existing is None:
                 run_document_id = uuid.uuid4().hex
                 metadata = {"file_size": doc.file_size}
+                if planned is not None:
+                    metadata["preflight_action"] = planned.get("selected_action")
                 if lifecycle_action == "SKIP" and lifecycle:
                     metadata.update(
                         source_batch_id=lifecycle.get("active_source_batch_id"),
@@ -873,6 +953,8 @@ def _execute_workflow_job(
         manifest = run_data.get("workflow_manifest_json")
         if not isinstance(manifest, dict):
             raise ValueError(f"Run {run_id} has no frozen Workflow Manifest")
+        manifest = dict(manifest)
+        manifest["workflowVersionId"] = run_data.get("workflow_version_id")
         binding = manifest.get("runtimeBinding") or {}
         frozen_domain = str(binding.get("domain") or run_data.get("domain") or domain)
         if frozen_domain != domain:

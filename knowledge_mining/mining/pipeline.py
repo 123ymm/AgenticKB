@@ -125,6 +125,7 @@ class PipelineConfig:
     runtime_db: Any | None = None
     tracker: Any | None = None
     batch_id: str | None = None
+    workflow_binding: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +791,8 @@ def persist_document_assets(
             ctx.profile,
             domain=cfg.domain,
             batch_id=cfg.batch_id,
+            workflow_binding=cfg.workflow_binding,
+            existing_document_id=(ctx.existing_doc or {}).get("id"),
         )
         if asset_db.count_segments_by_snapshot(snapshot_id) == 0:
             for segment in ctx.segments:

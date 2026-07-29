@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
 
     workflow_repo = GlobalWorkflowRepository(pool)
     app.state.workflow_service = WorkflowService(workflow_repo)
-    await app.state.workflow_service.ensure_system_workflows()
+    await app.state.workflow_service.ensure_workflow_library()
 
     # Domain-specific async/sync pools are opened lazily by API dependencies.
     app.state.domain_pools = DomainPoolManager(cfg)

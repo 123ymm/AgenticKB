@@ -89,10 +89,13 @@ const form = ref<{ name: string; description: string; template_key: MiningTempla
 })
 
 const templates: Array<{ key: MiningTemplateKey; label: string; description: string }> = [
-  { key: 'full', label: 'FULL（默认）', description: '完整篇章、检索、本体与图谱链路。' },
-  { key: 'discourse_only', label: '篇章/检索', description: '只保留篇章关系、上下文检索、检索单元与向量。' },
-  { key: 'ontology_only', label: '本体/图谱', description: '只保留实体、本体审核与图谱写入链路。' },
-  { key: 'minimal', label: '最小', description: '输入、解析、资产持久化与收尾。' },
+  { key: 'minimal', label: '基础文档入库', description: '仅解析、切分并持久化文档资产，适合低成本基础入库。' },
+  { key: 'fast_retrieval', label: '快速向量检索', description: '直接生成检索单元与向量，适合快速构建基础 RAG 检索。' },
+  { key: 'discourse_only', label: '篇章增强检索', description: '理解篇章关系并补充检索上下文，适合长文档的高质量语义检索。' },
+  { key: 'entity_graph', label: '固定本体图谱构建', description: '按已有本体抽取实体和关系并写入图谱，不演化本体。' },
+  { key: 'hybrid_knowledge', label: '检索与图谱联合构建', description: '同时构建篇章增强检索资产和固定本体实体图谱。' },
+  { key: 'ontology_only', label: '本体演化专项', description: '抽取实体关系并归纳、审核本体候选，适合本体持续演化。' },
+  { key: 'full', label: '全量知识构建', description: '执行检索、实体图谱和本体演化的完整挖掘链路。' },
 ]
 const selectedTemplateDescription = computed(() => templates.find(item => item.key === form.value.template_key)?.description ?? '')
 

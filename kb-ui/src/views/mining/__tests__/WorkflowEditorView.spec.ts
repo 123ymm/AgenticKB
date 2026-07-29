@@ -29,6 +29,7 @@ vi.mock('@vue-flow/background', () => ({ Background: { template: '<div />' } }))
 vi.mock('@vue-flow/controls', () => ({ Controls: { template: '<div />' } }))
 
 import WorkflowEditorView from '../WorkflowEditorView.vue'
+import MiningOperatorPalette from '@/components/mining/workflow/MiningOperatorPalette.vue'
 
 const catalog = [
   {
@@ -82,6 +83,13 @@ describe('mining Workflow editor', () => {
     state.ui.success.mockReset()
     state.ui.error.mockReset()
     state.ui.warning.mockReset()
+  })
+
+  it('passes the active graph to graph-aware operator presentation', async () => {
+    const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
+    await flushPromises()
+
+    expect(wrapper.getComponent(MiningOperatorPalette).props('nodes')).toEqual(graph.nodes)
   })
 
   it('keeps deterministic local JSON available after a draft revision conflict', async () => {
@@ -197,7 +205,7 @@ describe('mining Workflow editor', () => {
     expect(vm.graph.nodes[1].params.limit).toBe(8)
   })
 
-  it('adds editable operators and only reconnects endpoints allowed by policy and slot type', async () => {
+  it('adds editable operators, replaces single-input edges, and rejects incompatible slots', async () => {
     const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
     await flushPromises()
     const vm = wrapper.vm as unknown as {
@@ -213,9 +221,222 @@ describe('mining Workflow editor', () => {
 
     vm.onConnect({ source: 'input', sourceHandle: 'out', target: 'extra_1', targetHandle: 'in' })
     expect(vm.graph.edges.filter(edge => edge.toNode === 'extra_1')).toHaveLength(1)
+    expect(vm.graph.edges).toContainEqual({ fromNode: 'input', fromSlot: 'out', toNode: 'extra_1', toSlot: 'in' })
 
     vm.onConnect({ source: 'extra_1', sourceHandle: 'out', target: 'edit', targetHandle: 'in' })
+    expect(vm.graph.edges).toContainEqual({ fromNode: 'extra_1', fromSlot: 'out', toNode: 'edit', toSlot: 'in' })
+    expect(vm.graph.edges).not.toContainEqual({ fromNode: 'input', fromSlot: 'out', toNode: 'edit', toSlot: 'in' })
+
+    vm.onConnect({ source: 'input', sourceHandle: 'out', target: 'edit', targetHandle: 'missing' })
+    expect(vm.graph.edges).toContainEqual({ fromNode: 'extra_1', fromSlot: 'out', toNode: 'edit', toSlot: 'in' })
+  })
+
+  it('selects and deletes an edge attached to a fixed node and restores it with undo', async () => {
+    const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      selectEdge: (event: { edge: { id: string } }) => void
+      deleteSelectedEdge: () => void
+      undo: () => void
+      redo: () => void
+      selectedEdgeId: string
+      graph: typeof graph
+    }
+
+    vm.selectEdge({ edge: { id: 'input.out->edit.in' } })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-test="selected-edge"]').text()).toContain('input.out')
+    expect(wrapper.get('[data-test="selected-edge"]').text()).toContain('edit.in')
+
+    vm.deleteSelectedEdge()
+    expect(vm.graph.edges).toEqual([])
+    expect(vm.selectedEdgeId).toBe('')
+
+    vm.undo()
+    expect(vm.graph.edges).toEqual([
+      { fromNode: 'input', fromSlot: 'out', toNode: 'edit', toSlot: 'in' },
+    ])
+    vm.redo()
+    expect(vm.graph.edges).toEqual([])
+  })
+
+  it('deletes a selected edge with keyboard shortcuts without hijacking text inputs', async () => {
+    const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      selectEdge: (event: { edge: { id: string } }) => void
+      onEditorKeydown: (event: KeyboardEvent) => void
+      undo: () => void
+      readOnly: boolean
+      graph: typeof graph
+    }
+    const preventDefault = vi.fn()
+
+    vm.selectEdge({ edge: { id: 'input.out->edit.in' } })
+    vm.onEditorKeydown({ key: 'Delete', target: document.body, preventDefault } as unknown as KeyboardEvent)
+    expect(vm.graph.edges).toEqual([])
+    expect(preventDefault).toHaveBeenCalled()
+
+    vm.undo()
+    vm.selectEdge({ edge: { id: 'input.out->edit.in' } })
+    vm.onEditorKeydown({ key: 'Backspace', target: document.body, preventDefault } as unknown as KeyboardEvent)
+    expect(vm.graph.edges).toEqual([])
+
+    vm.undo()
+    vm.selectEdge({ edge: { id: 'input.out->edit.in' } })
+    const contentEditable = document.createElement('div')
+    contentEditable.setAttribute('contenteditable', 'true')
+    const editableChild = document.createElement('span')
+    contentEditable.appendChild(editableChild)
+    vm.onEditorKeydown({ key: 'Delete', target: editableChild, preventDefault } as unknown as KeyboardEvent)
+    expect(vm.graph.edges).toHaveLength(1)
+
+    vm.onEditorKeydown({ key: 'Backspace', target: document.createElement('input'), preventDefault } as unknown as KeyboardEvent)
+    expect(vm.graph.edges).toHaveLength(1)
+
+    vm.readOnly = true
+    vm.onEditorKeydown({ key: 'Delete', target: document.body, preventDefault } as unknown as KeyboardEvent)
+    expect(vm.graph.edges).toHaveLength(1)
+  })
+
+  it('does not create an undo entry for an unchanged edge update', async () => {
+    const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      onEdgeUpdate: (event: {
+        edge: { id: string; source: string; sourceHandle: string; target: string; targetHandle: string }
+        connection: Record<string, string>
+      }) => void
+      canUndo: boolean
+    }
+    const oldEdge = {
+      id: 'input.out->edit.in', source: 'input', sourceHandle: 'out', target: 'edit', targetHandle: 'in',
+    }
+
+    vm.onEdgeUpdate({ edge: oldEdge, connection: { ...oldEdge } })
+
+    expect(vm.canUndo).toBe(false)
+  })
+
+  it('reconnects edges attached to fixed nodes and keeps the old edge after an invalid drop', async () => {
+    const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      addOperator: (type: string, position?: { x: number; y: number }) => void
+      onEdgeUpdate: (event: {
+        edge: { id: string; source: string; sourceHandle: string; target: string; targetHandle: string }
+        connection: Record<string, string>
+      }) => void
+      undo: () => void
+      redo: () => void
+      selectedEdgeId: string
+      flowEdges: Array<{ id: string; selected?: boolean }>
+      graph: typeof graph
+    }
+
+    vm.addOperator('extra', { x: 400, y: 0 })
+    const oldEdge = {
+      id: 'input.out->edit.in', source: 'input', sourceHandle: 'out', target: 'edit', targetHandle: 'in',
+    }
+    vm.onEdgeUpdate({
+      edge: oldEdge,
+      connection: { source: 'extra_1', sourceHandle: 'out', target: 'edit', targetHandle: 'in' },
+    })
+    expect(vm.graph.edges).toContainEqual({ fromNode: 'extra_1', fromSlot: 'out', toNode: 'edit', toSlot: 'in' })
+    expect(vm.graph.edges).not.toContainEqual({ fromNode: 'input', fromSlot: 'out', toNode: 'edit', toSlot: 'in' })
+    expect(vm.selectedEdgeId).toBe('extra_1.out->edit.in')
+    expect(vm.flowEdges.find(edge => edge.id === vm.selectedEdgeId)?.selected).toBe(true)
+
+    vm.undo()
+    vm.redo()
+    expect(vm.graph.edges).toContainEqual({ fromNode: 'extra_1', fromSlot: 'out', toNode: 'edit', toSlot: 'in' })
+
+    vm.undo()
+    vm.onEdgeUpdate({
+      edge: oldEdge,
+      connection: { source: 'extra_1', sourceHandle: 'out', target: 'edit', targetHandle: 'missing' },
+    })
     expect(vm.graph.edges).toContainEqual({ fromNode: 'input', fromSlot: 'out', toNode: 'edit', toSlot: 'in' })
-    expect(vm.graph.edges).not.toContainEqual({ fromNode: 'extra_1', fromSlot: 'out', toNode: 'edit', toSlot: 'in' })
+  })
+
+  it('keeps persisted edges connected to fixed nodes valid for Vue Flow initialization', async () => {
+    const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      isValidConnection: (connection: Record<string, string>) => boolean
+      flowNodes: Array<{ id: string; connectable?: boolean }>
+    }
+
+    expect(vm.isValidConnection({
+      source: 'input', sourceHandle: 'out', target: 'edit', targetHandle: 'in',
+    })).toBe(true)
+    expect(vm.isValidConnection({ source: 'input', target: 'edit' })).toBe(false)
+  })
+
+  it('allows adding a missing compatible edge between fixed skeleton nodes', async () => {
+    const fixedSink = {
+      type: 'mining_finalize', version: '1', displayName: 'Finalize', description: '', category: 'publish', zone: 'global',
+      editPolicy: 'fixed',
+      inputSlots: [{ name: 'in', type: 'DOCUMENT_BATCH', required: true, variadic: false, description: '' }],
+      outputSlots: [], requires: [], provides: [], paramSchemaJson: { type: 'object', properties: {} }, errorPolicy: 'FAIL_FAST', unique: true,
+    }
+    state.api.getCatalog.mockResolvedValueOnce({ catalog_version: '1', items: [...catalog, fixedSink] })
+    state.api.get.mockResolvedValueOnce({
+      ...workflow,
+      draft_graph_json: {
+        ...graph,
+        nodes: [
+          graph.nodes[0],
+          { nodeId: 'finalize', operatorType: 'mining_finalize', operatorVersion: '1', params: {}, ui: { x: 200, y: 0 } },
+        ],
+        edges: [],
+        output: { nodeId: 'finalize', slot: '' },
+      },
+    })
+    const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      onConnect: (connection: Record<string, string>) => void
+      flowNodes: Array<{ id: string; connectable?: boolean }>
+      graph: typeof graph
+    }
+
+    expect(vm.flowNodes.filter(node => node.id === 'input' || node.id === 'finalize')
+      .every(node => node.connectable)).toBe(true)
+    vm.onConnect({ source: 'input', sourceHandle: 'out', target: 'finalize', targetHandle: 'in' })
+    expect(vm.graph.edges).toContainEqual({ fromNode: 'input', fromSlot: 'out', toNode: 'finalize', toSlot: 'in' })
+  })
+
+  it('allows deleting an orphaned protected node when no ontology branch is enabled', async () => {
+    const protectedDefinition = {
+      type: 'graph_write', version: '1', displayName: 'Graph write', description: '', category: 'ontology', zone: 'global',
+      editPolicy: 'protected',
+      inputSlots: [{ name: 'in', type: 'DOCUMENT_BATCH', required: true, variadic: false, description: '' }],
+      outputSlots: [{ name: 'out', type: 'DOCUMENT_BATCH', required: true, variadic: false, description: '' }],
+      requires: [], provides: [], paramSchemaJson: { type: 'object', properties: {} }, errorPolicy: 'FAIL_FAST', unique: true,
+    }
+    state.api.getCatalog.mockResolvedValueOnce({ catalog_version: '1', items: [...catalog, protectedDefinition] })
+    state.api.get.mockResolvedValueOnce({
+      ...workflow,
+      draft_graph_json: {
+        ...graph,
+        nodes: [
+          ...graph.nodes,
+          { nodeId: 'graph-write', operatorType: 'graph_write', operatorVersion: '1', params: {}, ui: { x: 400, y: 0 } },
+        ],
+      },
+    })
+    const wrapper = shallowMount(WorkflowEditorView, { props: { id: 'wf' } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      selectedNodeId: string
+      deleteSelected: () => void
+      graph: typeof graph
+    }
+
+    vm.selectedNodeId = 'graph-write'
+    vm.deleteSelected()
+
+    expect(vm.graph.nodes.some(node => node.nodeId === 'graph-write')).toBe(false)
   })
 })

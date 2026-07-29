@@ -20,7 +20,9 @@ _RUNTIME_DDL = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "002_mi
 _RUNTIME_DDL_V3 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "003_mining_runtime_domain.sql"
 _RUNTIME_DDL_V4 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "004_mining_runtime_run_stage.sql"
 _RUNTIME_DDL_V5 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "005_mining_workflow_runtime.sql"
+_RUNTIME_DDL_V6 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "006_mining_run_preflight.sql"
 _ASSET_DOMAIN_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "003_asset_core_domain_isolation.sql"
+_ASSET_WORKFLOW_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "004_asset_snapshot_workflow_binding.sql"
 # Ontology concept layer — must apply AFTER asset/runtime (FKs target asset_* and mining_runs).
 _ONTOLOGY_DDL = _REPO_ROOT / "databases" / "ontology" / "schemas" / "001_ontology_concept_postgresql.sql"
 _WORKFLOW_CONTROL_DDL = _REPO_ROOT / "databases" / "mining_control" / "schemas" / "001_mining_workflow_postgresql.sql"
@@ -78,7 +80,9 @@ def domain_schema_paths() -> tuple[Path, ...]:
         _RUNTIME_DDL_V3,
         _RUNTIME_DDL_V4,
         _RUNTIME_DDL_V5,
+        _RUNTIME_DDL_V6,
         _ASSET_DOMAIN_DDL,
+        _ASSET_WORKFLOW_DDL,
         _ONTOLOGY_DDL,
     )
 
@@ -103,7 +107,13 @@ def _ensure_schema_paths(cfg: MiningDbConfig, ddl_paths: tuple[Path, ...]) -> No
                 conn,
                 ddl,
                 transactional=ddl_path
-                in (_RUNTIME_DDL_V4, _RUNTIME_DDL_V5, _ASSET_DOMAIN_DDL),
+                in (
+                    _RUNTIME_DDL_V4,
+                    _RUNTIME_DDL_V5,
+                    _RUNTIME_DDL_V6,
+                    _ASSET_DOMAIN_DDL,
+                    _ASSET_WORKFLOW_DDL,
+                ),
             )
             logger.info("Applied DDL: %s", ddl_path.name)
     finally:

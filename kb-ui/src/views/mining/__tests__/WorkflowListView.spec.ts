@@ -61,21 +61,30 @@ describe('global mining Workflow list', () => {
     expect((wrapper.vm as unknown as { workflows: unknown[] }).workflows).toHaveLength(2)
   })
 
-  it('creates from all four backend templates and preserves a conflicting name', async () => {
+  it('shows and creates all seven peer-level paradigms and preserves a conflicting name', async () => {
     const wrapper = shallowMount(WorkflowListView)
     await flushPromises()
     const vm = wrapper.vm as unknown as {
       form: { name: string; description: string; template_key: string }
+      templates: Array<{ key: string; label: string }>
       createWorkflow: () => Promise<void>
     }
 
-    for (const template_key of ['full', 'discourse_only', 'ontology_only', 'minimal']) {
+    const templateKeys = [
+      'minimal', 'fast_retrieval', 'discourse_only', 'entity_graph',
+      'hybrid_knowledge', 'ontology_only', 'full',
+    ]
+    expect(vm.templates.map(template => template.key)).toEqual(templateKeys)
+    expect(vm.templates.map(template => template.label)).toEqual([
+      '基础文档入库', '快速向量检索', '篇章增强检索', '固定本体图谱构建',
+      '检索与图谱联合构建', '本体演化专项', '全量知识构建',
+    ])
+
+    for (const template_key of templateKeys) {
       vm.form = { name: `workflow-${template_key}`, description: '', template_key }
       await vm.createWorkflow()
     }
-    expect(state.api.create.mock.calls.map(call => call[0].template_key)).toEqual([
-      'full', 'discourse_only', 'ontology_only', 'minimal',
-    ])
+    expect(state.api.create.mock.calls.map(call => call[0].template_key)).toEqual(templateKeys)
 
     state.api.create.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: 'workflow_name_conflict' } } } })
     vm.form = { name: 'keep-this-name', description: '', template_key: 'full' }

@@ -6,7 +6,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
@@ -16,6 +16,7 @@ from knowledge_mining.mining.api.routes.uploads import resolve_upload_batch_path
 from knowledge_mining.mining.infra.domain_pack import resolve_domain
 from knowledge_mining.mining.infra.mining_config import MiningConfig
 from knowledge_mining.mining.infra.pg_config import MiningDbConfig
+from knowledge_mining.mining.preflight import build_run_preflight
 from knowledge_mining.mining.workflow.repositories.domain_run_repository import (
     AsyncDomainRunRepository,
 )
@@ -62,6 +63,8 @@ class CreateRunRequest(BaseModel):
     phase1_only: bool = False
     publish_on_partial_failure: bool = False
     llm_base_url: str | None = None
+    preflight_id: str | None = None
+    document_decisions: list["RunDocumentDecision"] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_selection(self):
@@ -69,7 +72,21 @@ class CreateRunRequest(BaseModel):
             raise ValueError("exactly one of input_path or upload_batch_id is required")
         if self.workflow_version is not None and self.workflow_id is None:
             raise ValueError("workflow_id is required with workflow_version")
+        if self.upload_batch_id and self.workflow_id is not None:
+            if not self.preflight_id or not self.document_decisions:
+                raise ValueError(
+                    "explicit Workflow uploads require preflight_id and document_decisions"
+                )
         return self
+
+
+class RunDocumentDecision(BaseModel):
+    relative_path: str
+    raw_content_hash: str
+    selected_action: Literal[
+        "NEW", "REUSED", "RESTORED", "REMINED", "KEPT_CURRENT", "JOINED_EXISTING"
+    ]
+    state_token: str
 
 
 class RunResponse(BaseModel):
@@ -81,6 +98,13 @@ class RunResponse(BaseModel):
     workflow_id: str | None = None
     workflow_version: int | None = None
     workflow_graph_hash: str | None = None
+
+
+class RunPreflightRequest(BaseModel):
+    domain: str
+    upload_batch_id: str
+    workflow_id: str
+    workflow_version: int = Field(ge=1)
 
 
 def _frozen_workflow_summary(
@@ -134,6 +158,34 @@ async def _require_run_domain(pool, run_id: str, domain: str) -> dict:
 
 # ── Routes ──
 
+@router.post("/preflight")
+async def preflight_run(body: RunPreflightRequest, request: Request) -> dict[str, Any]:
+    resolved_domain = require_domain(body.domain)
+    domain_entry = resolve_domain(resolved_domain)
+    channel = str(domain_entry.get("default_channel") or "prod").strip() or "prod"
+    batch_path = resolve_upload_batch_path(resolved_domain, body.upload_batch_id)
+    try:
+        binding = await request.app.state.workflow_run_binder.resolve(
+            workflow_id=body.workflow_id,
+            workflow_version=body.workflow_version,
+            domain=resolved_domain,
+            channel=channel,
+            upload_batch_id=body.upload_batch_id,
+            run_overrides={},
+        )
+    except WorkflowNotFound as exc:
+        raise HTTPException(404, detail={"code": "workflow_not_found", "message": str(exc)}) from exc
+    except WorkflowArchived as exc:
+        raise HTTPException(409, detail={"code": "workflow_archived", "message": str(exc)}) from exc
+    pool = await request.app.state.domain_pools.async_pool(resolved_domain)
+    return await build_run_preflight(
+        pool=pool,
+        batch_path=batch_path,
+        domain=resolved_domain,
+        channel=channel,
+        binding=binding,
+    )
+
 @router.post("", response_model=RunResponse, status_code=202)
 async def create_run(body: CreateRunRequest, request: Request) -> dict:
     """Submit a mining run (async, returns immediately)."""
@@ -156,15 +208,17 @@ async def create_run(body: CreateRunRequest, request: Request) -> dict:
     domain_entry = resolve_domain(resolved_domain)
     channel = str(domain_entry.get("default_channel") or "prod").strip() or "prod"
 
-    input_path = (
-        str(resolve_upload_batch_path(resolved_domain, body.upload_batch_id))
+    batch_path = (
+        resolve_upload_batch_path(resolved_domain, body.upload_batch_id)
         if body.upload_batch_id
-        else str(Path(body.input_path or "").resolve())
+        else None
     )
+    input_path = str(batch_path) if batch_path else str(Path(body.input_path or "").resolve())
 
     llm_base_url = body.llm_base_url or cfg.llm_service_url
 
     binding = None
+    preflight_manifest: dict[str, Any] | None = None
     if engine == "workflow":
         run_overrides: dict[str, Any] = {}
         if body.max_workers is not None:
@@ -210,6 +264,55 @@ async def create_run(body: CreateRunRequest, request: Request) -> dict:
                 },
             ) from exc
 
+        if body.preflight_id:
+            current_preflight = await build_run_preflight(
+                pool=pool,
+                batch_path=batch_path,
+                domain=resolved_domain,
+                channel=channel,
+                binding=binding,
+            )
+            current_items = {
+                (item["relative_path"], item["raw_content_hash"]): item
+                for item in current_preflight["items"]
+            }
+            submitted = {
+                (item.relative_path, item.raw_content_hash): item
+                for item in body.document_decisions
+            }
+            if set(current_items) != set(submitted):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "preflight_stale",
+                        "message": "Uploaded files changed after preflight",
+                    },
+                )
+            confirmed_items = []
+            for key, current_item in current_items.items():
+                decision = submitted[key]
+                if (
+                    decision.state_token != current_item["state_token"]
+                    or decision.selected_action not in current_item["allowed_actions"]
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "preflight_stale",
+                            "message": f"Preflight state changed for {decision.relative_path}",
+                        },
+                    )
+                confirmed_items.append({
+                    **current_item,
+                    "selected_action": decision.selected_action,
+                })
+            preflight_manifest = {
+                **current_preflight,
+                "preflight_id": body.preflight_id,
+                "items": confirmed_items,
+                "confirmed_at": _utcnow(),
+            }
+
     # Prevent concurrent mining runs within the same domain
     run_lock = _domain_run_lock(resolved_domain)
     if not run_lock.acquire(blocking=False):
@@ -230,6 +333,7 @@ async def create_run(body: CreateRunRequest, request: Request) -> dict:
             execution_engine=engine,
             binding=binding,
             started_at=started_at,
+            preflight_manifest=preflight_manifest,
         )
     except Exception:
         run_lock.release()

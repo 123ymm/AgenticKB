@@ -497,24 +497,39 @@ class AssetCoreDB(_DB):
         tags_json: list | None = None,
         parser_profile_json: dict | None = None,
         metadata_json: dict | None = None,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        workflow_version_id: str | None = None,
+        workflow_graph_hash: str | None = None,
     ) -> str:
+        workflow_values = (
+            workflow_id, workflow_version, workflow_version_id, workflow_graph_hash,
+        )
+        if any(value is not None for value in workflow_values) and not all(
+            value is not None for value in workflow_values
+        ):
+            raise ValueError("Snapshot Workflow binding must be complete")
         now = _utcnow()
         self._execute(
             """INSERT INTO asset_document_snapshots
                    (id, domain, normalized_content_hash, raw_content_hash, mime_type, title,
-                     scope_json, tags_json, parser_profile_json, metadata_json, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT(domain, normalized_content_hash) DO NOTHING""",
+                     scope_json, tags_json, parser_profile_json, metadata_json, created_at,
+                     workflow_id, workflow_version, workflow_version_id, workflow_graph_hash)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT DO NOTHING""",
             (
                 snapshot_id, domain, normalized_content_hash, raw_content_hash, mime_type, title,
                 _json_dumps(scope_json), _json_dumps(tags_json),
                 _json_dumps(parser_profile_json), _json_dumps(metadata_json), now,
+                workflow_id, workflow_version, workflow_version_id, workflow_graph_hash,
             ),
         )
-        row = self._fetchone(
-            "SELECT id FROM asset_document_snapshots "
-            "WHERE domain = %s AND normalized_content_hash = %s",
-            (domain, normalized_content_hash),
+        row = self.get_snapshot_by_hash(
+            domain=domain,
+            normalized_content_hash=normalized_content_hash,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            workflow_graph_hash=workflow_graph_hash,
         )
         return row["id"] if row else snapshot_id
 
@@ -523,11 +538,26 @@ class AssetCoreDB(_DB):
         *,
         domain: str,
         normalized_content_hash: str,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        workflow_graph_hash: str | None = None,
     ) -> dict[str, Any] | None:
+        if workflow_graph_hash is None:
+            return self._fetchone(
+                "SELECT * FROM asset_document_snapshots "
+                "WHERE domain = %s AND normalized_content_hash = %s "
+                "AND workflow_graph_hash IS NULL",
+                (domain, normalized_content_hash),
+            )
         return self._fetchone(
             "SELECT * FROM asset_document_snapshots "
-            "WHERE domain = %s AND normalized_content_hash = %s",
-            (domain, normalized_content_hash),
+            "WHERE domain = %s AND normalized_content_hash = %s "
+            "AND workflow_id = %s AND workflow_version = %s "
+            "AND workflow_graph_hash = %s",
+            (
+                domain, normalized_content_hash, workflow_id,
+                workflow_version, workflow_graph_hash,
+            ),
         )
 
     def get_snapshot(self, *, domain: str, snapshot_id: str) -> dict[str, Any] | None:

@@ -33,6 +33,7 @@ class AsyncDomainRunRepository:
         execution_engine: Literal["legacy", "workflow"],
         binding: WorkflowRunBinding | None,
         started_at: str,
+        preflight_manifest: dict[str, Any] | None = None,
     ) -> str:
         if execution_engine == "workflow":
             if binding is None or not all((
@@ -52,9 +53,9 @@ class AsyncDomainRunRepository:
                        id, input_path, domain, status, current_stage, started_at,
                        channel, execution_engine, workflow_id, workflow_version,
                        workflow_version_id, workflow_graph_hash,
-                       workflow_manifest_json
+                       workflow_manifest_json, preflight_manifest_json
                    ) VALUES (
-                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                    )""",
                 (
                     run_id,
@@ -70,6 +71,7 @@ class AsyncDomainRunRepository:
                     binding.workflow_version_id if binding else None,
                     binding.graph_hash if binding else None,
                     Jsonb(binding.manifest) if binding else None,
+                    Jsonb(preflight_manifest) if preflight_manifest else None,
                 ),
             )
         return run_id

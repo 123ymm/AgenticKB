@@ -126,7 +126,7 @@
       </div>
 
       <!-- Compatible stage events -->
-      <div class="run-detail__section">
+      <div v-if="!isWorkflowRun" class="run-detail__section">
         <h4 class="section-label">兼容阶段事件</h4>
         <PipelineFlow :stage-events="miningStore.stages" :all-docs-settled="allDocsSettled" />
         <div v-if="trace" class="ontology-line-stats">
@@ -335,6 +335,16 @@ const allDocsSettled = computed(() => {
   const p = miningStore.progress
   if (!p || !p.total) return false
   return p.processing === 0 && (p.completed + p.failed + p.skipped) >= p.total
+})
+
+// 新执行引擎仍会写入兼容阶段事件用于存量接口与排障，但详情页只展示冻结 Workflow 执行图。
+// 同时检查 Run 与 Trace，既避免 Trace 加载期间闪现兼容区块，也兼容部分旧接口缺少 engine 字段。
+const isWorkflowRun = computed(() => {
+  const run = miningStore.currentRun
+  return trace.value?.execution_engine === 'workflow'
+    || Boolean(trace.value?.workflow)
+    || run?.execution_engine === 'workflow'
+    || Boolean(run?.workflow)
 })
 
 // ── Document filters ──

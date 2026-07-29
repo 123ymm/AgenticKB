@@ -109,9 +109,50 @@
           <p v-if="extractInfo" class="config-card__hint">{{ extractInfo }}</p>
         </section>
 
+        <section v-if="preflightResult" data-test="preflight-panel" class="config-card preflight-panel">
+          <div class="config-card__title-row">
+            <h3>上传预检确认</h3>
+            <el-tag type="info">{{ preflightResult.workflow.id }} v{{ preflightResult.workflow.version }}</el-tag>
+          </div>
+          <div class="preflight-summary">
+            <el-tag v-for="(count, key) in preflightResult.summary" :key="key" effect="plain">
+              {{ classificationLabel(String(key)) }} {{ count }}
+            </el-tag>
+          </div>
+          <div class="preflight-items">
+            <div v-for="item in preflightResult.items" :key="`${item.relative_path}-${item.raw_content_hash}`" class="preflight-item">
+              <div class="preflight-item__identity">
+                <strong>{{ item.file_name }}</strong>
+                <small>{{ classificationLabel(item.classification) }}</small>
+                <small v-if="item.current_snapshot?.workflow_id">
+                  当前：{{ item.current_snapshot.workflow_id }} v{{ item.current_snapshot.workflow_version }}
+                </small>
+              </div>
+              <el-select v-model="item.selected_action" size="small" style="width: 148px">
+                <el-option
+                  v-for="action in item.allowed_actions"
+                  :key="action"
+                  :value="action"
+                  :label="actionLabel(action)"
+                />
+              </el-select>
+            </div>
+          </div>
+          <p class="config-card__hint">Workflow 冲突默认保留当前版本；只有确认后才会创建挖掘 Run。</p>
+        </section>
+
         <div class="create-run__actions">
           <el-button @click="router.push('/mining')">取消</el-button>
-          <el-button type="primary" :loading="creating" @click="handleCreate">上传并创建 Run</el-button>
+          <el-button v-if="preflightResult" @click="resetPreflight">返回修改</el-button>
+          <el-button
+            v-if="preflightResult"
+            type="primary"
+            :loading="creating"
+            @click="handleConfirmCreate"
+          >确认并创建 Run</el-button>
+          <el-button v-else type="primary" :loading="creating" @click="handleCreate">
+            {{ submissionEngine === 'workflow' ? '上传并预检' : '上传并创建 Run' }}
+          </el-button>
         </div>
       </div>
     </div>
@@ -128,6 +169,8 @@ import { useMiningApi } from '@/api/mining'
 import { useMiningWorkflowApi } from '@/api/miningWorkflow'
 import type {
   CreateMiningRunRequest,
+  MiningPreflightAction,
+  MiningPreflightResult,
   MiningSubmissionEngine,
   UploadConfig,
 } from '@/types'
@@ -149,7 +192,10 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const uploadProgress = ref(0)
 const extractInfo = ref('')
 const uploadConfig = ref<UploadConfig | null>(null)
-const submissionEngine = ref<MiningSubmissionEngine>('legacy')
+const submissionEngine = ref<MiningSubmissionEngine>('workflow')
+const preflightResult = ref<MiningPreflightResult | null>(null)
+const uploadedBatchId = ref('')
+const preflightDomain = ref('')
 
 const workflowOptions = ref<MiningWorkflowOption[]>([])
 const workflowVersions = ref<MiningWorkflowVersion[]>([])
@@ -178,9 +224,9 @@ const ONTOLOGY_OPERATOR_TYPES = new Set([
 onMounted(async () => {
   try {
     uploadConfig.value = await miningApi.getUploadConfig()
-    submissionEngine.value = uploadConfig.value.mining_run_submission_engine ?? 'legacy'
+    submissionEngine.value = uploadConfig.value.mining_run_submission_engine ?? 'workflow'
   } catch {
-    submissionEngine.value = 'legacy'
+    submissionEngine.value = 'workflow'
   }
   if (submissionEngine.value === 'workflow') {
     await Promise.all([loadWorkflowOptions(), checkActiveOntology(domainStore.currentDomain)])
@@ -189,10 +235,12 @@ onMounted(async () => {
 
 watch(selectedWorkflowId, async (workflowId, previous) => {
   if (!workflowId || workflowId === previous) return
+  resetPreflight()
   await loadWorkflowVersions(workflowId)
 })
 
 watch(selectedWorkflowVersion, async version => {
+  if (preflightResult.value && version !== preflightResult.value.workflow.version) resetPreflight()
   if (version > 0 && selectedWorkflowId.value) await loadSelectedVersion(selectedWorkflowId.value, version)
 })
 
@@ -294,16 +342,19 @@ function handleDrop(event: DragEvent) {
   isDragOver.value = false
   if (!event.dataTransfer?.files) return
   files.value = [...files.value, ...validateFiles(Array.from(event.dataTransfer.files))]
+  resetPreflight()
 }
 
 function handleFileSelect(event: Event) {
   const input = event.target as HTMLInputElement
   if (input.files) files.value = [...files.value, ...validateFiles(Array.from(input.files))]
+  resetPreflight()
   input.value = ''
 }
 
 function removeFile(index: number) {
   files.value = files.value.filter((_, itemIndex) => itemIndex !== index)
+  resetPreflight()
 }
 
 function formatFileSize(bytes: number): string {
@@ -336,14 +387,15 @@ async function handleCreate() {
         ElMessage.warning('请选择一个已发布的 Workflow 精确版本')
         return
       }
-      request = {
+      uploadedBatchId.value = uploaded.upload_batch_id
+      preflightDomain.value = capturedDomain
+      preflightResult.value = await miningApi.preflightRun({
         domain: capturedDomain,
         upload_batch_id: uploaded.upload_batch_id,
         workflow_id: selectedWorkflowId.value,
         workflow_version: selectedWorkflowVersion.value,
-        max_workers: maxWorkers.value,
-        phase1_only: phase1Only.value,
-      }
+      })
+      return
     } else {
       const path = uploaded?.storage_path || inputPath.value.trim()
       if (!path) {
@@ -368,6 +420,58 @@ async function handleCreate() {
   }
 }
 
+async function handleConfirmCreate() {
+  const result = preflightResult.value
+  if (!result || !uploadedBatchId.value || !preflightDomain.value) return
+  creating.value = true
+  try {
+    const request: CreateMiningRunRequest = {
+      domain: preflightDomain.value,
+      upload_batch_id: uploadedBatchId.value,
+      workflow_id: result.workflow.id,
+      workflow_version: result.workflow.version,
+      preflight_id: result.preflight_id,
+      document_decisions: result.items.map(item => ({
+        relative_path: item.relative_path,
+        raw_content_hash: item.raw_content_hash,
+        selected_action: item.selected_action,
+        state_token: item.state_token,
+      })),
+      max_workers: maxWorkers.value,
+      phase1_only: phase1Only.value,
+    }
+    await miningStore.createRun(request)
+    ElMessage.success('Run 已创建')
+    await router.push('/mining')
+  } catch (error) {
+    ElMessage.error(`创建失败：${errorMessage(error)}`)
+  } finally {
+    creating.value = false
+  }
+}
+
+function resetPreflight() {
+  preflightResult.value = null
+  uploadedBatchId.value = ''
+  preflightDomain.value = ''
+}
+
+function classificationLabel(value: string): string {
+  return ({
+    NEW: '新文件', REUSED: '可直接复用', RESTORABLE: '可恢复',
+    RESTORABLE_CONFLICT: '历史版本冲突', WORKFLOW_CONFLICT: 'Workflow 冲突',
+    IN_PROGRESS: '正在处理中', HISTORY_UNAVAILABLE: '需要重新挖掘',
+  } as Record<string, string>)[value] ?? value
+}
+
+function actionLabel(value: MiningPreflightAction): string {
+  return ({
+    NEW: '执行挖掘', REUSED: '复用当前版本', RESTORED: '恢复历史版本',
+    REMINED: '使用新 Workflow 重挖', KEPT_CURRENT: '保留当前版本',
+    JOINED_EXISTING: '等待已有任务',
+  } as Record<MiningPreflightAction, string>)[value]
+}
+
 function renderExtractionSummary(items: Array<{ archive: string; error: string | null; file_count: number }>) {
   const completed = items.filter(item => !item.error)
   if (completed.length) extractInfo.value = `已解压：${completed.map(item => `${item.archive} → ${item.file_count} 个文件`).join('，')}`
@@ -387,6 +491,12 @@ function errorMessage(error: unknown): string {
 .create-run__header h2 { margin: 0; font-size: 18px; }
 .create-run__header p { margin: 4px 0 0; color: var(--kb-text-tertiary); font-size: 12px; }
 .create-run__body { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr); gap: 16px; align-items: start; }
+.preflight-summary { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.preflight-items { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow: auto; }
+.preflight-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px; border: 1px solid var(--kb-border); border-radius: 6px; }
+.preflight-item__identity { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.preflight-item__identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preflight-item__identity small { color: var(--kb-text-tertiary); }
 .create-run__upload-zone { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 28px; border: 2px dashed var(--kb-border); border-radius: var(--kb-radius); background: var(--kb-bg-card); }
 .create-run__upload-zone.is-dragover { border-color: var(--kb-accent); background: var(--kb-accent-soft); }
 .create-run__upload-zone > p { max-width: 420px; margin: 0; color: var(--kb-text-tertiary); text-align: center; line-height: 1.6; }

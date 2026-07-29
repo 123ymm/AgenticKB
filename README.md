@@ -4,7 +4,7 @@
 
 挖掘服务支持可编排、可发布、可冻结版本的 Workflow。用户可在“挖掘 Workflow”页面创建和发布全局 Workflow；上传文件形成批次后，按批次选择一个已发布的精确版本执行，完成审核、图谱写入后发布资产。挖掘 Workflow 不区分 Domain，但每次 Run、审核、Build、Release 和知识资产仍严格落在所选 Domain。
 
-为保持兼容，部署默认仍是 `MINING_RUN_SUBMISSION_ENGINE=legacy`。切换到 `workflow` 后，旧请求不传 Workflow 会自动使用系统 FULL Pipeline；显式选择会冻结 `workflow_id + workflow_version + graph_hash + manifest`。完整灰度、验证与回滚步骤见 [挖掘 Workflow 灰度发布手册](docs/mining-workflow-rollout-runbook.md)。
+部署默认启用 Workflow 提交，无需配置 `MINING_RUN_SUBMISSION_ENGINE`。旧请求不传 Workflow 会自动使用系统 FULL Pipeline；显式选择会冻结 `workflow_id + workflow_version + graph_hash + manifest`。如需应急回退，可显式配置 `MINING_RUN_SUBMISSION_ENGINE=legacy`；完整验证与回滚步骤见 [挖掘 Workflow 灰度发布手册](docs/mining-workflow-rollout-runbook.md)。
 
 ## Docker 部署
 

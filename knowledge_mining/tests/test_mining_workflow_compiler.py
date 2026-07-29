@@ -26,6 +26,93 @@ def test_full_compiles_into_input_document_and_global_zones() -> None:
     )
 
 
+def test_all_seven_paradigm_templates_compile_for_publish() -> None:
+    templates = builtin_templates()
+
+    results = {name: _compile(graph) for name, graph in templates.items()}
+
+    assert set(results) == {
+        "minimal",
+        "fast_retrieval",
+        "discourse_only",
+        "entity_graph",
+        "hybrid_knowledge",
+        "ontology_only",
+        "full",
+    }
+    assert {name for name, result in results.items() if not result.valid} == set()
+    assert {
+        name: result.require_plan().global_order
+        for name, result in results.items()
+    } == {
+        "minimal": ("mining_finalize",),
+        "fast_retrieval": ("mining_finalize",),
+        "discourse_only": ("mining_finalize",),
+        "entity_graph": (
+            "entity_review_gate",
+            "graph_write",
+            "mining_finalize",
+        ),
+        "hybrid_knowledge": (
+            "entity_review_gate",
+            "graph_write",
+            "mining_finalize",
+        ),
+        "ontology_only": (
+            "entity_review_gate",
+            "ontology_induction",
+            "ontology_review_gate",
+            "graph_write",
+            "mining_finalize",
+        ),
+        "full": (
+            "entity_review_gate",
+            "ontology_induction",
+            "ontology_review_gate",
+            "graph_write",
+            "mining_finalize",
+        ),
+    }
+
+
+def test_paradigm_templates_have_distinct_review_and_ontology_boundaries() -> None:
+    templates = builtin_templates()
+
+    fast_types = {node.operator_type for node in templates["fast_retrieval"].nodes}
+    entity_types = {node.operator_type for node in templates["entity_graph"].nodes}
+    hybrid_types = {
+        node.operator_type for node in templates["hybrid_knowledge"].nodes
+    }
+
+    assert fast_types - {
+        "input_ingest",
+        "parse_segment",
+        "asset_persist",
+        "mining_finalize",
+    } == {"retrieval_unit_build", "embedding"}
+    assert {
+        "entity_extract",
+        "entity_resolve",
+        "entity_relation_extract",
+        "entity_review_gate",
+        "graph_write",
+    }.issubset(entity_types)
+    assert {"ontology_induction", "ontology_review_gate"}.isdisjoint(entity_types)
+    assert {
+        "enrich",
+        "discourse_line",
+        "contextual_retrieval_enrich",
+        "retrieval_unit_build",
+        "embedding",
+        "entity_extract",
+        "entity_resolve",
+        "entity_relation_extract",
+        "entity_review_gate",
+        "graph_write",
+    }.issubset(hybrid_types)
+    assert {"ontology_induction", "ontology_review_gate"}.isdisjoint(hybrid_types)
+
+
 def test_normalizer_restores_protected_chain_but_not_missing_fixed_nodes() -> None:
     full = builtin_templates()["full"]
     damaged = replace(

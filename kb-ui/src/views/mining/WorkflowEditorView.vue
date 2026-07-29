@@ -32,7 +32,7 @@
 
     <div class="workflow-editor__body">
       <aside class="workflow-editor__palette" :class="{ 'is-readonly': readOnly }">
-        <MiningOperatorPalette :operators="catalog" @add="addOperator" />
+        <MiningOperatorPalette :operators="catalog" :nodes="graph.nodes" @add="addOperator" />
       </aside>
 
       <main class="workflow-editor__canvas" @drop="onDrop" @dragover.prevent>
@@ -47,10 +47,11 @@
           fit-view-on-init
           @connect="onConnect"
           @edge-update="onEdgeUpdate"
+          @edge-click="selectEdge"
           @node-drag-start="startFlowMutation"
           @node-drag-stop="finishFlowMutation"
           @node-click="selectNode"
-          @pane-click="selectedNodeId = ''"
+          @pane-click="clearSelection"
         >
           <template #node-miningOperator="nodeProps">
             <MiningOperatorNode
@@ -61,6 +62,8 @@
               :selected="nodeProps.id === selectedNodeId"
               :disabled="nodeProps.data.disabled"
               :is-output="nodeProps.data.isOutput"
+              :edit-state="nodeProps.data.definition ? effectiveEditState(nodeProps.data.definition, graph.nodes) : undefined"
+              :edit-reason="nodeProps.data.definition ? effectiveEditReason(nodeProps.data.definition, graph.nodes) : undefined"
             />
           </template>
           <Background pattern-color="#cbd5e1" :gap="18" />
@@ -78,6 +81,9 @@
               <code>{{ selectedNode.id }}</code>
             </div>
             <p class="workflow-editor__muted">{{ selectedDefinition?.description }}</p>
+            <p v-if="selectedDefinition" class="workflow-editor__policy" :title="selectedEditReason">
+              {{ editStateLabel(selectedEditState) }} · {{ selectedEditReason }}
+            </p>
             <JsonSchemaParamForm
               v-if="selectedDefinition"
               :key="selectedNode.id"
@@ -94,10 +100,37 @@
               <el-button
                 size="small"
                 type="danger"
-                :disabled="readOnly || !selectedDefinition || !canDeleteNode(selectedDefinition)"
+                :disabled="readOnly || !selectedDefinition || !canDeleteNodeInGraph(selectedDefinition, graph.nodes)"
                 @click="deleteSelected"
               >删除</el-button>
             </div>
+          </template>
+        </section>
+
+        <section class="workflow-editor__section">
+          <template v-if="selectedEdge">
+            <div data-test="selected-edge">
+              <h3>连接</h3>
+              <div class="workflow-editor__edge-route">
+                <code>{{ selectedEdge.source }}.{{ selectedEdge.sourceHandle }}</code>
+                <span>→</span>
+                <code>{{ selectedEdge.target }}.{{ selectedEdge.targetHandle }}</code>
+              </div>
+              <p class="workflow-editor__muted">拖动连线任一端可重新连接；无效目标不会改变原连接。</p>
+              <div class="workflow-editor__node-actions">
+                <el-button
+                  data-test="delete-edge"
+                  size="small"
+                  type="danger"
+                  :disabled="readOnly"
+                  @click="deleteSelectedEdge"
+                >删除连接</el-button>
+              </div>
+            </div>
+          </template>
+          <template v-else>
+            <h3>连接</h3>
+            <p class="workflow-editor__muted">选择连线后可查看、删除或拖动端点重新连接。</p>
           </template>
         </section>
 
@@ -133,7 +166,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
-import { VueFlow, useVueFlow, type Connection, type EdgeUpdateEvent } from '@vue-flow/core'
+import { VueFlow, useVueFlow, type Connection, type EdgeMouseEvent, type EdgeUpdateEvent } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import '@vue-flow/core/dist/style.css'
@@ -147,11 +180,12 @@ import MiningOperatorNode from '@/components/mining/workflow/MiningOperatorNode.
 import WorkflowValidationPanel from '@/components/mining/workflow/WorkflowValidationPanel.vue'
 import WorkflowVersionPreview from '@/components/mining/workflow/WorkflowVersionPreview.vue'
 import {
-  canDeleteNode,
+  canDeleteNodeInGraph,
   canDisableNode,
   canEditNodeParams,
   canMoveNode,
-  canReconnectNode,
+  effectiveEditReason,
+  effectiveEditState,
   fromVueFlowElements,
   stableGraphJson,
   toVueFlowElements,
@@ -170,6 +204,7 @@ import type {
 interface EditorFlowNode extends MiningVueFlowNode {
   draggable?: boolean
   deletable?: boolean
+  connectable?: boolean
 }
 
 const props = defineProps<{ id: string }>()
@@ -185,6 +220,7 @@ const savedGraph = ref(emptyGraph())
 const flowNodes = ref<EditorFlowNode[]>([])
 const flowEdges = ref<MiningVueFlowEdge[]>([])
 const selectedNodeId = ref('')
+const selectedEdgeId = ref('')
 const serverResult = ref<MiningWorkflowValidationResult | null>(null)
 const readOnly = ref(false)
 const previewedVersion = ref<MiningWorkflowVersion | null>(null)
@@ -201,12 +237,19 @@ let sequence = 0
 
 const definitionMap = computed(() => new Map(catalog.value.map(definition => [definition.type, definition])))
 const selectedNode = computed(() => flowNodes.value.find(node => node.id === selectedNodeId.value) ?? null)
+const selectedEdge = computed(() => flowEdges.value.find(edge => edge.id === selectedEdgeId.value) ?? null)
 const selectedDefinition = computed(() => selectedNode.value?.data.definition)
 const localIssues = computed(() => validateLocalGraph(graph.value, catalog.value))
 const localJson = computed(() => stableGraphJson(graph.value))
 const dirty = computed(() => localJson.value !== stableGraphJson(savedGraph.value))
 const canUndo = computed(() => undoStack.value.length > 0)
 const canRedo = computed(() => redoStack.value.length > 0)
+const selectedEditState = computed(() => selectedDefinition.value
+  ? effectiveEditState(selectedDefinition.value, graph.value.nodes)
+  : undefined)
+const selectedEditReason = computed(() => selectedDefinition.value
+  ? effectiveEditReason(selectedDefinition.value, graph.value.nodes)
+  : '')
 
 function emptyGraph(): MiningWorkflowGraph {
   return { schemaVersion: '1.0', nodes: [], edges: [], output: { nodeId: '', slot: '' } }
@@ -222,9 +265,19 @@ function applyGraph(value: MiningWorkflowGraph) {
   flowNodes.value = mapped.nodes.map(node => ({
     ...node,
     draggable: node.data.definition ? canMoveNode(node.data.definition) : false,
-    deletable: node.data.definition ? canDeleteNode(node.data.definition) : false,
+    deletable: node.data.definition ? canDeleteNodeInGraph(node.data.definition, graph.value.nodes) : false,
+    connectable: Boolean(node.data.definition) && !readOnly.value,
   }))
-  flowEdges.value = mapped.edges
+  const writable = !readOnly.value
+  flowEdges.value = mapped.edges.map(edge => ({
+    ...edge,
+    selected: edge.id === selectedEdgeId.value,
+    selectable: true,
+    deletable: writable,
+    updatable: writable,
+    interactionWidth: 20,
+  }))
+  if (selectedEdgeId.value && !flowEdges.value.some(edge => edge.id === selectedEdgeId.value)) selectedEdgeId.value = ''
   sequence = Math.max(0, ...graph.value.nodes.map(node => Number(/(\d+)$/.exec(node.nodeId)?.[1] ?? 0)))
 }
 
@@ -251,9 +304,11 @@ async function load() {
 
 function recordMutation(mutator: () => void) {
   if (readOnly.value) return
-  undoStack.value.push(cloneGraph(graph.value))
-  redoStack.value = []
+  const previous = cloneGraph(graph.value)
   mutator()
+  if (stableGraphJson(previous) === stableGraphJson(graph.value)) return
+  undoStack.value.push(previous)
+  redoStack.value = []
   applyGraph(graph.value)
   serverResult.value = null
 }
@@ -320,27 +375,30 @@ function slotType(nodeId: string | null | undefined, slotName: string | null | u
 }
 
 function isValidConnection(connection: Connection): boolean {
-  if (readOnly.value || !connection.source || !connection.target) return false
+  if (!connection.source || !connection.sourceHandle || !connection.target || !connection.targetHandle) return false
   const source = flowNodes.value.find(node => node.id === connection.source)?.data.definition
   const target = flowNodes.value.find(node => node.id === connection.target)?.data.definition
-  if (!source || !target || !canReconnectNode(source) || !canReconnectNode(target)) return false
-  if (slotType(connection.source, connection.sourceHandle, true) !== slotType(connection.target, connection.targetHandle, false)) return false
-  const targetSlot = target.inputSlots.find(slot => slot.name === connection.targetHandle)
-  if (targetSlot && !targetSlot.variadic) {
-    const occupied = flowEdges.value.filter(edge => edge.target === connection.target && edge.targetHandle === connection.targetHandle)
-    if (occupied.some(edgeLocked)) return false
-  }
+  if (!source || !target) return false
+  const sourceType = slotType(connection.source, connection.sourceHandle, true)
+  const targetType = slotType(connection.target, connection.targetHandle, false)
+  return sourceType !== undefined && targetType !== undefined && sourceType === targetType
+}
+
+function editStateLabel(state: ReturnType<typeof effectiveEditState> | undefined): string {
+  if (!state) return ''
+  return ({ fixed: '固定骨架', required: '当前必需', optional: '可选' })[state]
+}
+
+function canApplyConnection(connection: Connection): boolean {
+  if (readOnly.value || !isValidConnection(connection) || !connection.source || !connection.target) return false
+  const source = flowNodes.value.find(node => node.id === connection.source)?.data.definition
+  const target = flowNodes.value.find(node => node.id === connection.target)?.data.definition
+  if (!source || !target) return false
   return true
 }
 
-function edgeLocked(edge: Pick<MiningVueFlowEdge, 'source' | 'target'>): boolean {
-  const source = flowNodes.value.find(node => node.id === edge.source)?.data.definition
-  const target = flowNodes.value.find(node => node.id === edge.target)?.data.definition
-  return source?.editPolicy === 'fixed' || target?.editPolicy === 'fixed'
-}
-
 function onConnect(connection: Connection) {
-  if (!isValidConnection(connection) || !connection.source || !connection.target) return
+  if (!canApplyConnection(connection) || !connection.source || !connection.target) return
   const targetDefinition = flowNodes.value.find(node => node.id === connection.target)?.data.definition
   const targetSlot = targetDefinition?.inputSlots.find(slot => slot.name === connection.targetHandle)
   recordMutation(() => {
@@ -356,11 +414,8 @@ function onConnect(connection: Connection) {
 }
 
 function onEdgeUpdate(event: EdgeUpdateEvent) {
-  const oldSource = flowNodes.value.find(node => node.id === event.edge.source)?.data.definition
-  const oldTarget = flowNodes.value.find(node => node.id === event.edge.target)?.data.definition
   if (
-    !oldSource || !oldTarget || !canReconnectNode(oldSource) || !canReconnectNode(oldTarget)
-    || !isValidConnection(event.connection)
+    !canApplyConnection(event.connection)
     || !event.connection.source || !event.connection.target
   ) return
   const targetDefinition = flowNodes.value.find(node => node.id === event.connection.target)?.data.definition
@@ -375,13 +430,19 @@ function onEdgeUpdate(event: EdgeUpdateEvent) {
         edge.toNode === event.connection.target && edge.toSlot === event.connection.targetHandle
       ))
     }
-    graph.value.edges.push({
+    const replacement = {
       fromNode: event.connection.source!,
       fromSlot: event.connection.sourceHandle ?? '',
       toNode: event.connection.target!,
       toSlot: event.connection.targetHandle ?? '',
-    })
+    }
+    if (!graph.value.edges.some(edge => (
+      edge.fromNode === replacement.fromNode && edge.fromSlot === replacement.fromSlot
+      && edge.toNode === replacement.toNode && edge.toSlot === replacement.toSlot
+    ))) graph.value.edges.push(replacement)
   })
+  selectedEdgeId.value = `${event.connection.source}.${event.connection.sourceHandle ?? ''}->${event.connection.target}.${event.connection.targetHandle ?? ''}`
+  flowEdges.value = flowEdges.value.map(edge => ({ ...edge, selected: edge.id === selectedEdgeId.value }))
 }
 
 function startFlowMutation() {
@@ -400,12 +461,50 @@ function finishFlowMutation() {
 
 function selectNode(event: { node: { id: string } }) {
   selectedNodeId.value = event.node.id
+  selectedEdgeId.value = ''
+}
+
+function selectEdge(event: EdgeMouseEvent) {
+  selectedNodeId.value = ''
+  selectedEdgeId.value = event.edge.id
+  flowEdges.value = flowEdges.value.map(edge => ({ ...edge, selected: edge.id === event.edge.id }))
+}
+
+function clearSelection() {
+  selectedNodeId.value = ''
+  selectedEdgeId.value = ''
+  flowEdges.value = flowEdges.value.map(edge => ({ ...edge, selected: false }))
+}
+
+function deleteSelectedEdge() {
+  const edge = selectedEdge.value
+  if (!edge || readOnly.value) return
+  recordMutation(() => {
+    graph.value.edges = graph.value.edges.filter(item => !(
+      item.fromNode === edge.source && item.fromSlot === edge.sourceHandle
+      && item.toNode === edge.target && item.toSlot === edge.targetHandle
+    ))
+  })
+  selectedEdgeId.value = ''
+}
+
+function isTextInput(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  if (target instanceof HTMLElement && target.isContentEditable) return true
+  return Boolean(target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'))
+}
+
+function onEditorKeydown(event: KeyboardEvent) {
+  if (!selectedEdge.value || readOnly.value || isTextInput(event.target)) return
+  if (event.key !== 'Delete' && event.key !== 'Backspace') return
+  event.preventDefault()
+  deleteSelectedEdge()
 }
 
 function deleteSelected() {
   const node = graph.value.nodes.find(item => item.nodeId === selectedNodeId.value)
   const definition = node ? definitionMap.value.get(node.operatorType) : undefined
-  if (!node || !definition || !canDeleteNode(definition)) return
+  if (!node || !definition || !canDeleteNodeInGraph(definition, graph.value.nodes)) return
   recordMutation(() => {
     graph.value.nodes = graph.value.nodes.filter(item => item.nodeId !== node.nodeId)
     graph.value.edges = graph.value.edges.filter(edge => edge.fromNode !== node.nodeId && edge.toNode !== node.nodeId)
@@ -491,6 +590,7 @@ async function previewVersion(version: number) {
     previewedVersion.value = loaded
     readOnly.value = true
     selectedNodeId.value = ''
+    selectedEdgeId.value = ''
     applyGraph(loaded.graph_json)
   } catch (error) {
     ElMessage.error(`加载版本失败：${errorMessage(error)}`)
@@ -573,9 +673,13 @@ function beforeUnload(event: BeforeUnloadEvent) {
 
 onMounted(() => {
   window.addEventListener('beforeunload', beforeUnload)
+  window.addEventListener('keydown', onEditorKeydown)
   load()
 })
-onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', beforeUnload)
+  window.removeEventListener('keydown', onEditorKeydown)
+})
 </script>
 
 <style scoped>
@@ -595,8 +699,11 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
 .workflow-editor__section { padding: 10px; border-radius: 8px; background: #fff; border: 1px solid var(--kb-border, #e5e7eb); }
 .workflow-editor__section h3 { margin: 0 0 9px; font-size: 13px; }
 .workflow-editor__muted { color: var(--kb-text-tertiary); font-size: 12px; line-height: 1.5; }
+.workflow-editor__policy { margin: 8px 0; padding: 6px 8px; border-radius: 6px; background: #f8fafc; color: #475569; font-size: 11px; line-height: 1.5; }
 .workflow-editor__node-title { display: flex; flex-direction: column; gap: 2px; }
 .workflow-editor__node-title code { color: var(--kb-text-tertiary); font-size: 10px; }
+.workflow-editor__edge-route { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.workflow-editor__edge-route code { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #334155; font-size: 10px; }
 .workflow-editor__node-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
 .workflow-editor__version-row { width: 100%; display: flex; justify-content: space-between; gap: 6px; padding: 7px; border: 0; border-bottom: 1px solid #eef2f7; background: transparent; cursor: pointer; }
 .workflow-editor__version-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--kb-text-tertiary); }

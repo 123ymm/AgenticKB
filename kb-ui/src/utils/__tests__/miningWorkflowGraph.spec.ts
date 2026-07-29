@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  canDeleteNode, canDisableNode, canEditNodeParams, canMoveNode, canReconnectNode,
+  canDeleteNode, canDeleteNodeInGraph, canDisableNode, canEditNodeParams, canMoveNode, canReconnectNode,
+  effectiveEditReason, effectiveEditState,
   fromVueFlowElements, stableGraphJson, toVueFlowElements, validateLocalGraph,
 } from '@/utils/miningWorkflowGraph'
 import type {
@@ -44,6 +45,27 @@ function validGraph(): MiningWorkflowGraph {
 }
 
 describe('mining workflow graph rules', () => {
+  it('derives fixed, currently required, and optional states from the active graph', () => {
+    const fixed = operator('input_ingest', 'fixed')
+    const graphWrite = operator('graph_write', 'protected')
+    const entityReview = operator('entity_review_gate', 'protected')
+    const ontologyReview = operator('ontology_review_gate', 'protected')
+    const ontologyInduction = operator('ontology_induction')
+    const entityNodes = [node('entity', 'entity_extract')]
+    const inductionNodes = [node('induction', 'ontology_induction')]
+
+    expect(effectiveEditState(fixed, [])).toBe('fixed')
+    expect(effectiveEditState(graphWrite, [])).toBe('optional')
+    expect(effectiveEditState(graphWrite, entityNodes)).toBe('required')
+    expect(effectiveEditState(entityReview, entityNodes)).toBe('required')
+    expect(effectiveEditState(ontologyReview, entityNodes)).toBe('optional')
+    expect(effectiveEditState(ontologyReview, inductionNodes)).toBe('required')
+    expect(effectiveEditState(ontologyInduction, inductionNodes)).toBe('optional')
+    expect(canDeleteNodeInGraph(graphWrite, entityNodes)).toBe(false)
+    expect(canDeleteNodeInGraph(graphWrite, [])).toBe(true)
+    expect(effectiveEditReason(ontologyReview, inductionNodes)).toContain('本体归纳')
+  })
+
   it('maps fixed, protected, and editable policies to editor capabilities', () => {
     const fixed = catalog[0]
     const editable = catalog[1]

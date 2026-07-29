@@ -154,4 +154,35 @@ describe('RunDetailView polling lifecycle', () => {
     expect(api.getRunTrace).toHaveBeenCalledTimes(2)
     wrapper.unmount()
   })
+
+  it('hides compatibility stage events for a workflow run', async () => {
+    api.getRunTrace.mockResolvedValueOnce({
+      run_id: 'r1', domain: 'odn', status: 'completed', execution_engine: 'workflow',
+      workflow: {
+        id: 'system-full-baseline', version: 2, graph_hash: 'workflow-hash',
+        graph: { nodes: [], edges: [], output: {} },
+      },
+      node_events: [], stage_events: [], documents: [], warnings: [], asset_counts: {},
+    })
+
+    const wrapper = shallowMount(RunDetailView, { props: { runId: 'r1' } })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('兼容阶段事件')
+    wrapper.unmount()
+  })
+
+  it('keeps compatibility stage events for a legacy run', async () => {
+    api.getRunTrace.mockResolvedValueOnce({
+      run_id: 'r1', domain: 'odn', status: 'completed', execution_engine: 'legacy',
+      workflow: null,
+      node_events: [], stage_events: [], documents: [], warnings: [], asset_counts: {},
+    })
+
+    const wrapper = shallowMount(RunDetailView, { props: { runId: 'r1' } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('兼容阶段事件')
+    wrapper.unmount()
+  })
 })

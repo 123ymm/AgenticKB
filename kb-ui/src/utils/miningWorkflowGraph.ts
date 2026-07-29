@@ -16,6 +16,52 @@ export function canDeleteNode(definition: MiningOperatorDef): boolean {
   return definition.editPolicy === 'editable'
 }
 
+const ENTITY_BRANCH_TYPES = new Set(['entity_extract', 'entity_resolve', 'entity_relation_extract'])
+const MANAGED_PROTECTED_TYPES = new Set(['entity_review_gate', 'ontology_review_gate', 'graph_write'])
+
+export type MiningEffectiveEditState = 'fixed' | 'required' | 'optional'
+
+export function requiredProtectedOperatorTypes(nodes: MiningWorkflowNode[]): Set<string> {
+  const enabledTypes = new Set(nodes.filter(node => !node.disabled).map(node => node.operatorType))
+  const hasEntityBranch = [...ENTITY_BRANCH_TYPES].some(type => enabledTypes.has(type))
+  const hasOntologyInduction = enabledTypes.has('ontology_induction')
+  if (hasOntologyInduction) {
+    return new Set(['entity_review_gate', 'ontology_review_gate', 'graph_write'])
+  }
+  if (hasEntityBranch) return new Set(['entity_review_gate', 'graph_write'])
+  return new Set()
+}
+
+export function canDeleteNodeInGraph(
+  definition: MiningOperatorDef,
+  nodes: MiningWorkflowNode[],
+): boolean {
+  return effectiveEditState(definition, nodes) === 'optional'
+}
+
+export function effectiveEditState(
+  definition: MiningOperatorDef,
+  nodes: MiningWorkflowNode[],
+): MiningEffectiveEditState {
+  if (definition.editPolicy === 'fixed') return 'fixed'
+  if (definition.editPolicy !== 'protected') return 'optional'
+  if (!MANAGED_PROTECTED_TYPES.has(definition.type)) return 'required'
+  return requiredProtectedOperatorTypes(nodes).has(definition.type) ? 'required' : 'optional'
+}
+
+export function effectiveEditReason(
+  definition: MiningOperatorDef,
+  nodes: MiningWorkflowNode[],
+): string {
+  const state = effectiveEditState(definition, nodes)
+  if (state === 'fixed') return '系统固定骨架节点，不能删除'
+  if (state === 'optional') return '当前 Workflow 中可选'
+  if (definition.type === 'ontology_review_gate') return '当前存在本体归纳，发布前必须完成本体审核'
+  if (definition.type === 'entity_review_gate') return '当前存在实体或本体能力线，发布前必须完成实体审核'
+  if (definition.type === 'graph_write') return '当前存在实体或本体能力线，发布前必须写入图谱'
+  return 'Catalog 将该算子标记为受保护节点'
+}
+
 export function canDisableNode(definition: MiningOperatorDef): boolean {
   return definition.editPolicy === 'editable'
 }
@@ -327,6 +373,11 @@ export interface MiningVueFlowEdge {
   sourceHandle: string
   target: string
   targetHandle: string
+  selected?: boolean
+  selectable?: boolean
+  deletable?: boolean
+  updatable?: boolean
+  interactionWidth?: number
 }
 
 /** Explicit boundary mapper: backend graph fields never become implicit Vue Flow node state. */

@@ -6,11 +6,7 @@
 
 上传执行链为：上传文件形成批次 → 选择已发布 Workflow 的精确版本 → 创建绑定冻结 Manifest 的 Run → 执行文档 DAG 与全局 DAG → 审核（如适用）→ Build/Release 发布。若新提交处于 `workflow` 模式且没有传 Workflow，服务端默认绑定 `system-full-baseline.current_version`；不会在运行中追随后续发布的新版本。
 
-新提交模式由环境变量控制：
-
-```dotenv
-MINING_RUN_SUBMISSION_ENGINE=legacy
-```
+新提交默认使用 `workflow` 模式，无需环境变量。只有应急回退时才需要显式配置 `MINING_RUN_SUBMISSION_ENGINE=legacy`。
 
 - `legacy`：兼容旧请求的 `input_path`；若显式传 Workflow 字段，返回 `workflow_engine_unavailable`，且不创建 Run。
 - `workflow`：兼容旧请求不传 Workflow，此时默认 FULL；新请求可使用 `upload_batch_id + workflow_id + workflow_version` 精确绑定。

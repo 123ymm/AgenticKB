@@ -82,9 +82,17 @@ def test_every_operator_schema_comes_from_its_typed_option_model() -> None:
         model.model_validate(model().model_dump(by_alias=True))
 
 
-def test_all_templates_are_global_and_full_contains_all_16_nodes() -> None:
+def test_all_seven_templates_are_global_and_full_contains_all_16_nodes() -> None:
     templates = builtin_templates()
-    assert set(templates) == {"full", "discourse_only", "ontology_only", "minimal"}
+    assert set(templates) == {
+        "minimal",
+        "fast_retrieval",
+        "discourse_only",
+        "entity_graph",
+        "hybrid_knowledge",
+        "ontology_only",
+        "full",
+    }
     assert {
         node.operator_type for node in templates["full"].nodes
     } == APPROVED_OPERATOR_TYPES
@@ -122,6 +130,25 @@ def test_template_editable_nodes_match_the_approved_capability_sets() -> None:
         "contextual_retrieval_enrich",
         "retrieval_unit_build",
         "embedding",
+    }
+    assert editable("fast_retrieval") == {
+        "retrieval_unit_build",
+        "embedding",
+    }
+    assert editable("entity_graph") == {
+        "entity_extract",
+        "entity_resolve",
+        "entity_relation_extract",
+    }
+    assert editable("hybrid_knowledge") == {
+        "enrich",
+        "discourse_line",
+        "contextual_retrieval_enrich",
+        "retrieval_unit_build",
+        "embedding",
+        "entity_extract",
+        "entity_resolve",
+        "entity_relation_extract",
     }
     assert editable("ontology_only") == {
         "entity_extract",

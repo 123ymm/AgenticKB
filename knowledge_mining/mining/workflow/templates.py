@@ -34,20 +34,29 @@ _DOCUMENT_ONTOLOGY_ORDER = (
     "entity_resolve",
     "entity_relation_extract",
 )
-_GLOBAL_ONTOLOGY_ORDER = (
-    "entity_review_gate",
-    "ontology_induction",
-    "ontology_review_gate",
-    "graph_write",
-)
+_TEMPLATE_BRANCHES = {
+    "minimal": ((), (), False),
+    "fast_retrieval": (("retrieval_unit_build", "embedding"), (), False),
+    "discourse_only": (_DOCUMENT_DISCOURSE_ORDER, (), False),
+    "entity_graph": ((), _DOCUMENT_ONTOLOGY_ORDER, False),
+    "hybrid_knowledge": (
+        _DOCUMENT_DISCOURSE_ORDER,
+        _DOCUMENT_ONTOLOGY_ORDER,
+        False,
+    ),
+    "ontology_only": ((), _DOCUMENT_ONTOLOGY_ORDER, True),
+    "full": (_DOCUMENT_DISCOURSE_ORDER, _DOCUMENT_ONTOLOGY_ORDER, True),
+}
 
 EDITABLE_BY_TEMPLATE = {
-    "full": set(_DOCUMENT_DISCOURSE_ORDER)
-    | set(_DOCUMENT_ONTOLOGY_ORDER)
-    | {"ontology_induction"},
-    "discourse_only": set(_DOCUMENT_DISCOURSE_ORDER),
-    "ontology_only": set(_DOCUMENT_ONTOLOGY_ORDER) | {"ontology_induction"},
-    "minimal": set(),
+    name: set(discourse_branch)
+    | set(entity_branch)
+    | ({"ontology_induction"} if includes_ontology_induction else set())
+    for name, (
+        discourse_branch,
+        entity_branch,
+        includes_ontology_induction,
+    ) in _TEMPLATE_BRANCHES.items()
 }
 
 
@@ -69,49 +78,58 @@ def _connect_chain(types: tuple[str, ...], slot: str) -> list[EdgeDef]:
 
 
 def _template(template_name: str) -> WorkflowGraph:
-    enabled = EDITABLE_BY_TEMPLATE[template_name]
-    has_discourse = bool(enabled & set(_DOCUMENT_DISCOURSE_ORDER))
-    has_ontology = bool(enabled & set(_DOCUMENT_ONTOLOGY_ORDER))
+    discourse_branch, entity_branch, includes_ontology_induction = (
+        _TEMPLATE_BRANCHES[template_name]
+    )
 
     types = ["input_ingest", "parse_segment"]
-    if has_discourse:
-        types.extend(_DOCUMENT_DISCOURSE_ORDER)
-    if has_ontology:
-        types.extend(_DOCUMENT_ONTOLOGY_ORDER)
+    types.extend(discourse_branch)
+    types.extend(entity_branch)
     types.append("asset_persist")
-    if has_ontology:
-        types.extend(_GLOBAL_ONTOLOGY_ORDER)
+    if entity_branch:
+        types.append("entity_review_gate")
+        if includes_ontology_induction:
+            types.extend(("ontology_induction", "ontology_review_gate"))
+        types.append("graph_write")
     types.append("mining_finalize")
 
     edges = [
         EdgeDef("input_ingest", "rawFiles", "parse_segment", "rawFiles"),
         EdgeDef("parse_segment", "documents", "asset_persist", "documents"),
     ]
-    if has_discourse:
+    if discourse_branch:
         edges.append(
-            EdgeDef("parse_segment", "documents", _DOCUMENT_DISCOURSE_ORDER[0], "documents")
+            EdgeDef("parse_segment", "documents", discourse_branch[0], "documents")
         )
-        edges.extend(_connect_chain(_DOCUMENT_DISCOURSE_ORDER, "documents"))
-        edges.append(
-            EdgeDef("embedding", "documents", "asset_persist", "discourseAssets")
-        )
-    if has_ontology:
-        edges.append(
-            EdgeDef("parse_segment", "documents", _DOCUMENT_ONTOLOGY_ORDER[0], "documents")
-        )
-        edges.extend(_connect_chain(_DOCUMENT_ONTOLOGY_ORDER, "documents"))
+        edges.extend(_connect_chain(discourse_branch, "documents"))
         edges.append(
             EdgeDef(
-                "entity_relation_extract",
+                discourse_branch[-1],
+                "documents",
+                "asset_persist",
+                "discourseAssets",
+            )
+        )
+    if entity_branch:
+        edges.append(
+            EdgeDef("parse_segment", "documents", entity_branch[0], "documents")
+        )
+        edges.extend(_connect_chain(entity_branch, "documents"))
+        edges.append(
+            EdgeDef(
+                entity_branch[-1],
                 "documents",
                 "asset_persist",
                 "ontologyAssets",
             )
         )
-        global_chain = ("asset_persist",) + _GLOBAL_ONTOLOGY_ORDER + ("mining_finalize",)
+        global_chain = ["asset_persist", "entity_review_gate"]
+        if includes_ontology_induction:
+            global_chain.extend(("ontology_induction", "ontology_review_gate"))
+        global_chain.extend(("graph_write", "mining_finalize"))
     else:
-        global_chain = ("asset_persist", "mining_finalize")
-    edges.extend(_connect_chain(global_chain, "finalizeInput"))
+        global_chain = ["asset_persist", "mining_finalize"]
+    edges.extend(_connect_chain(tuple(global_chain), "finalizeInput"))
 
     return WorkflowGraph(
         nodes=tuple(_node(operator_type) for operator_type in types),
@@ -122,7 +140,7 @@ def _template(template_name: str) -> WorkflowGraph:
 
 _BUILTIN_TEMPLATES = {
     name: _template(name)
-    for name in ("full", "discourse_only", "ontology_only", "minimal")
+    for name in _TEMPLATE_BRANCHES
 }
 
 

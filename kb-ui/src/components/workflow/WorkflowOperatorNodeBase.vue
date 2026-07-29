@@ -9,7 +9,7 @@
     <div class="workflow-node__header">
       <span class="workflow-node__title">{{ definition?.displayName ?? operatorType }}</span>
       <span class="workflow-node__type">{{ operatorType }}</span>
-      <span v-if="badge" class="workflow-node__badge">{{ badge }}</span>
+      <span v-if="badge" class="workflow-node__badge" :title="badgeTitle">{{ badge }}</span>
       <span v-if="paramSummary" class="workflow-node__params">{{ paramSummary }}</span>
     </div>
 
@@ -56,6 +56,7 @@ const props = defineProps<{
   selected?: boolean
   disabled?: boolean
   badge?: string
+  badgeTitle?: string
 }>()
 
 const inputs = computed(() => props.definition?.inputSlots ?? [])
