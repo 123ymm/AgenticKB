@@ -70,9 +70,13 @@ ALL_TABLES = [
     "agent_llm_prompt_templates",
     "agent_llm_model_calls",
     # mining_runtime（挖掘服务）
+    "mining_workflow_node_events",
     "mining_run_stage_events",
     "mining_run_documents",
     "mining_runs",
+    # mining_control（全局 Workflow 定义）
+    "mining_workflow_versions",
+    "mining_workflows",
     # asset_core（资产核心）
     "asset_retrieval_embeddings",
     "asset_retrieval_units",
@@ -103,8 +107,10 @@ ALL_TRIGGERS = [
 # 顺序与 knowledge_mining 的 ensure_schema（mining/infra/pg_schema.py）保持一致：
 #   asset_core 002 先建（它装 pg_trgm / vector 扩展），
 #   mining_runtime 002/003/004 增量迁移紧随其后，
+#   mining_runtime 005 增加 Workflow Run 绑定和节点事件，
 #   asset_core 003（domain 隔离）在 002 之后，
-#   ontology 必须最后——它的外键指向 asset_* 和 mining_runs。
+#   ontology 在 Domain DDL 中必须最后——它的外键指向 asset_* 和 mining_runs，
+#   mining_control 最后应用且只属于主库。
 #
 # 不含 serving_query_logs / serving_query_cache 与 operator_paradigm*：那些是
 # agent_serving_java 自有表，由它自己在启动/建池时创建
@@ -116,8 +122,10 @@ SCHEMA_FILES = [
     REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "002_mining_runtime_postgresql.sql",
     REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "003_mining_runtime_domain.sql",
     REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "004_mining_runtime_run_stage.sql",
+    REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "005_mining_workflow_runtime.sql",
     REPO_ROOT / "databases" / "asset_core" / "schemas" / "003_asset_core_domain_isolation.sql",
     REPO_ROOT / "databases" / "ontology" / "schemas" / "001_ontology_concept_postgresql.sql",
+    REPO_ROOT / "databases" / "mining_control" / "schemas" / "001_mining_workflow_postgresql.sql",
 ]
 
 

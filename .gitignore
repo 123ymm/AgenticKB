@@ -92,3 +92,4 @@ cmkb.tar
 logs/
 
 # === Main control service config ===
+/docker/vendor/libreoffice-debs.tar.gz

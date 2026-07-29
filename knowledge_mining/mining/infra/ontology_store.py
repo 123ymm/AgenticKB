@@ -70,6 +70,19 @@ class OntologyStore(_DB):
             (domain_id,),
         )
 
+    def version(
+        self, version_id: str, domain_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Return an immutable ontology version by id, optionally domain-scoped."""
+        if domain_id is None:
+            return self._fetchone(
+                "SELECT * FROM ontology_versions WHERE id = %s", (version_id,)
+            )
+        return self._fetchone(
+            "SELECT * FROM ontology_versions WHERE id = %s AND domain_id = %s",
+            (version_id, domain_id),
+        )
+
     def list_versions(self, domain_id: str) -> list[dict[str, Any]]:
         return self._fetchall(
             "SELECT * FROM ontology_versions WHERE domain_id = %s ORDER BY version_no DESC",
@@ -310,6 +323,114 @@ class OntologyStore(_DB):
         )
 
     # -- 本体候选（逃生口 / off-schema 关系 → Gate1 人审）--
+
+    def upsert_candidate_evidence(
+        self,
+        domain_id: str,
+        *,
+        kind: str,
+        proposed_name: str,
+        run_id: str,
+        node_id: str,
+        run_document_id: str,
+        payload: dict[str, Any] | None = None,
+        evidence: dict[str, Any] | None = None,
+        source: str = "escape_hatch",
+        score: float | None = None,
+        layer: str = "concept",
+    ) -> str:
+        """Replace one document contribution and recompute candidate totals.
+
+        The evidence JSON remains backward compatible with legacy list entries;
+        Workflow entries add an explicit idempotency key.  Human-reviewed status
+        is never changed by a retry.
+        """
+        existing = self._fetchone(
+            "SELECT id, status, payload_json, evidence_json FROM ontology_candidates "
+            "WHERE domain_id = %s AND kind = %s AND proposed_name = %s",
+            (domain_id, kind, proposed_name),
+        )
+
+        contributions = list((existing or {}).get("evidence_json") or [])
+        key = (run_id, node_id, run_document_id)
+        retained = []
+        for item in contributions:
+            if not isinstance(item, dict):
+                retained.append(item)
+                continue
+            item_key = (
+                item.get("run_id"),
+                item.get("node_id"),
+                item.get("run_document_id"),
+            )
+            if item_key != key:
+                retained.append(item)
+        retained.append({
+            "run_id": run_id,
+            "node_id": node_id,
+            "run_document_id": run_document_id,
+            "payload": payload or {},
+            "evidence": evidence or {},
+            "score": score,
+        })
+
+        aggregate_payload = dict(payload or {})
+        workflow_items = [
+            item for item in retained
+            if isinstance(item, dict) and "run_document_id" in item
+        ]
+        cooccur = sum(
+            int((item.get("payload") or {}).get("cooccur") or 0)
+            for item in workflow_items
+        )
+        if cooccur:
+            aggregate_payload["cooccur"] = cooccur
+        examples: list[Any] = []
+        for item in workflow_items:
+            for example in (item.get("payload") or {}).get("examples", []) or []:
+                if example not in examples:
+                    examples.append(example)
+        if examples:
+            aggregate_payload["examples"] = examples[:20]
+        scores = [
+            float(item["score"])
+            for item in workflow_items
+            if item.get("score") is not None
+        ]
+        aggregate_score = sum(scores) if scores else score
+
+        if existing is not None:
+            self._execute(
+                "UPDATE ontology_candidates SET payload_json = %s, evidence_json = %s, "
+                "score = %s, source = %s WHERE id = %s",
+                (
+                    _json_dumps(aggregate_payload),
+                    _json_dumps(retained),
+                    aggregate_score,
+                    source,
+                    existing["id"],
+                ),
+            )
+            return existing["id"]
+        candidate_id = _new_id()
+        self._execute(
+            """INSERT INTO ontology_candidates
+                   (id, domain_id, kind, layer, proposed_name, payload_json,
+                    source, evidence_json, score, status)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'proposed')""",
+            (
+                candidate_id,
+                domain_id,
+                kind,
+                layer,
+                proposed_name,
+                _json_dumps(aggregate_payload),
+                source,
+                _json_dumps(retained),
+                aggregate_score,
+            ),
+        )
+        return candidate_id
 
     def upsert_candidate(
         self,

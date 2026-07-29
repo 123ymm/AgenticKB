@@ -289,6 +289,106 @@ def persist_entities_and_mentions(
     }, entity_ids)
 
 
+def persist_document_mentions(
+    graph_store: Any,
+    ontology_store: Any,
+    bg: BuildGraph,
+    *,
+    domain_id: str,
+    run_id: str,
+    node_id: str,
+    run_document_id: str,
+    ontology_version_id: str | None = None,
+) -> dict[str, int]:
+    """Persist one document's mentions and candidate evidence without totals.
+
+    Entity mention/document counts are deliberately left untouched here because
+    parallel document commits cannot safely maintain Run-wide aggregates.  The
+    strict global graph step recounts them after all document transactions have
+    completed.  Candidate evidence is keyed by Run/node/document, so retrying a
+    document replaces only that contribution.
+    """
+    snapshots = {item.snapshot_id for item in bg.mentions if item.snapshot_id}
+    for snapshot_id in snapshots:
+        graph_store.delete_snapshot_artifacts(snapshot_id)
+
+    entity_ids: dict[tuple[str, str], str] = {}
+    for entity in bg.entities:
+        entity_id = graph_store.upsert_entity(
+            domain_id,
+            canonical_name=entity.canonical_name,
+            node_type=entity.node_type,
+            first_ontology_version_id=ontology_version_id,
+        )
+        entity_ids[(entity.node_type, entity.canonical_name)] = entity_id
+        for snapshot_id, segment_id, quote in entity.evidence:
+            if snapshot_id and segment_id:
+                graph_store.add_evidence(
+                    domain_id,
+                    document_snapshot_id=snapshot_id,
+                    segment_id=segment_id,
+                    target_kind="entity",
+                    target_id=entity_id,
+                    quote=quote,
+                )
+
+    mention_count = 0
+    for mention in bg.mentions:
+        if not mention.snapshot_id or not mention.segment_id:
+            continue
+        resolved_id = (
+            entity_ids.get((mention.node_type, mention.canonical_name))
+            if mention.canonical_name
+            else None
+        )
+        mention_id = graph_store.add_mention(
+            document_snapshot_id=mention.snapshot_id,
+            segment_id=mention.segment_id,
+            node_type=mention.node_type,
+            mention_text=mention.mention_text,
+            canonical_name=mention.canonical_name,
+            resolved_entity_id=resolved_id,
+            resolve_status=mention.resolve_status,
+            metadata=mention.metadata or None,
+        )
+        graph_store.add_evidence(
+            domain_id,
+            document_snapshot_id=mention.snapshot_id,
+            segment_id=mention.segment_id,
+            target_kind="mention",
+            target_id=mention_id,
+            quote=mention.quote,
+        )
+        mention_count += 1
+
+    for candidate in bg.rel_candidates:
+        ontology_store.upsert_candidate_evidence(
+            domain_id,
+            kind="relation_type",
+            proposed_name=f"{candidate.head_type}->{candidate.tail_type}",
+            payload={
+                "head_type": candidate.head_type,
+                "tail_type": candidate.tail_type,
+                "cooccur": candidate.cooccur,
+                "examples": candidate.examples[:5],
+            },
+            source="escape_hatch",
+            score=float(candidate.cooccur),
+            evidence={
+                "cooccur": candidate.cooccur,
+                "examples": candidate.examples[:5],
+            },
+            run_id=run_id,
+            node_id=node_id,
+            run_document_id=run_document_id,
+        )
+    return {
+        "entities": len(bg.entities),
+        "mentions": mention_count,
+        "candidates": len(bg.rel_candidates),
+    }
+
+
 def reaggregate_edges(
     mention_rows: list[dict[str, Any]],
     *,

@@ -8,7 +8,7 @@ Implements the three-layer model:
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Mapping
 
 from knowledge_mining.mining.infra.db import AssetCoreDB
 from knowledge_mining.mining.contracts.models import RawFileData, DocumentProfile
@@ -21,6 +21,8 @@ def select_or_create_snapshot(
     *,
     domain: str,
     batch_id: str | None = None,
+    workflow_binding: Mapping[str, Any] | None = None,
+    existing_document_id: str | None = None,
 ) -> tuple[str, str, str]:
     """Select existing or create new snapshot for a document.
 
@@ -32,28 +34,46 @@ def select_or_create_snapshot(
     mime_type = get_mime_type(doc.file_type)
 
     # 1. Upsert document (identity)
-    document_id = uuid.uuid4().hex
-    existing_doc = asset_db.get_document_by_key(
-        domain=domain,
-        document_key=profile.document_key,
-    )
-    if existing_doc:
-        document_id = existing_doc["id"]
+    document_id = existing_document_id
+    if document_id is not None:
+        existing_doc = asset_db.get_document(domain=domain, document_id=document_id)
+        if existing_doc is None:
+            raise ValueError("existing_document_id does not belong to the Domain")
+    else:
+        document_id = uuid.uuid4().hex
+        existing_doc = asset_db.get_document_by_key(
+            domain=domain,
+            document_key=profile.document_key,
+        )
+        if existing_doc:
+            document_id = existing_doc["id"]
+        document_id = asset_db.upsert_document(
+            domain=domain,
+            document_id=document_id,
+            document_key=profile.document_key,
+            document_name=doc.file_name,
+            document_type=profile.document_type,
+            metadata_json=doc.metadata_json,
+        )
 
-    document_id = asset_db.upsert_document(
-        domain=domain,
-        document_id=document_id,
-        document_key=profile.document_key,
-        document_name=doc.file_name,
-        document_type=profile.document_type,
-        metadata_json=doc.metadata_json,
+    binding = dict(workflow_binding or {})
+    binding_values = (
+        binding.get("workflow_id"),
+        binding.get("workflow_version"),
+        binding.get("workflow_version_id"),
+        binding.get("workflow_graph_hash"),
     )
+    if binding and not all(value is not None for value in binding_values):
+        raise ValueError("Snapshot Workflow binding must be complete")
 
     # 2. Find or create snapshot
     snapshot_id = uuid.uuid4().hex
     existing_snap = asset_db.get_snapshot_by_hash(
         domain=domain,
         normalized_content_hash=doc.normalized_content_hash,
+        workflow_id=binding.get("workflow_id"),
+        workflow_version=binding.get("workflow_version"),
+        workflow_graph_hash=binding.get("workflow_graph_hash"),
     )
     if existing_snap:
         snapshot_id = existing_snap["id"]
@@ -69,6 +89,10 @@ def select_or_create_snapshot(
         tags_json=doc.tags_json,
         parser_profile_json={"file_type": doc.file_type},
         metadata_json=doc.metadata_json,
+        workflow_id=binding.get("workflow_id"),
+        workflow_version=binding.get("workflow_version"),
+        workflow_version_id=binding.get("workflow_version_id"),
+        workflow_graph_hash=binding.get("workflow_graph_hash"),
     )
 
     # 3. Create link (always new for this ingestion)

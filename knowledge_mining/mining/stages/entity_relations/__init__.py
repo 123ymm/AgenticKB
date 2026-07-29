@@ -62,9 +62,11 @@ class EntityRelationBuilder:
         *,
         ontology_store: "OntologyStore | None" = None,
         domain_id: str | None = None,
+        ontology_version_id: str | None = None,
     ) -> None:
         self._store = ontology_store
         self._domain_id = domain_id
+        self._ontology_version_id = ontology_version_id
         # relation_name -> list[(head_type, tail_type)]；类型用 "*" 表通配
         self._patterns: dict[str, list[tuple[str, str]]] = {}
         self._built = False
@@ -77,7 +79,11 @@ class EntityRelationBuilder:
         if store is None or not self._domain_id:
             return
         try:
-            rows = store.active_relation_types(self._domain_id)
+            rows = (
+                store.relation_types_for_version(self._ontology_version_id)
+                if self._ontology_version_id
+                else store.active_relation_types(self._domain_id)
+            )
         except Exception:
             logger.warning("active_relation_types lookup failed for %s; relation builder runs empty",
                            self._domain_id, exc_info=True)

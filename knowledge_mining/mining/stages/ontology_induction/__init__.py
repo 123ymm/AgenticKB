@@ -161,6 +161,7 @@ class OntologyInductor:
         ontology_store: "OntologyStore | None" = None,
         domain_id: str | None = None,
         knowledge_domain: str | None = None,
+        ontology_version_id: str | None = None,
         min_df: int = _DEFAULT_MIN_DF,
     ) -> None:
         from knowledge_mining.mining.infra.llm_client import LlmClient
@@ -169,6 +170,7 @@ class OntologyInductor:
         self._ontology_store = ontology_store
         self._domain_id = domain_id
         self._knowledge_domain = knowledge_domain or domain_id
+        self._ontology_version_id = ontology_version_id
         self._min_df = min_df
 
     def induce(self) -> dict[str, int]:
@@ -188,7 +190,11 @@ class OntologyInductor:
 
         existing_types = ""
         try:
-            rows = ostore.active_node_types(self._domain_id)
+            rows = (
+                ostore.node_types_for_version(self._ontology_version_id)
+                if self._ontology_version_id
+                else ostore.active_node_types(self._domain_id)
+            )
             existing_types = ", ".join(sorted(r["name"] for r in rows)) if rows else ""
         except Exception:
             logger.warning("active_node_types lookup failed during induction", exc_info=True)

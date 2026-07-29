@@ -101,15 +101,41 @@ class RuntimeTracker:
         *,
         subloop_stage: str | None = None,
         domain: str | None = None,
+        recover_workflow: bool = False,
     ) -> bool:
         """B6：人审提交后把 run 拨回 running，subloop_stage 推进到下一检查点。"""
+        expected_statuses = (
+            ("awaiting_review", "running", "failed", "interrupted")
+            if recover_workflow and domain
+            else (("awaiting_review", "running") if domain else None)
+        )
         return self._db.update_run_status(
             run_id,
             "running",
             subloop_stage=subloop_stage,
             current_stage="mining",
             domain=domain,
-            expected_statuses=("awaiting_review", "running") if domain else None,
+            expected_statuses=expected_statuses,
+            **(
+                {
+                    "clear_finished_at": True,
+                    "clear_error_summary": True,
+                }
+                if recover_workflow
+                else {}
+            ),
+        )
+
+    def begin_manual_publish(self, run_id: str, *, domain: str) -> bool:
+        """Claim an assets-only completed Workflow Run for build/publish."""
+        return self._db.update_run_status(
+            run_id,
+            "running",
+            current_stage="mining",
+            domain=domain,
+            expected_statuses=("completed",),
+            clear_finished_at=True,
+            clear_error_summary=True,
         )
 
     # -- Run documents --

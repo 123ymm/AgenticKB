@@ -102,6 +102,7 @@ class DiscourseRelationBuilder:
         self,
         base_url: str = "http://localhost:8900",
         window_size: int | None = None,
+        min_confidence: float | None = None,
         knowledge_domain: str | None = None,
         profile: "DomainProfile | None" = None,
     ) -> None:
@@ -114,7 +115,11 @@ class DiscourseRelationBuilder:
             window_size if window_size is not None
             else (rp.discourse_window_size if rp else 15)
         )
-        self._min_confidence = rp.min_confidence if rp else 0.5
+        self._min_confidence = (
+            min_confidence
+            if min_confidence is not None
+            else (rp.min_confidence if rp else 0.5)
+        )
         self._max_distance = rp.max_distance if rp else 5
 
     def build(
@@ -132,10 +137,12 @@ class DiscourseRelationBuilder:
         if len(content_segs) < 2:
             return []
 
+        window_size = int(kwargs.get("window_size", self._window_size))
+        min_confidence = float(kwargs.get("min_confidence", self._min_confidence))
         all_relations: list[SegmentRelationData] = []
 
-        for start in range(0, len(content_segs), self._window_size - 1):
-            window = content_segs[start : start + self._window_size]
+        for start in range(0, len(content_segs), window_size - 1):
+            window = content_segs[start : start + window_size]
             if len(window) < 2:
                 continue
             all_relations.extend(self._analyze_window(window))
@@ -143,7 +150,7 @@ class DiscourseRelationBuilder:
         filtered = [
             r for r in all_relations
             if r.relation_type in self._RST_WHITELIST
-            and (r.confidence is None or r.confidence >= self._min_confidence)
+            and (r.confidence is None or r.confidence >= min_confidence)
         ]
         removed = len(all_relations) - len(filtered)
         if removed > 0:

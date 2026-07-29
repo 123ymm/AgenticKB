@@ -160,6 +160,32 @@ class _DB:
             finally:
                 self._tx_conn.reset(token)
 
+    @contextmanager
+    def join_transaction(self, owner: "_DB"):
+        """Route this adapter through another adapter's active transaction.
+
+        Asset, graph, ontology, and runtime adapters may be distinct objects but
+        still target the same Domain pool.  Explicit joining keeps their writes
+        on one connection without ever leaking a Control-store transaction into
+        a Domain adapter.
+        """
+        if self._pool is not owner._pool:
+            raise ValueError("transaction participants must use the same pool")
+        connection = owner._tx_conn.get()
+        if connection is None:
+            raise RuntimeError("transaction owner has no active transaction")
+        current = self._tx_conn.get()
+        if current is connection:
+            yield
+            return
+        if current is not None:
+            raise RuntimeError("adapter is already bound to another transaction")
+        token = self._tx_conn.set(connection)
+        try:
+            yield
+        finally:
+            self._tx_conn.reset(token)
+
     # -- helpers --
 
     def _run(self, sql: str, params: tuple, *, fetch: str | None):
@@ -471,24 +497,39 @@ class AssetCoreDB(_DB):
         tags_json: list | None = None,
         parser_profile_json: dict | None = None,
         metadata_json: dict | None = None,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        workflow_version_id: str | None = None,
+        workflow_graph_hash: str | None = None,
     ) -> str:
+        workflow_values = (
+            workflow_id, workflow_version, workflow_version_id, workflow_graph_hash,
+        )
+        if any(value is not None for value in workflow_values) and not all(
+            value is not None for value in workflow_values
+        ):
+            raise ValueError("Snapshot Workflow binding must be complete")
         now = _utcnow()
         self._execute(
             """INSERT INTO asset_document_snapshots
                    (id, domain, normalized_content_hash, raw_content_hash, mime_type, title,
-                     scope_json, tags_json, parser_profile_json, metadata_json, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT(domain, normalized_content_hash) DO NOTHING""",
+                     scope_json, tags_json, parser_profile_json, metadata_json, created_at,
+                     workflow_id, workflow_version, workflow_version_id, workflow_graph_hash)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT DO NOTHING""",
             (
                 snapshot_id, domain, normalized_content_hash, raw_content_hash, mime_type, title,
                 _json_dumps(scope_json), _json_dumps(tags_json),
                 _json_dumps(parser_profile_json), _json_dumps(metadata_json), now,
+                workflow_id, workflow_version, workflow_version_id, workflow_graph_hash,
             ),
         )
-        row = self._fetchone(
-            "SELECT id FROM asset_document_snapshots "
-            "WHERE domain = %s AND normalized_content_hash = %s",
-            (domain, normalized_content_hash),
+        row = self.get_snapshot_by_hash(
+            domain=domain,
+            normalized_content_hash=normalized_content_hash,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            workflow_graph_hash=workflow_graph_hash,
         )
         return row["id"] if row else snapshot_id
 
@@ -497,11 +538,26 @@ class AssetCoreDB(_DB):
         *,
         domain: str,
         normalized_content_hash: str,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        workflow_graph_hash: str | None = None,
     ) -> dict[str, Any] | None:
+        if workflow_graph_hash is None:
+            return self._fetchone(
+                "SELECT * FROM asset_document_snapshots "
+                "WHERE domain = %s AND normalized_content_hash = %s "
+                "AND workflow_graph_hash IS NULL",
+                (domain, normalized_content_hash),
+            )
         return self._fetchone(
             "SELECT * FROM asset_document_snapshots "
-            "WHERE domain = %s AND normalized_content_hash = %s",
-            (domain, normalized_content_hash),
+            "WHERE domain = %s AND normalized_content_hash = %s "
+            "AND workflow_id = %s AND workflow_version = %s "
+            "AND workflow_graph_hash = %s",
+            (
+                domain, normalized_content_hash, workflow_id,
+                workflow_version, workflow_graph_hash,
+            ),
         )
 
     def get_snapshot(self, *, domain: str, snapshot_id: str) -> dict[str, Any] | None:
@@ -1006,14 +1062,21 @@ class MiningRuntimeDB(_DB):
                    (id, source_batch_id, input_path, domain, channel, status, current_stage, build_id,
                     total_documents, new_count, updated_count, skipped_count,
                     failed_count, committed_count, started_at, finished_at,
-                    error_summary, metadata_json)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    error_summary, metadata_json, execution_engine, workflow_id,
+                    workflow_version, workflow_version_id, workflow_graph_hash,
+                    workflow_manifest_json)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                       %s, %s, %s, %s, %s, %s)""",
             (
                 data.id, data.source_batch_id, data.input_path, data.domain, data.channel,
                 data.status, data.current_stage, data.build_id,
                 data.total_documents, data.new_count, data.updated_count, data.skipped_count,
                 data.failed_count, data.committed_count, data.started_at or _utcnow(),
                 data.finished_at, data.error_summary, _json_dumps(data.metadata_json),
+                data.execution_engine, data.workflow_id, data.workflow_version,
+                data.workflow_version_id, data.workflow_graph_hash,
+                _json_dumps(data.workflow_manifest_json)
+                if data.workflow_manifest_json is not None else None,
             ),
         )
         return data.id
@@ -1031,6 +1094,8 @@ class MiningRuntimeDB(_DB):
         current_stage: str | None = None,
         domain: str | None = None,
         expected_statuses: tuple[str, ...] | None = None,
+        clear_finished_at: bool = False,
+        clear_error_summary: bool = False,
         **counters: int,
     ) -> bool:
         parts = ["status = %s"]
@@ -1041,6 +1106,10 @@ class MiningRuntimeDB(_DB):
         if error_summary is not None:
             parts.append("error_summary = %s")
             params.append(error_summary)
+        elif clear_error_summary:
+            parts.append("error_summary = NULL")
+        if clear_finished_at:
+            parts.append("finished_at = NULL")
         if build_id is not None:
             parts.append("build_id = %s")
             params.append(build_id)

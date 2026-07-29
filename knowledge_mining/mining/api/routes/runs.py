@@ -5,13 +5,22 @@ import logging
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from knowledge_mining.mining.api.domain_scope import require_domain
+from knowledge_mining.mining.api.routes.uploads import resolve_upload_batch_path
+from knowledge_mining.mining.infra.domain_pack import resolve_domain
+from knowledge_mining.mining.infra.mining_config import MiningConfig
 from knowledge_mining.mining.infra.pg_config import MiningDbConfig
+from knowledge_mining.mining.preflight import build_run_preflight
+from knowledge_mining.mining.workflow.repositories.domain_run_repository import (
+    AsyncDomainRunRepository,
+)
+from knowledge_mining.mining.workflow.service import WorkflowArchived, WorkflowNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +44,49 @@ def _domain_run_lock(domain: str) -> threading.Lock:
 # ── Request / Response models ──
 
 class CreateRunRequest(BaseModel):
-    input_path: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    input_path: str | None = None
+    upload_batch_id: str | None = None
     domain: str
+    workflow_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("workflow_id", "workflowId"),
+    )
+    workflow_version: int | None = Field(
+        default=None,
+        ge=1,
+        validation_alias=AliasChoices("workflow_version", "workflowVersion"),
+    )
     domain_pack: str | None = None
     max_workers: int | None = None
     phase1_only: bool = False
     publish_on_partial_failure: bool = False
     llm_base_url: str | None = None
+    preflight_id: str | None = None
+    document_decisions: list["RunDocumentDecision"] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if bool(self.input_path) == bool(self.upload_batch_id):
+            raise ValueError("exactly one of input_path or upload_batch_id is required")
+        if self.workflow_version is not None and self.workflow_id is None:
+            raise ValueError("workflow_id is required with workflow_version")
+        if self.upload_batch_id and self.workflow_id is not None:
+            if not self.preflight_id or not self.document_decisions:
+                raise ValueError(
+                    "explicit Workflow uploads require preflight_id and document_decisions"
+                )
+        return self
+
+
+class RunDocumentDecision(BaseModel):
+    relative_path: str
+    raw_content_hash: str
+    selected_action: Literal[
+        "NEW", "REUSED", "RESTORED", "REMINED", "KEPT_CURRENT", "JOINED_EXISTING"
+    ]
+    state_token: str
 
 
 class RunResponse(BaseModel):
@@ -49,6 +94,45 @@ class RunResponse(BaseModel):
     status: str
     current_stage: str
     started_at: str | None = None
+    execution_engine: str = "legacy"
+    workflow_id: str | None = None
+    workflow_version: int | None = None
+    workflow_graph_hash: str | None = None
+
+
+class RunPreflightRequest(BaseModel):
+    domain: str
+    upload_batch_id: str
+    workflow_id: str
+    workflow_version: int = Field(ge=1)
+
+
+def _frozen_workflow_summary(
+    run: dict[str, Any], *, include_graph: bool = False
+) -> dict[str, Any] | None:
+    """Render historical Workflow data only from the Domain Run snapshot."""
+    if run.get("execution_engine") != "workflow":
+        return None
+    manifest = run.get("workflow_manifest_json")
+    if not isinstance(manifest, dict):
+        return None
+    summary = {
+        "id": run.get("workflow_id") or manifest.get("workflowId"),
+        "version": run.get("workflow_version") or manifest.get("workflowVersion"),
+        "version_id": run.get("workflow_version_id"),
+        "graph_hash": run.get("workflow_graph_hash") or manifest.get("graphHash"),
+        "schema_version": manifest.get("schemaVersion"),
+        "catalog_version": manifest.get("catalogVersion"),
+    }
+    if include_graph:
+        execution = manifest.get("executionPlan") or {}
+        summary.update({
+            "graph": manifest.get("graph"),
+            "nodes": manifest.get("nodes") or [],
+            "edges": manifest.get("edges") or [],
+            "required_completion": execution.get("requiredCompletion") or [],
+        })
+    return summary
 
 
 class CancelRunResponse(BaseModel):
@@ -74,17 +158,160 @@ async def _require_run_domain(pool, run_id: str, domain: str) -> dict:
 
 # ── Routes ──
 
+@router.post("/preflight")
+async def preflight_run(body: RunPreflightRequest, request: Request) -> dict[str, Any]:
+    resolved_domain = require_domain(body.domain)
+    domain_entry = resolve_domain(resolved_domain)
+    channel = str(domain_entry.get("default_channel") or "prod").strip() or "prod"
+    batch_path = resolve_upload_batch_path(resolved_domain, body.upload_batch_id)
+    try:
+        binding = await request.app.state.workflow_run_binder.resolve(
+            workflow_id=body.workflow_id,
+            workflow_version=body.workflow_version,
+            domain=resolved_domain,
+            channel=channel,
+            upload_batch_id=body.upload_batch_id,
+            run_overrides={},
+        )
+    except WorkflowNotFound as exc:
+        raise HTTPException(404, detail={"code": "workflow_not_found", "message": str(exc)}) from exc
+    except WorkflowArchived as exc:
+        raise HTTPException(409, detail={"code": "workflow_archived", "message": str(exc)}) from exc
+    pool = await request.app.state.domain_pools.async_pool(resolved_domain)
+    return await build_run_preflight(
+        pool=pool,
+        batch_path=batch_path,
+        domain=resolved_domain,
+        channel=channel,
+        binding=binding,
+    )
+
 @router.post("", response_model=RunResponse, status_code=202)
 async def create_run(body: CreateRunRequest, request: Request) -> dict:
     """Submit a mining run (async, returns immediately)."""
-    pool = await request.app.state.domain_pools.async_pool(require_domain(body.domain))
-    db_config: MiningDbConfig = request.app.state.db_config
-
-    from knowledge_mining.mining.infra.mining_config import MiningConfig
     cfg = MiningConfig()
     resolved_domain = require_domain(body.domain)
+    engine = cfg.mining_run_submission_engine
+    explicit_workflow = body.workflow_id is not None or body.workflow_version is not None
+    if engine == "legacy" and explicit_workflow:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "workflow_engine_unavailable",
+                "message": "Workflow execution is not enabled for new runs",
+                "details": {},
+            },
+        )
+
+    pool = await request.app.state.domain_pools.async_pool(resolved_domain)
+    db_config: MiningDbConfig = request.app.state.db_config
+    domain_entry = resolve_domain(resolved_domain)
+    channel = str(domain_entry.get("default_channel") or "prod").strip() or "prod"
+
+    batch_path = (
+        resolve_upload_batch_path(resolved_domain, body.upload_batch_id)
+        if body.upload_batch_id
+        else None
+    )
+    input_path = str(batch_path) if batch_path else str(Path(body.input_path or "").resolve())
 
     llm_base_url = body.llm_base_url or cfg.llm_service_url
+
+    binding = None
+    preflight_manifest: dict[str, Any] | None = None
+    if engine == "workflow":
+        run_overrides: dict[str, Any] = {}
+        if body.max_workers is not None:
+            run_overrides["maxWorkers"] = body.max_workers
+        if body.phase1_only:
+            run_overrides["executionMode"] = "assets_only"
+        if "publish_on_partial_failure" in body.model_fields_set:
+            run_overrides["publishOnPartialFailure"] = body.publish_on_partial_failure
+        try:
+            binding = await request.app.state.workflow_run_binder.resolve(
+                workflow_id=body.workflow_id,
+                workflow_version=body.workflow_version,
+                domain=resolved_domain,
+                channel=channel,
+                upload_batch_id=body.upload_batch_id,
+                run_overrides=run_overrides,
+            )
+        except WorkflowNotFound as exc:
+            raise HTTPException(
+                404,
+                detail={
+                    "code": "workflow_not_found",
+                    "message": str(exc),
+                    "details": {},
+                },
+            ) from exc
+        except WorkflowArchived as exc:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "workflow_archived",
+                    "message": str(exc),
+                    "details": {},
+                },
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "workflow_store_unavailable",
+                    "message": "Unable to resolve the selected Workflow version",
+                    "details": {},
+                },
+            ) from exc
+
+        if body.preflight_id:
+            current_preflight = await build_run_preflight(
+                pool=pool,
+                batch_path=batch_path,
+                domain=resolved_domain,
+                channel=channel,
+                binding=binding,
+            )
+            current_items = {
+                (item["relative_path"], item["raw_content_hash"]): item
+                for item in current_preflight["items"]
+            }
+            submitted = {
+                (item.relative_path, item.raw_content_hash): item
+                for item in body.document_decisions
+            }
+            if set(current_items) != set(submitted):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "preflight_stale",
+                        "message": "Uploaded files changed after preflight",
+                    },
+                )
+            confirmed_items = []
+            for key, current_item in current_items.items():
+                decision = submitted[key]
+                if (
+                    decision.state_token != current_item["state_token"]
+                    or decision.selected_action not in current_item["allowed_actions"]
+                ):
+                    raise HTTPException(
+                        409,
+                        detail={
+                            "code": "preflight_stale",
+                            "message": f"Preflight state changed for {decision.relative_path}",
+                        },
+                    )
+                confirmed_items.append({
+                    **current_item,
+                    "selected_action": decision.selected_action,
+                })
+            preflight_manifest = {
+                **current_preflight,
+                "preflight_id": body.preflight_id,
+                "items": confirmed_items,
+                "confirmed_at": _utcnow(),
+            }
 
     # Prevent concurrent mining runs within the same domain
     run_lock = _domain_run_lock(resolved_domain)
@@ -98,13 +325,16 @@ async def create_run(body: CreateRunRequest, request: Request) -> dict:
     run_id = uuid.uuid4().hex
     started_at = datetime.now(timezone.utc).isoformat()
     try:
-        async with pool.connection() as conn:
-            await conn.execute(
-                "INSERT INTO mining_runs "
-                "(id, input_path, domain, status, current_stage, started_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                [run_id, body.input_path, resolved_domain, "queued", "queued", started_at],
-            )
+        await AsyncDomainRunRepository(pool).insert_queued_run(
+            run_id=run_id,
+            input_path=input_path,
+            domain=resolved_domain,
+            channel=channel,
+            execution_engine=engine,
+            binding=binding,
+            started_at=started_at,
+            preflight_manifest=preflight_manifest,
+        )
     except Exception:
         run_lock.release()
         raise
@@ -126,7 +356,7 @@ async def create_run(body: CreateRunRequest, request: Request) -> dict:
         try:
             from knowledge_mining.mining.jobs.run import run as mining_run
             mining_run(
-                body.input_path,
+                input_path,
                 db_config=db_config,
                 phase1_only=body.phase1_only,
                 publish_on_partial_failure=body.publish_on_partial_failure,
@@ -163,6 +393,10 @@ async def create_run(body: CreateRunRequest, request: Request) -> dict:
         "status": "queued",
         "current_stage": "queued",
         "started_at": started_at,
+        "execution_engine": engine,
+        "workflow_id": binding.workflow_id if binding else None,
+        "workflow_version": binding.workflow_version if binding else None,
+        "workflow_graph_hash": binding.graph_hash if binding else None,
     }
 
 
@@ -193,18 +427,26 @@ async def list_runs(
         cur = await conn.execute(
             f"SELECT id, status, current_stage, input_path, domain, total_documents, "
             f"committed_count, failed_count, skipped_count, "
-            f"new_count, updated_count, build_id, started_at, finished_at "
+            f"new_count, updated_count, build_id, started_at, finished_at, "
+            f"execution_engine, workflow_id, workflow_version, workflow_version_id, "
+            f"workflow_graph_hash, workflow_manifest_json "
             f"FROM mining_runs {where} "
             f"ORDER BY started_at DESC LIMIT %s OFFSET %s",
             params + [limit, offset],
         )
         rows = await cur.fetchall()
 
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["workflow"] = _frozen_workflow_summary(item)
+        item.pop("workflow_manifest_json", None)
+        items.append(item)
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "items": [dict(r) for r in rows],
+        "items": items,
     }
 
 
@@ -219,13 +461,18 @@ async def get_run(run_id: str, request: Request, domain: str = Query(..., min_le
             "SELECT id, source_batch_id, input_path, domain, status, current_stage, build_id, "
             "total_documents, new_count, updated_count, skipped_count, "
             "failed_count, committed_count, started_at, finished_at, "
-            "error_summary, metadata_json "
+            "error_summary, metadata_json, execution_engine, workflow_id, "
+            "workflow_version, workflow_version_id, workflow_graph_hash, "
+            "workflow_manifest_json, active_node_id, active_operator_type, pause_step "
             "FROM mining_runs WHERE id = %s", [run_id]
         )
         run = await cur.fetchone()
         if not run:
             raise HTTPException(404, f"Run {run_id} not found")
-        return dict(run)
+        result = dict(run)
+        result["workflow"] = _frozen_workflow_summary(result)
+        result.pop("workflow_manifest_json", None)
+        return result
 
 
 @router.get("/{run_id}/stages")
@@ -862,9 +1109,12 @@ async def get_run_trace(run_id: str, request: Request, domain: str = Query(..., 
 
     async with pool.connection() as conn:
         run_cur = await conn.execute(
-            "SELECT id, domain, status, subloop_stage, ontology_version_id, "
+            "SELECT id, domain, status, current_stage, subloop_stage, ontology_version_id, "
             "total_documents, committed_count, new_count, updated_count, "
-            "failed_count, skipped_count, started_at, finished_at "
+            "failed_count, skipped_count, started_at, finished_at, build_id, "
+            "execution_engine, workflow_id, workflow_version, workflow_version_id, "
+            "workflow_graph_hash, workflow_manifest_json, active_node_id, "
+            "active_operator_type, pause_step "
             "FROM mining_runs WHERE id = %s", [run_id]
         )
         run = await run_cur.fetchone()
@@ -904,10 +1154,54 @@ async def get_run_trace(run_id: str, request: Request, domain: str = Query(..., 
         )
         relation_count = (await rel_cur.fetchone())["n"]
 
+        stage_cur = await conn.execute(
+            "SELECT id, run_id, run_document_id, stage, status, created_at, "
+            "duration_ms, output_summary, error_message "
+            "FROM mining_run_stage_events WHERE run_id = %s ORDER BY created_at",
+            [run_id],
+        )
+        stage_events = [dict(item) for item in await stage_cur.fetchall()]
+
+        document_cur = await conn.execute(
+            "SELECT id, document_key, action, status, document_id, "
+            "document_snapshot_id, error_message FROM mining_run_documents "
+            "WHERE run_id = %s ORDER BY document_key",
+            [run_id],
+        )
+        documents = [dict(item) for item in await document_cur.fetchall()]
+
+        node_events: list[dict[str, Any]] = []
+        if run.get("execution_engine") == "workflow":
+            node_cur = await conn.execute(
+                "SELECT id, run_id, run_document_id, node_id, operator_type, "
+                "operator_version, status, attempt_no, started_at, finished_at, "
+                "duration_ms, input_summary_json, output_summary_json, error_code, "
+                "error_message, metadata_json FROM mining_workflow_node_events "
+                "WHERE run_id = %s ORDER BY started_at, node_id, attempt_no",
+                [run_id],
+            )
+            node_events = [dict(item) for item in await node_cur.fetchall()]
+
+    warnings = []
+    for event in node_events:
+        metadata = event.get("metadata_json") or {}
+        if not isinstance(metadata, dict):
+            continue
+        for warning in metadata.get("warnings") or []:
+            if not isinstance(warning, dict):
+                continue
+            warnings.append({
+                "node_id": event.get("node_id"),
+                "attempt_no": event.get("attempt_no"),
+                "code": warning.get("code"),
+                "message": warning.get("message"),
+            })
+
     return {
         "run_id": run_id,
         "domain": run_domain,
         "status": run["status"],
+        "current_stage": run.get("current_stage"),
         "subloop_stage": run["subloop_stage"],
         "ontology_version_id": run["ontology_version_id"],
         "awaiting_review": run["status"] == "awaiting_review",
@@ -925,6 +1219,20 @@ async def get_run_trace(run_id: str, request: Request, domain: str = Query(..., 
         "entity_count": entity_count,
         "relation_count": relation_count,
         "escape_hatch_candidates": escape_hatch_candidates,
+        "execution_engine": run.get("execution_engine") or "legacy",
+        "workflow": _frozen_workflow_summary(dict(run), include_graph=True),
+        "active_node_id": run.get("active_node_id"),
+        "active_operator_type": run.get("active_operator_type"),
+        "pause_step": run.get("pause_step"),
+        "stage_events": stage_events,
+        "node_events": node_events,
+        "documents": documents,
+        "warnings": warnings,
+        "asset_counts": {
+            "entities": entity_count,
+            "relations": relation_count,
+        },
+        "build_id": run.get("build_id"),
     }
 
 
@@ -933,13 +1241,29 @@ class ResumeRunRequest(BaseModel):
     publish_on_partial_failure: bool = False
 
 
+def _is_run_resumable(
+    *,
+    execution_engine: str,
+    status: str,
+    subloop_stage: str | None,
+    finished_at: Any,
+) -> bool:
+    if status == "awaiting_review":
+        return True
+    if execution_engine == "workflow":
+        return status in {"failed", "interrupted"} or (
+            status == "running" and finished_at is None
+        )
+    return status == "running" and subloop_stage == "done" and finished_at is None
+
+
 @router.post("/{run_id}/resume")
 async def resume_run(
     run_id: str, request: Request,
     domain: str = Query(..., min_length=1),
     body: ResumeRunRequest | None = None,
 ) -> dict:
-    """B6/B7：人审提交后续跑一个 awaiting_review 的 run。
+    """Resume a review-paused or recoverable interrupted mining Run.
 
     重新评估两道检查点：仍有待办 → 保持 awaiting_review 刷新 subloop_stage；
     都清空 → 从 graph_write 之后续跑（建库 + 发布），不重抽文档。
@@ -955,7 +1279,8 @@ async def resume_run(
     # 快速读当前 run 状态（同时拿 domain，避免再查一次）
     async with pool.connection() as conn:
         cur = await conn.execute(
-            "SELECT domain, status, subloop_stage, finished_at FROM mining_runs WHERE id = %s",
+            "SELECT domain, status, subloop_stage, finished_at, execution_engine "
+            "FROM mining_runs WHERE id = %s",
             [run_id],
         )
         row = await cur.fetchone()
@@ -971,8 +1296,14 @@ async def resume_run(
     if status == "completed":
         return {"run_id": run_id, "status": "completed", "message": "该 run 已完成，无需继续"}
 
-    # 可续跑：① 人审暂停；② 收尾中断卡在 running/done（finished_at 仍空）的恢复。
-    resumable = status == "awaiting_review" or (status == "running" and stage == "done" and finished is None)
+    # Workflow additionally resumes failed/interrupted/crashed running states;
+    # legacy keeps its historical awaiting_review and running/done policy.
+    resumable = _is_run_resumable(
+        execution_engine=str(row.get("execution_engine") or "legacy"),
+        status=status,
+        subloop_stage=stage,
+        finished_at=finished,
+    )
     if not resumable:
         raise HTTPException(
             400, f"Run {run_id} 当前状态为 {status}{f'/{stage}' if stage else ''}，无法继续挖掘")

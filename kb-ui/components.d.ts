@@ -45,7 +45,11 @@ declare module 'vue' {
     EvidenceCard: typeof import('./src/components/search/EvidenceCard.vue')['default']
     ForceGraph: typeof import('./src/components/charts/ForceGraph.vue')['default']
     Header: typeof import('./src/components/layout/Header.vue')['default']
+    JsonSchemaParamForm: typeof import('./src/components/workflow/JsonSchemaParamForm.vue')['default']
     LineChart: typeof import('./src/components/charts/LineChart.vue')['default']
+    MiningOperatorNode: typeof import('./src/components/mining/workflow/MiningOperatorNode.vue')['default']
+    MiningOperatorPalette: typeof import('./src/components/mining/workflow/MiningOperatorPalette.vue')['default']
+    MiningWorkflowTrace: typeof import('./src/components/mining/workflow/MiningWorkflowTrace.vue')['default']
     OntologyDiGraph: typeof import('./src/components/charts/OntologyDiGraph.vue')['default']
     OperatorNode: typeof import('./src/components/paradigm/OperatorNode.vue')['default']
     OperatorPalette: typeof import('./src/components/paradigm/OperatorPalette.vue')['default']
@@ -63,6 +67,9 @@ declare module 'vue' {
     StatsCard: typeof import('./src/components/common/StatsCard.vue')['default']
     StatusBadge: typeof import('./src/components/common/StatusBadge.vue')['default']
     SystemConfigTab: typeof import('./src/components/settings/SystemConfigTab.vue')['default']
+    WorkflowOperatorNodeBase: typeof import('./src/components/workflow/WorkflowOperatorNodeBase.vue')['default']
+    WorkflowValidationPanel: typeof import('./src/components/mining/workflow/WorkflowValidationPanel.vue')['default']
+    WorkflowVersionPreview: typeof import('./src/components/mining/workflow/WorkflowVersionPreview.vue')['default']
     YamlEditor: typeof import('./src/components/common/YamlEditor.vue')['default']
   }
   export interface GlobalDirectives {

@@ -19,9 +19,24 @@ const router = createRouter({
           component: () => import('@/views/mining/RunsView.vue'),
         },
         {
-          path: 'mining/create',
+          path: 'mining/new',
           name: 'mining-create',
           component: () => import('@/views/mining/CreateRunView.vue'),
+        },
+        {
+          path: 'mining/create',
+          redirect: { name: 'mining-create' },
+        },
+        {
+          path: 'mining/workflows',
+          name: 'mining-workflows',
+          component: () => import('@/views/mining/WorkflowListView.vue'),
+        },
+        {
+          path: 'mining/workflows/:id',
+          name: 'mining-workflow-editor',
+          component: () => import('@/views/mining/WorkflowEditorView.vue'),
+          props: true,
         },
         {
           path: 'mining/:runId',
