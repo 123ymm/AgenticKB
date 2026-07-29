@@ -45,6 +45,7 @@ const navItems = [
   { path: '/', label: '概览', icon: Monitor },
   { path: '/kb', label: '知识库', icon: Files },
   { path: '/mining', label: '挖掘管理', icon: Management },
+  { path: '/mining/workflows', label: '挖掘 Workflow', icon: Management },
   { path: '/search', label: '检索测试', icon: Search },
   { path: '/paradigm', label: '检索范式', icon: Connection },
   { path: '/knowledge', label: '知识资产', icon: FolderOpened },
@@ -58,6 +59,13 @@ const navItems = [
 
 function isActive(path: string): boolean {
   if (path === '/') return route.path === '/'
+  if (path === '/mining') {
+    return route.path === '/mining'
+      || (route.path.startsWith('/mining/') && !route.path.startsWith('/mining/workflows'))
+  }
+  if (path === '/ontology') {
+    return route.path === '/ontology'
+  }
   return route.path === path || route.path.startsWith(path + '/')
 }
 </script>

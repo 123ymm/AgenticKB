@@ -22,6 +22,10 @@ class _FakeStore:
     def active_relation_types(self, domain_id: str) -> list[dict]:
         return self._rows
 
+    def relation_types_for_version(self, version_id: str) -> list[dict]:
+        assert version_id == "ontology-frozen"
+        return self._rows
+
 
 def _builder(rows: list[dict]) -> EntityRelationBuilder:
     return EntityRelationBuilder(ontology_store=_FakeStore(rows), domain_id="cloud_core_network")
@@ -57,6 +61,20 @@ def test_legal_pair_makes_candidate_edge() -> None:
     )
     # interface→network_element 反向不在 pattern，不应作为 connects_to 候选边
     assert not any(e["head"] == "N4" and e["relation_type"] == "connects_to" for e in edges)
+
+
+def test_relation_patterns_are_read_from_frozen_ontology_version() -> None:
+    builder = EntityRelationBuilder(
+        ontology_store=_FakeStore([_CONNECTS]),
+        domain_id="cloud_core_network",
+        ontology_version_id="ontology-frozen",
+    )
+
+    builder._ensure_index()
+
+    assert builder._patterns == {
+        "connects_to": [("network_element", "interface")]
+    }
 
 
 def test_self_loop_filtered() -> None:

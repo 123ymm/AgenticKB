@@ -26,5 +26,11 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27"]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.pytest.ini_options]
+markers = [
+    "performance: controlled mining throughput and memory-bound acceptance tests",
+    "postgres: guarded tests that require disposable PostgreSQL databases",
+]
+
 [tool.setuptools.packages.find]
 include = ["agent_serving*", "knowledge_mining*", "llm_service*", "main_control_service*"]

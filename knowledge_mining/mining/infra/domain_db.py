@@ -90,8 +90,8 @@ def resolve_domain_database(
 
 
 def ensure_domain_database_schema(resolved: ResolvedDomainDatabase) -> None:
-    """Run the shared mining schema initializer for a resolved database."""
-    from .pg_schema import ensure_schema
+    """Run Domain-safe schemas for a resolved database."""
+    from .pg_schema import ensure_domain_schema
 
     values = conninfo_to_dict(resolved.conninfo)
     dbname = values.get("dbname")
@@ -102,4 +102,4 @@ def ensure_domain_database_schema(resolved: ResolvedDomainDatabase) -> None:
         maintenance_conninfo=make_conninfo(resolved.conninfo, dbname="postgres"),
         pg_dbname=dbname,
     )
-    ensure_schema(cfg)
+    ensure_domain_schema(cfg)

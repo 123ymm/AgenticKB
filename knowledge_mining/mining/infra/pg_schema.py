@@ -19,7 +19,10 @@ _ASSET_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "002_asset_co
 _RUNTIME_DDL = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "002_mining_runtime_postgresql.sql"
 _RUNTIME_DDL_V3 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "003_mining_runtime_domain.sql"
 _RUNTIME_DDL_V4 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "004_mining_runtime_run_stage.sql"
+_RUNTIME_DDL_V5 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "005_mining_workflow_runtime.sql"
+_RUNTIME_DDL_V6 = _REPO_ROOT / "databases" / "mining_runtime" / "schemas" / "006_mining_run_preflight.sql"
 _ASSET_DOMAIN_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "003_asset_core_domain_isolation.sql"
+_ASSET_WORKFLOW_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "004_asset_snapshot_workflow_binding.sql"
 # Ontology concept layer — must apply AFTER asset/runtime (FKs target asset_* and mining_runs).
 _ONTOLOGY_DDL = _REPO_ROOT / "databases" / "ontology" / "schemas" / "001_ontology_concept_postgresql.sql"
 # KB management — kb 三表 + asset_documents 004 ALTER。
@@ -31,6 +34,7 @@ _KB_MEMBERS_DDL = _REPO_ROOT / "databases" / "kb" / "schemas" / "003_kb_members.
 _KB_FOLDERS_DDL = _REPO_ROOT / "databases" / "kb" / "schemas" / "004_kb_folders.sql"
 _KB_ISOLATION_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "004_kb_isolation.sql"
 _KB_FILE_META_DDL = _REPO_ROOT / "databases" / "asset_core" / "schemas" / "005_kb_file_meta.sql"
+_WORKFLOW_CONTROL_DDL = _REPO_ROOT / "databases" / "mining_control" / "schemas" / "001_mining_workflow_postgresql.sql"
 
 
 def _connect_safely(
@@ -77,8 +81,35 @@ def ensure_database(cfg: MiningDbConfig) -> None:
         conn.close()
 
 
-def ensure_schema(cfg: MiningDbConfig) -> None:
-    """Ensure database exists, then execute both DDL files (idempotent)."""
+def domain_schema_paths() -> tuple[Path, ...]:
+    """Return asset/runtime DDLs that are safe for every Domain database."""
+    return (
+        _ASSET_DDL,
+        # KB management — kb 三表 + folders（FK→knowledge_bases）+ asset_documents ALTER。
+        # kb_isolation 引用 knowledge_bases 与 asset_documents，必须在这两者之后。
+        _KB_USERS_DDL,
+        _KB_BASES_DDL,
+        _KB_MEMBERS_DDL,
+        _KB_FOLDERS_DDL,
+        _KB_ISOLATION_DDL,
+        _KB_FILE_META_DDL,
+        _RUNTIME_DDL,
+        _RUNTIME_DDL_V3,
+        _RUNTIME_DDL_V4,
+        _RUNTIME_DDL_V5,
+        _RUNTIME_DDL_V6,
+        _ASSET_DOMAIN_DDL,
+        _ASSET_WORKFLOW_DDL,
+        _ONTOLOGY_DDL,
+    )
+
+
+def primary_schema_paths() -> tuple[Path, ...]:
+    """Return primary DB DDLs, including the global Workflow control store."""
+    return (*domain_schema_paths(), _WORKFLOW_CONTROL_DDL)
+
+
+def _ensure_schema_paths(cfg: MiningDbConfig, ddl_paths: tuple[Path, ...]) -> None:
     ensure_database(cfg)
 
     conn = _connect_safely(
@@ -87,26 +118,39 @@ def ensure_schema(cfg: MiningDbConfig) -> None:
         autocommit=True,
     )
     try:
-        ddl_paths = (
-            _ASSET_DDL,
-            _KB_USERS_DDL, _KB_BASES_DDL, _KB_MEMBERS_DDL,  # kb 三表
-            _KB_FOLDERS_DDL,                                 # kb_folders（FK → knowledge_bases）
-            _KB_ISOLATION_DDL,                               # ALTER：kb_id FK → knowledge_bases
-            _KB_FILE_META_DDL,                               # ALTER：file_size / modified_at
-            _RUNTIME_DDL, _RUNTIME_DDL_V3, _RUNTIME_DDL_V4,
-            _ASSET_DOMAIN_DDL,
-            _ONTOLOGY_DDL,
-        )
         for ddl_path in ddl_paths:
             ddl = ddl_path.read_text(encoding="utf-8")
             _execute_ddl(
                 conn,
                 ddl,
-                transactional=ddl_path in (_RUNTIME_DDL_V4, _ASSET_DOMAIN_DDL, _KB_ISOLATION_DDL),
+                transactional=ddl_path
+                in (
+                    _RUNTIME_DDL_V4,
+                    _RUNTIME_DDL_V5,
+                    _RUNTIME_DDL_V6,
+                    _ASSET_DOMAIN_DDL,
+                    _ASSET_WORKFLOW_DDL,
+                    _KB_ISOLATION_DDL,
+                ),
             )
             logger.info("Applied DDL: %s", ddl_path.name)
     finally:
         conn.close()
+
+
+def ensure_primary_schema(cfg: MiningDbConfig) -> None:
+    """Initialize the primary database, including global Workflow control tables."""
+    _ensure_schema_paths(cfg, primary_schema_paths())
+
+
+def ensure_domain_schema(cfg: MiningDbConfig) -> None:
+    """Initialize one Domain database without global Workflow control tables."""
+    _ensure_schema_paths(cfg, domain_schema_paths())
+
+
+def ensure_schema(cfg: MiningDbConfig) -> None:
+    """Backward-compatible primary schema initializer."""
+    ensure_primary_schema(cfg)
 
 
 def _execute_ddl(conn, ddl: str, *, transactional: bool = False) -> None:

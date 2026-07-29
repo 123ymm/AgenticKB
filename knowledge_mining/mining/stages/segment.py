@@ -14,6 +14,7 @@ v2.0 key points:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from knowledge_mining.mining.contracts.models import ContentBlock, DocumentProfile, RawSegmentData, SectionNode
@@ -57,6 +58,7 @@ class DefaultSegmenter:
             tree, profile,
             parser_name=kwargs.get("parser_name", "unknown"),
             domain_profile=kwargs.get("domain_profile"),
+            policy_override=kwargs.get("policy_override"),
         )
 
 _SCHEMA_BLOCK_TYPES = {
@@ -68,6 +70,18 @@ _SCHEMA_BLOCK_TYPES = {
 _MERGE_MAX_TOKENS = 512
 _SPLIT_MAX_TOKENS = 512
 _TABLE_MIN_INDEPENDENT_TOKENS = 300
+
+
+@dataclass(frozen=True)
+class SegmentPolicyOverride:
+    min_segment_tokens: int
+    max_segment_tokens: int
+    structural_context_mode: str
+    merge_small_segments: bool = True
+    absorb_child_orphans: bool = True
+    merge_lead_into_child: bool = True
+    merge_small_min_tokens: int | None = None
+    merge_small_max_tokens: int | None = None
 
 # Block type priority for merged segments (higher = dominant)
 _BLOCK_TYPE_PRIORITY: dict[str, int] = {
@@ -87,6 +101,7 @@ def segment_document(
     *,
     parser_name: str = "unknown",
     domain_profile: Any | None = None,
+    policy_override: SegmentPolicyOverride | None = None,
 ) -> list[RawSegmentData]:
     """Split document section tree into raw segments.
 
@@ -112,23 +127,40 @@ def segment_document(
     max_chunk = policy.max_chunk_tokens if policy else _SPLIT_MAX_TOKENS
     cross_section = policy.cross_section_merge if policy else True
     ctx_mode = policy.structural_context_mode if policy else "breadcrumb"
+    merge_small = True
+    absorb_orphans = cross_section
+    merge_lead = cross_section
+    merge_min = 100
+    merge_max = _MERGE_MAX_TOKENS
+    if policy_override is not None:
+        min_chunk = policy_override.min_segment_tokens
+        max_chunk = policy_override.max_segment_tokens
+        ctx_mode = policy_override.structural_context_mode
+        merge_small = policy_override.merge_small_segments
+        absorb_orphans = policy_override.absorb_child_orphans
+        merge_lead = policy_override.merge_lead_into_child
+        merge_min = policy_override.merge_small_min_tokens or min_chunk
+        merge_max = policy_override.merge_small_max_tokens or max_chunk
 
     # Phase 1: Walk section tree → raw segments
     segments: list[RawSegmentData] = []
     _walk_sections(doc_root, profile.document_key, [], segments, parser_name)
 
     # Phase 2: Merge small segments within same section
-    segments = _merge_small_segments(segments, min_tokens=100)
+    if merge_small:
+        segments = _merge_small_segments(
+            segments, min_tokens=merge_min, max_tokens=merge_max
+        )
 
     # Phase 3: Absorb cross-section orphans (LlamaIndex AutoMerging pattern)
-    if cross_section:
+    if absorb_orphans:
         segments = _absorb_orphan_segments(segments, min_chunk, max_chunk)
 
     # Phase 3.5: Fold small lead-in paragraphs FORWARD into the next segment.
     # Fills the gap left by Phase 2 (same-section only) and Phase 3 (ancestor
     # only): a short intro like "总体分为如下三个部分：" whose content lives in a
     # CHILD subsection.
-    if cross_section:
+    if merge_lead:
         segments = _merge_lead_in_segments(segments, min_chunk, max_chunk)
 
     # Phase 4: Split large segments at paragraph/sentence boundaries
@@ -217,6 +249,7 @@ def _walk_sections(
 def _merge_small_segments(
     segments: list[RawSegmentData],
     min_tokens: int = 100,
+    max_tokens: int = _MERGE_MAX_TOKENS,
 ) -> list[RawSegmentData]:
     """Merge small segments into adjacent segments (Unstructured.io CompositeElement pattern).
 
@@ -251,7 +284,7 @@ def _merge_small_segments(
             prev.block_type == "paragraph"
             and prev_tc < min_tokens
             and seg.block_type in ("list", "table", "html_table")
-            and (prev_tc + seg_tc) <= _MERGE_MAX_TOKENS
+            and (prev_tc + seg_tc) <= max_tokens
             and not (seg.block_type in ("table", "html_table") and seg_tc > _TABLE_MIN_INDEPENDENT_TOKENS)
         )
 
@@ -259,7 +292,7 @@ def _merge_small_segments(
         backward_merge = (
             seg_tc < min_tokens
             and seg.block_type not in ("table", "html_table", "code")
-            and (prev_tc + seg_tc) <= _MERGE_MAX_TOKENS
+            and (prev_tc + seg_tc) <= max_tokens
             and prev.block_type not in ("table", "html_table", "code")
         )
 

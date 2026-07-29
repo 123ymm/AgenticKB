@@ -10,7 +10,7 @@
         <el-button @click="miningStore.fetchRuns()" :loading="miningStore.loading">
           <el-icon><Refresh /></el-icon>
         </el-button>
-        <router-link to="/mining/create">
+        <router-link to="/mining/new">
           <el-button type="primary">
             <el-icon class="el-icon--left"><Plus /></el-icon>
             新建 Run

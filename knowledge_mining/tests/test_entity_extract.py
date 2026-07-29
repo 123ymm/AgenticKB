@@ -9,9 +9,11 @@
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from knowledge_mining.mining.contracts.models import RawSegmentData
 from knowledge_mining.mining.infra.ontology_store import UNTYPED_NODE_TYPE
-from knowledge_mining.mining.stages.entity_extract import _apply_entity_result
+from knowledge_mining.mining.stages.entity_extract import EntityExtractor, _apply_entity_result
 
 
 def _seg() -> RawSegmentData:
@@ -25,6 +27,52 @@ def _seg() -> RawSegmentData:
 
 def _untyped(out: RawSegmentData) -> list[dict]:
     return [r for r in out.entity_refs_json if r["type"] == UNTYPED_NODE_TYPE]
+
+
+def test_allowed_types_are_read_from_frozen_ontology_version() -> None:
+    class Store:
+        def node_types_for_version(self, version_id):
+            assert version_id == "ontology-frozen"
+            return [{"name": "frozen_type"}]
+
+        def active_node_types(self, domain_id):
+            raise AssertionError("current active ontology must not be read")
+
+    extractor = EntityExtractor(
+        ontology_store=Store(),
+        domain_id="odn",
+        ontology_version_id="ontology-frozen",
+    )
+
+    assert extractor._resolve_allowed_types() == frozenset({"frozen_type"})
+
+
+def test_empty_frozen_ontology_does_not_fall_back_or_disable_filtering() -> None:
+    class Store:
+        def node_types_for_version(self, version_id):
+            return []
+
+        def active_node_types(self, domain_id):
+            raise AssertionError("current active ontology must not be read")
+
+    extractor = EntityExtractor(
+        profile=SimpleNamespace(
+            domain_id="odn", entity_types=frozenset({"profile_type"})
+        ),
+        ontology_store=Store(),
+        domain_id="odn",
+        ontology_version_id="ontology-empty",
+    )
+    allowed = extractor._resolve_allowed_types()
+    out = _apply_entity_result(
+        _seg(),
+        {"entities": [{"name": "X", "type": "profile_type"}]},
+        allowed,
+        enforce_allowed_types=True,
+    )
+
+    assert allowed == frozenset()
+    assert out.entity_refs_json[0]["type"] == UNTYPED_NODE_TYPE
 
 
 def test_in_schema_entity_kept_off_schema_to_untyped() -> None:

@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from knowledge_mining.mining.api.routes import runs
+from knowledge_mining.mining.api.routes import uploads
 from knowledge_mining.mining.jobs import run as run_job
 from knowledge_mining.mining.runtime import RuntimeTracker
+from knowledge_mining.mining.workflow.run_binding import WorkflowRunBinding
 
 
 class _Cursor:
@@ -103,6 +105,10 @@ async def test_create_run_inserts_real_queued_row_before_thread_start(monkeypatc
         "status": "queued",
         "current_stage": "queued",
         "started_at": pool.conn.inserted["started_at"],
+        "execution_engine": "legacy",
+        "workflow_id": None,
+        "workflow_version": None,
+        "workflow_graph_hash": None,
     }
     assert pool.conn.inserted["id"] != "previous-run"
     assert pool.conn.inserted["status"] == "queued"
@@ -324,6 +330,93 @@ def test_resume_running_moves_run_phase_back_to_mining():
                 "current_stage": "mining",
                 "domain": "odn",
                 "expected_statuses": ("awaiting_review", "running"),
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("engine", "status", "stage", "finished_at", "expected"),
+    [
+        ("workflow", "awaiting_review", "entity_review", None, True),
+        ("workflow", "failed", "mining", "2026-07-25T00:00:00Z", True),
+        ("workflow", "interrupted", "mining", "2026-07-25T00:00:00Z", True),
+        ("workflow", "running", "graph_write", None, True),
+        ("legacy", "failed", "mining", "2026-07-25T00:00:00Z", False),
+        ("legacy", "running", "graph_write", None, False),
+        ("legacy", "running", "done", None, True),
+        ("workflow", "cancelled", "mining", None, False),
+    ],
+)
+def test_public_resume_policy_exposes_workflow_crash_recovery(
+    engine, status, stage, finished_at, expected
+):
+    assert runs._is_run_resumable(
+        execution_engine=engine,
+        status=status,
+        subloop_stage=stage,
+        finished_at=finished_at,
+    ) is expected
+
+
+def test_workflow_recovery_claim_clears_terminal_fields_and_accepts_failed():
+    calls = []
+
+    class DB:
+        def update_run_status(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return True
+
+    updated = RuntimeTracker(DB()).resume_running(
+        "failed-run",
+        subloop_stage="graph_write",
+        domain="odn",
+        recover_workflow=True,
+    )
+
+    assert updated is True
+    assert calls == [
+        (
+            ("failed-run", "running"),
+            {
+                "subloop_stage": "graph_write",
+                "current_stage": "mining",
+                "domain": "odn",
+                "expected_statuses": (
+                    "awaiting_review",
+                    "running",
+                    "failed",
+                    "interrupted",
+                ),
+                "clear_finished_at": True,
+                "clear_error_summary": True,
+            },
+        )
+    ]
+
+
+def test_manual_workflow_publish_claims_completed_assets_run():
+    calls = []
+
+    class DB:
+        def update_run_status(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return True
+
+    updated = RuntimeTracker(DB()).begin_manual_publish(
+        "assets-run", domain="odn"
+    )
+
+    assert updated is True
+    assert calls == [
+        (
+            ("assets-run", "running"),
+            {
+                "current_stage": "mining",
+                "domain": "odn",
+                "expected_statuses": ("completed",),
+                "clear_finished_at": True,
+                "clear_error_summary": True,
             },
         )
     ]
@@ -593,6 +686,147 @@ def test_submission_contract_has_no_latest_run_or_pending_response():
     assert '"pending"' not in create_source
     assert "domain_pools.async_pool" in create_source
     assert "run_id=run_id" in create_source
+
+
+@pytest.mark.asyncio
+async def test_legacy_mode_rejects_explicit_workflow_before_inserting(monkeypatch):
+    class Config:
+        mining_run_submission_engine = "legacy"
+        llm_service_url = "http://localhost:8900"
+
+    class DomainPools:
+        async def async_pool(self, domain):
+            raise AssertionError("rejected request must not open a Domain pool")
+
+    monkeypatch.setattr(runs, "MiningConfig", Config)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        domain_pools=DomainPools(), db_config=SimpleNamespace(),
+    )))
+
+    with pytest.raises(Exception) as excinfo:
+        await runs.create_run(
+            runs.CreateRunRequest(
+                input_path="C:/incoming", domain="odn", workflow_id="wf"
+            ),
+            request,
+        )
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["code"] == "workflow_engine_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_workflow_mode_binds_full_and_inserts_manifest_before_thread(
+    monkeypatch, tmp_path
+):
+    pool = _Pool()
+    inserted = []
+    binder_calls = []
+    started = []
+
+    class Config:
+        mining_run_submission_engine = "workflow"
+        llm_service_url = "http://localhost:8900"
+
+    class Binder:
+        async def resolve(self, **kwargs):
+            binder_calls.append(kwargs)
+            return WorkflowRunBinding(
+                workflow_id="system-full-baseline",
+                workflow_version=4,
+                workflow_version_id="version-full-4",
+                graph_hash="graph-hash",
+                manifest={"runtimeBinding": {"domain": "odn"}},
+            )
+
+    class Repository:
+        def __init__(self, selected_pool):
+            assert selected_pool is pool
+
+        async def insert_queued_run(self, **kwargs):
+            inserted.append(kwargs)
+
+    class Thread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            assert daemon is True
+
+        def start(self):
+            assert inserted
+            started.append(True)
+
+    batch_path = tmp_path / "odn" / "abcdef123456"
+    batch_path.mkdir(parents=True)
+    monkeypatch.setattr(runs, "MiningConfig", Config)
+    monkeypatch.setattr(runs, "AsyncDomainRunRepository", Repository)
+    monkeypatch.setattr(
+        runs,
+        "resolve_upload_batch_path",
+        lambda domain, batch_id: (
+            batch_path
+            if (domain, batch_id) == ("odn", "abcdef123456")
+            else (_ for _ in ()).throw(AssertionError("wrong batch lookup"))
+        ),
+    )
+    monkeypatch.setattr(runs, "resolve_domain", lambda domain: {
+        "id": domain, "default_channel": "prod"
+    })
+    monkeypatch.setattr(runs.threading, "Thread", Thread)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        domain_pools=_DomainPools(pool),
+        db_config=SimpleNamespace(),
+        workflow_run_binder=Binder(),
+    )))
+    lock = runs._domain_run_lock("odn")
+    if lock.locked():
+        lock.release()
+    try:
+        response = await runs.create_run(
+            runs.CreateRunRequest(
+                domain="odn",
+                upload_batch_id="abcdef123456",
+                max_workers=8,
+                phase1_only=True,
+                publish_on_partial_failure=True,
+            ),
+            request,
+        )
+    finally:
+        if lock.locked():
+            lock.release()
+
+    assert started == [True]
+    assert binder_calls == [{
+        "workflow_id": None,
+        "workflow_version": None,
+        "domain": "odn",
+        "channel": "prod",
+        "upload_batch_id": "abcdef123456",
+        "run_overrides": {
+            "maxWorkers": 8,
+            "executionMode": "assets_only",
+            "publishOnPartialFailure": True,
+        },
+    }]
+    assert inserted[0]["input_path"] == str(batch_path.resolve())
+    assert inserted[0]["execution_engine"] == "workflow"
+    assert inserted[0]["binding"].workflow_version == 4
+    assert response["execution_engine"] == "workflow"
+    assert response["workflow_id"] == "system-full-baseline"
+    assert response["workflow_version"] == 4
+    assert response["workflow_graph_hash"] == "graph-hash"
+
+
+@pytest.mark.asyncio
+async def test_upload_config_exposes_submission_engine(monkeypatch):
+    class Config:
+        mining_run_submission_engine = "workflow"
+
+    monkeypatch.setattr(uploads, "MiningConfig", Config)
+
+    result = await uploads.get_upload_config()
+
+    assert result["mining_run_submission_engine"] == "workflow"
 
 
 @pytest.mark.asyncio

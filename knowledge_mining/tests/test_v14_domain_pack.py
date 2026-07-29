@@ -316,3 +316,13 @@ class TestBackwardCompat:
         from knowledge_mining.mining.infra.mining_config import MiningConfig
         cfg = MiningConfig(_env_file=None)
         assert cfg.domain == "cloud_core_network"
+
+    def test_mining_config_defaults_to_workflow_submission(self, monkeypatch):
+        """Workflow submission is enabled when no environment override exists."""
+        from knowledge_mining.mining.infra.mining_config import MiningConfig
+
+        monkeypatch.delenv("MINING_RUN_SUBMISSION_ENGINE", raising=False)
+
+        cfg = MiningConfig(_env_file=None)
+
+        assert cfg.mining_run_submission_engine == "workflow"
