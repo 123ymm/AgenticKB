@@ -27,6 +27,7 @@ export function docStatusLabel(s: KbDocStatus): string {
   return {
     uploaded: '已上传',
     mining: '挖掘中',
+    mined: '已挖掘',
     published: '已发布',
     withdrawn: '已撤回',
     failed: '失败',
@@ -39,6 +40,7 @@ export function docStatusTagType(
 ): 'success' | 'warning' | 'info' | 'danger' {
   switch (s) {
     case 'published': return 'success'
+    case 'mined': return 'success'
     case 'mining': return 'warning'
     case 'failed': return 'danger'
     case 'uploaded':

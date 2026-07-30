@@ -8,7 +8,7 @@
 import { createProxyClient, extractItems, extractOne } from '@/api/proxyClient'
 import type {
   KbCreateBody, KbDetail, KbDocument, KbFolder, KbMember, KbMemberRole, KbMineResult,
-  KbSummary, KbUpdateBody,
+  KbRunRecord, KbSummary, KbUpdateBody, DocumentKnowledge,
 } from '@/types/kb'
 
 export function useKbApi() {
@@ -162,9 +162,27 @@ export function useKbApi() {
     },
 
     // ── 挖掘 ──
-    async mineKb(kbId: string): Promise<KbMineResult> {
-      const { data } = await client.post(`/api/kb/${kbId}/mine`)
+    /**
+     * 触发挖掘。documentIds 非空 → 仅挖所选文档子集（选择性挖掘）；
+     * 省略/空 → 整库增量。
+     */
+    async mineKb(kbId: string, documentIds?: string[]): Promise<KbMineResult> {
+      const body =
+        documentIds && documentIds.length ? { document_ids: documentIds } : undefined
+      const { data } = await client.post(`/api/kb/${kbId}/mine`, body)
       return data
+    },
+
+    /** 本 KB 的挖掘记录（最新在前）。 */
+    async getKbRuns(kbId: string): Promise<KbRunRecord[]> {
+      const { data } = await client.get(`/api/kb/${kbId}/runs`)
+      return extractItems<KbRunRecord>(data)
+    },
+
+    /** 单文档已挖掘知识（切片分段 / 检索单元 / 实体提及）。 */
+    async getDocumentKnowledge(kbId: string, docId: string): Promise<DocumentKnowledge> {
+      const { data } = await client.get(`/api/kb/${kbId}/documents/${docId}/knowledge`)
+      return extractOne<DocumentKnowledge>(data)
     },
   }
 }
