@@ -52,6 +52,7 @@
           :kb-id="kbId"
           :can-write="canWrite"
           :workflow-id="miningWorkflowId"
+          :active="activeTab === 'files'"
           @mine-queued="onMineQueued"
         />
       </el-tab-pane>

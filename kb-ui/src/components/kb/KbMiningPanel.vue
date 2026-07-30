@@ -23,6 +23,9 @@
         <span v-if="!canWrite" class="kb-mining__readonly-hint">仅拥有者或编辑者可修改</span>
       </div>
       <div class="kb-mining__trigger">
+        <el-button v-if="canWrite" type="primary" :loading="mining" :disabled="!workflowId" @click="triggerMine">
+          <el-icon class="el-icon--left"><Cpu /></el-icon>整库挖掘
+        </el-button>
         <el-button :loading="loadingRuns" @click="loadRuns">
           <el-icon class="el-icon--left"><Refresh /></el-icon>
           刷新记录
@@ -33,7 +36,7 @@
       尚未选择挖掘范式。在「文件」tab 多选文档后点「挖掘选中」前，请先绑定一个已发布范式。
     </p>
     <p v-else class="kb-mining__tip">
-      触发挖掘：到「文件」tab 多选文档 →「挖掘选中」；不勾选则整库增量。点下方任一任务查看实时进度与流水线。
+      点「整库挖掘」对本库新增/变更文档做增量挖掘；或在「文件」tab 多选文档 →「挖掘选中」。点下方任一任务查看实时进度与流水线。
     </p>
 
     <!-- 挖掘记录列表（行可点 → 任务详情：实时进度 + 12 阶段流水线） -->
@@ -123,7 +126,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh } from '@element-plus/icons-vue'
+import { Cpu, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useKbApi } from '@/api/kb'
 import { useMiningWorkflowApi } from '@/api/miningWorkflow'
@@ -154,6 +157,7 @@ const workflowId = ref<string | null>(props.selectedWorkflowId)
 
 const runs = ref<KbRunRecord[]>([])
 const loadingRuns = ref(false)
+const mining = ref(false)
 
 let pollTimer: number | null = null
 
@@ -187,6 +191,25 @@ async function onWorkflowChange(value: string | null) {
     emit('update:selectedWorkflowId', prev) // 回滚
     workflowId.value = prev
     ElMessage.error(await apiErrorDetail(e))
+  }
+}
+
+// ── 触发整库挖掘（无 document_ids = 对本库新增/变更文档增量挖掘）──
+async function triggerMine() {
+  if (!workflowId.value) {
+    ElMessage.warning('请先选择挖掘范式')
+    return
+  }
+  mining.value = true
+  try {
+    const res = await kbApi.mineKb(props.kbId)
+    ElMessage.success(`整库挖掘已排队（run ${res.run_id.slice(0, 8)}）`)
+    await loadRuns()
+    schedulePolling()
+  } catch (e) {
+    ElMessage.error(await apiErrorDetail(e))
+  } finally {
+    mining.value = false
   }
 }
 

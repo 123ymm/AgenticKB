@@ -182,7 +182,7 @@ import type { KbDocument, KbFolder } from '@/types/kb'
 
 const NAME_CLICK_DELAY = 250 // 区分「单击进入」与「双击改名」
 
-const props = defineProps<{ kbId: string; canWrite: boolean; workflowId: string | null }>()
+const props = defineProps<{ kbId: string; canWrite: boolean; workflowId: string | null; active: boolean }>()
 const emit = defineEmits<{ (e: 'mine-queued'): void }>()
 const router = useRouter()
 const kbApi = useKbApi()
@@ -481,6 +481,10 @@ function formatDate(t?: string | null): string {
 onMounted(reload)
 watch(() => currentFolderId.value, loadFiles)
 watch(() => props.kbId, reload)
+// 切回文件 Tab 时刷新：挖掘结束后文件状态（uploaded→mined 等）能即时看到
+watch(() => props.active, (now, prev) => {
+  if (now && !prev) reload()
+})
 </script>
 
 <style scoped>
