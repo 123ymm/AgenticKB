@@ -399,6 +399,24 @@ class AssetCoreDB(_DB):
             (document_id, domain),
         )
 
+    def get_document_storage_paths_by_ids(
+        self, *, domain: str, document_ids: list[str]
+    ) -> list[str]:
+        """按文档 id 批量取 storage_path。
+
+        选择性挖掘用：把前端勾选的 document id 翻成落盘绝对路径，在
+        ``_prepare_document_states`` 里按位置过滤 ``ingest_directory`` 的扫描结果。
+        只返回本域、storage_path 非空的行（legacy 行 storage_path 为 NULL，不参与）。
+        """
+        if not document_ids:
+            return []
+        rows = self._fetchall(
+            "SELECT storage_path FROM asset_documents "
+            "WHERE id = ANY(%s) AND domain = %s AND storage_path IS NOT NULL",
+            (list(document_ids), domain),
+        )
+        return [r["storage_path"] for r in rows]
+
     def get_document_lifecycle_state(
         self,
         *,
@@ -874,16 +892,18 @@ class AssetCoreDB(_DB):
         mining_run_id: str | None = None,
         summary_json: dict | None = None,
         validation_json: dict | None = None,
+        kb_id: str | None = None,
     ) -> str:
         now = _utcnow()
         self._execute(
             """INSERT INTO asset_builds
                    (id, build_code, status, build_mode, domain, source_batch_id, parent_build_id,
-                    mining_run_id, summary_json, validation_json, created_at, finished_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)""",
+                    mining_run_id, summary_json, validation_json, kb_id, created_at, finished_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)""",
             (
                 build_id, build_code, status, build_mode, domain, source_batch_id, parent_build_id,
-                mining_run_id, _json_dumps(summary_json), _json_dumps(validation_json), now,
+                mining_run_id, _json_dumps(summary_json), _json_dumps(validation_json),
+                kb_id, now,
             ),
         )
         return build_id
