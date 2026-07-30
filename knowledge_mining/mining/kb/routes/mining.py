@@ -46,9 +46,11 @@ router = APIRouter(prefix="/api/kb/{kb_id}/mine", tags=["kb-mining"])
 
 
 class MineKbBody(BaseModel):
-    """选择性挖掘：document_ids 非空时只挖这些文档；省略/空 → 整库增量。"""
+    """选择性挖掘：document_ids 非空时只挖这些文档；省略/空 → 整库增量。
+    force_redo=True 强制重挖（无视内容哈希去重，重生已挖文档的派生资产）。"""
 
     document_ids: list[str] | None = None
+    force_redo: bool = False
 
 
 def _utcnow() -> str:
@@ -120,6 +122,32 @@ async def mine_kb(
         )
 
     pool = await request.app.state.domain_pools.async_pool(domain)
+
+    # 档2：范式签名变更自动失效。签名 = workflow_id:version:graph_hash，比对上一条已完成 run；
+    # 不同（范式/版本/图变了）则自动 force_redo，让派生资产重生。用户也可显式 force_redo。
+    signature = f"{binding.workflow_id}:{binding.workflow_version}:{binding.graph_hash}"
+    user_force_redo = bool(body and body.force_redo)
+    auto_force_redo = False
+    prev_sig: str | None = None
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT metadata_json->>'signature' AS sig FROM mining_runs "
+            "WHERE kb_id = %s AND status IN ('completed', 'succeeded', 'completed_with_errors') "
+            "ORDER BY finished_at DESC NULLS LAST LIMIT 1",
+            [kb_id],
+        )
+        _prev = await cur.fetchone()
+        if _prev and _prev["sig"]:
+            prev_sig = _prev["sig"]
+            if prev_sig != signature:
+                auto_force_redo = True
+    force_redo = user_force_redo or auto_force_redo
+    if auto_force_redo:
+        logger.info(
+            "KB %s paradigm signature changed (%s -> %s); auto force_redo",
+            kb_id, prev_sig, signature,
+        )
+
     run_lock = _domain_run_lock(domain)
     if not run_lock.acquire(blocking=False):
         raise HTTPException(
@@ -142,7 +170,12 @@ async def mine_kb(
         # KB 挖掘专属：标 kb_id 归属 + 抑制 publish（只 build 不进域级 active release，避 B1）。
         # 选择性挖掘：document_ids 非空时一并写入，_prepare_document_states 据此按 storage_path 过滤。
         # metadata_json 用 || 合并，保留 insert_queued_run 写入的其它键。
-        meta_patch: dict[str, Any] = {"kb_id": kb_id, "publish": False}
+        meta_patch: dict[str, Any] = {
+            "kb_id": kb_id,
+            "publish": False,
+            "force_redo": force_redo,
+            "signature": signature,
+        }
         document_ids = body.document_ids if body and body.document_ids else None
         if document_ids:
             meta_patch["document_ids"] = document_ids
@@ -207,4 +240,6 @@ async def mine_kb(
         "workflow_id": binding.workflow_id,
         "workflow_version": binding.workflow_version,
         "workflow_graph_hash": binding.graph_hash,
+        "force_redo": force_redo,
+        "auto_force_redo": auto_force_redo,
     }

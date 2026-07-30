@@ -710,6 +710,7 @@ class _WorkflowJobServices:
         if isinstance(run_meta, str):
             run_meta = json.loads(run_meta)
         run_meta = run_meta or {}
+        force_redo = bool(run_meta.get("force_redo"))
         selected_ids = run_meta.get("document_ids") or []
         if selected_ids:
             selected_paths = set(self.asset_db.get_document_storage_paths_by_ids(
@@ -831,6 +832,14 @@ class _WorkflowJobServices:
                     lifecycle,
                     normalized_content_hash=doc.normalized_content_hash,
                 )
+                # force_redo：无视内容哈希去重，强制重跑（含 LLM 阶段）。先清空旧 snapshot 的派生
+                # 资产——否则 persist_document_assets 见已有切片会跳过持久化、旧单元（如 table_row）
+                # 也会按 unit_key upsert 残留。清空后 lifecycle 走 UPDATE 自然重生。
+                if force_redo and lifecycle_action in {"SKIP", "RESTORE"} and lifecycle:
+                    _snap = lifecycle.get("active_snapshot_id") or lifecycle.get("historical_snapshot_id")
+                    if _snap:
+                        self.asset_db.clear_snapshot_derived_assets(_snap)
+                    lifecycle_action = "UPDATE"
                 action = (
                     "SKIP"
                     if lifecycle_action in {"SKIP", "RESTORE"}
