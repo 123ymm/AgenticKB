@@ -241,28 +241,31 @@ class KbDB:
     async def get_document_knowledge(
         self, kb_id: str, document_id: str
     ) -> dict[str, Any]:
-        """文档当前知识：经 KB 最新 build → asset_build_document_snapshots → snapshot，
-        返回该 snapshot 的 segments / retrieval_units / entity_mentions。
-        KB 无 build 或文档未入选 → {"mined": False}。"""
+        """文档当前知识：查「包含该文档的最新 validated/published build」对应的 snapshot，
+        返回该 snapshot 的 segments / retrieval_units / entity_mentions / relations。
+
+        注意：不能只读「KB 全局最新 build」——KB 多次/选择性挖掘下，每次 mine 产生的 build
+        只含当次入选文档（增量父级继承未生效），全局最新 build 未必包含此文档，会误判 mined:False。
+        改为按 document_id 反查最新含它的 build，才能稳定拿到该文档最近一次挖掘的知识。
+        """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                """SELECT id FROM asset_builds
-                   WHERE kb_id = %s AND status IN ('validated', 'published')
-                   ORDER BY created_at DESC LIMIT 1""",
-                [kb_id],
+                """SELECT bs.document_snapshot_id, bs.build_id
+                   FROM asset_build_document_snapshots bs
+                   JOIN asset_builds b ON b.id = bs.build_id
+                   WHERE bs.document_id = %s
+                     AND bs.selection_status = 'active'
+                     AND b.kb_id = %s
+                     AND b.status IN ('validated', 'published')
+                   ORDER BY b.created_at DESC
+                   LIMIT 1""",
+                [document_id, kb_id],
             )
-            build = await cur.fetchone()
-            if build is None:
+            row = await cur.fetchone()
+            if row is None:
                 return {"mined": False, "build_id": None}
-            cur = await conn.execute(
-                """SELECT document_snapshot_id FROM asset_build_document_snapshots
-                   WHERE build_id = %s AND document_id = %s""",
-                [build["id"], document_id],
-            )
-            sel = await cur.fetchone()
-            if sel is None:
-                return {"mined": False, "build_id": build["id"]}
-            snap_id = sel["document_snapshot_id"]
+            snap_id = row["document_snapshot_id"]
+            build_id = row["build_id"]
             cur = await conn.execute(
                 """SELECT segment_index, block_type, semantic_role, section_title,
                           raw_text, normalized_text
@@ -299,7 +302,7 @@ class KbDB:
             relations = [dict(r) for r in await cur.fetchall()]
             return {
                 "mined": True,
-                "build_id": build["id"],
+                "build_id": build_id,
                 "document_snapshot_id": snap_id,
                 "segments": segments,
                 "retrieval_units": units,
