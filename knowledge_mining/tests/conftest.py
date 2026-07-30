@@ -18,6 +18,49 @@ from knowledge_mining.mining.infra.pg_schema import (
 )
 
 
+# ── 预填 mining 控制面配置缓存 ──────────────────────────────────────────────
+# 生产环境 mining 启动时从 main_control_service 拉取配置（mining.yaml / database.yaml）。
+# 测试环境没有 main_control，这里在 conftest 导入时（早于任何配置类构造）从测试命令行
+# 导出的 PG_* / UPLOAD_* 环境变量预填缓存，使 MiningDbConfig()/MiningConfig()/UploadConfig()
+# 在测试里无需 main_control 也能工作。**生产配置类自身不读 .env / 环境变量。**
+def _prefill_control_plane_caches_from_env() -> None:
+    from knowledge_mining.mining.infra.control_plane import (
+        set_database_config,
+        set_mining_service_config,
+    )
+
+    set_database_config({
+        "default": {
+            "host": os.environ.get("PG_HOST", "localhost"),
+            "port": int(os.environ.get("PG_PORT", "5432")),
+            "dbname": os.environ.get("PG_DBNAME", "kb_db_test"),
+            "user": os.environ.get("PG_USER", ""),
+            "password": os.environ.get("PG_PASSWORD", ""),
+            "sslmode": os.environ.get("PG_SSLMODE", "disable"),
+            "gssencmode": os.environ.get("PG_GSSENCMODE", "disable"),
+            "pool_min": int(os.environ.get("PG_POOL_MIN", "1")),
+            "pool_max": int(os.environ.get("PG_POOL_MAX", "2")),
+        }
+    })
+    set_mining_service_config({
+        "llm_service_url": os.environ.get("LLM_SERVICE_URL", "http://localhost:8900"),
+        "max_workers": int(os.environ.get("MAX_WORKERS", "4")),
+        "mining_run_submission_engine": "workflow",
+        "port": 8901,
+        "upload": {
+            "root": os.environ.get("UPLOAD_ROOT", "./uploads"),
+            "max_file_size": int(os.environ.get("UPLOAD_MAX_FILE_SIZE", str(100 * 1024 * 1024))),
+            "max_archive_size": int(os.environ.get("UPLOAD_MAX_ARCHIVE_SIZE", str(500 * 1024 * 1024))),
+            "max_files_per_request": int(os.environ.get("UPLOAD_MAX_FILES_PER_REQUEST", "100")),
+            "disk_reserve_bytes": int(os.environ.get("UPLOAD_DISK_RESERVE_BYTES", str(1024 * 1024 * 1024))),
+            "archive_extensions": os.environ.get("UPLOAD_ARCHIVE_EXTENSIONS", ".zip"),
+        },
+    })
+
+
+_prefill_control_plane_caches_from_env()
+
+
 def _assert_disposable_database(db_config) -> None:
     """Refuse schema setup and cleanup unless the configured DB is disposable."""
     dbname = db_config.pg_dbname.strip().lower()
