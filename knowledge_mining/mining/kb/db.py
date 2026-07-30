@@ -32,12 +32,16 @@ def _json(obj: Any) -> str:
 
 
 # ── 文档状态派生 SQL 片段（alias d = asset_documents）────────────────────────
-# CASE 在 SELECT；LATERAL 在 FROM。优先级与原 derive_document_status 一致：
-# published > failed > mining(pending/processing) > withdrawn(removed) > uploaded。
+# CASE 在 SELECT；LATERAL 在 FROM。优先级：
+#   published > failed > mined(committed) > mining(pending/processing) > withdrawn(removed) > uploaded
+# 「mined」档专门给 KB 挖掘用：KB 走 publish=False（只 build 不进域级 active release），
+# 文档在 mining_run_documents 到达 committed 后，若没有这一档会被 ELSE 兜底回 'uploaded'，
+# 与「没挖过」无法区分——这正是「挖掘后状态没打通」的根因。
 # 折进列表/详情查询，避免对每个文档单独查（N+1，远程库下 2-3s 卡顿的根因）。
 _STATUS_CASE_SQL = """CASE
     WHEN COALESCE(pub.published, FALSE) THEN 'published'
     WHEN rs.rd_status = 'failed' THEN 'failed'
+    WHEN rs.rd_status = 'committed' THEN 'mined'
     WHEN rs.rd_status IN ('pending', 'processing') THEN 'mining'
     WHEN COALESCE(rm.removed, FALSE) THEN 'withdrawn'
     ELSE 'uploaded'
@@ -131,7 +135,7 @@ class KbDB:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT id, domain, name, description, owner_id, visibility, status,
-                          deleted_at, created_at, updated_at
+                          deleted_at, created_at, updated_at, mining_workflow_id
                    FROM knowledge_bases WHERE id = %s""" + clause,
                 [kb_id],
             )
@@ -149,6 +153,7 @@ class KbDB:
             cur = await conn.execute(
                 """SELECT kb.id, kb.domain, kb.name, kb.description,
                           kb.owner_id, kb.visibility, kb.created_at,
+                          kb.mining_workflow_id,
                           CASE
                             WHEN kb.owner_id = %(uid)s THEN 'owner'
                             WHEN EXISTS (SELECT 1 FROM kb_members m
@@ -169,33 +174,33 @@ class KbDB:
             )
             return [dict(r) for r in await cur.fetchall()]
 
+    # 允许 PATCH 更新的列白名单。值可为 None → 显式清空（SET NULL）。
+    _KB_UPDATABLE_COLUMNS = {"name", "description", "visibility", "mining_workflow_id"}
+
     async def update_kb(
         self,
         kb_id: str,
         *,
-        name: str | None = None,
-        description: str | None = None,
-        visibility: str | None = None,
+        fields: dict[str, Any],
     ) -> dict[str, Any] | None:
-        fields: list[str] = []
-        params: dict[str, Any] = {"id": kb_id, "t": _utcnow()}
-        if name is not None:
-            fields.append("name = %(n)s")
-            params["n"] = name
-        if description is not None:
-            fields.append("description = %(desc)s")
-            params["desc"] = description
-        if visibility is not None:
-            fields.append("visibility = %(vis)s")
-            params["vis"] = visibility
-        if not fields:
+        """PATCH 更新。fields 只含**显式提供**的列（路由层用 model_fields_set 过滤），
+        None 表示显式清空（SET NULL）；未提供的列不动。列名经白名单校验，防注入。"""
+        allowed = {k: v for k, v in fields.items() if k in self._KB_UPDATABLE_COLUMNS}
+        if not allowed:
             return await self.get_kb(kb_id)
-        fields.append("updated_at = %(t)s")
+        set_clauses: list[str] = []
+        params: dict[str, Any] = {"id": kb_id, "t": _utcnow()}
+        for col, val in allowed.items():
+            key = f"f{len(params)}"  # 唯一参数键
+            set_clauses.append(f"{col} = %({key})s")
+            params[key] = val
+        set_clauses.append("updated_at = %(t)s")
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                """UPDATE knowledge_bases SET """ + ", ".join(fields) + """
+                """UPDATE knowledge_bases SET """ + ", ".join(set_clauses) + """
                    WHERE id = %(id)s AND status = 'active'
-                   RETURNING id, domain, name, description, owner_id, visibility, status""",
+                   RETURNING id, domain, name, description, owner_id, visibility, status,
+                             mining_workflow_id""",
                 params,
             )
             row = await cur.fetchone()
@@ -212,6 +217,95 @@ class KbDB:
             )
             row = await cur.fetchone()
             return dict(row) if row else None
+
+    # ------------------------------------------------------------- kb mining
+    # KB 中心化挖掘（融合设计 §5.2）：本库挖掘记录 + 文档当前知识（供前端「挖掘」tab / 文件多 tab）。
+
+    async def list_kb_runs(self, kb_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """本 KB 的挖掘记录（mining_runs by kb_id），最新在前。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT id, status, current_stage, execution_engine,
+                          workflow_id, workflow_version,
+                          started_at, finished_at, error_summary,
+                          total_documents, new_count, updated_count, skipped_count,
+                          failed_count, committed_count
+                   FROM mining_runs
+                   WHERE kb_id = %s
+                   ORDER BY started_at DESC
+                   LIMIT %s""",
+                [kb_id, limit],
+            )
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_document_knowledge(
+        self, kb_id: str, document_id: str
+    ) -> dict[str, Any]:
+        """文档当前知识：经 KB 最新 build → asset_build_document_snapshots → snapshot，
+        返回该 snapshot 的 segments / retrieval_units / entity_mentions。
+        KB 无 build 或文档未入选 → {"mined": False}。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT id FROM asset_builds
+                   WHERE kb_id = %s AND status IN ('validated', 'published')
+                   ORDER BY created_at DESC LIMIT 1""",
+                [kb_id],
+            )
+            build = await cur.fetchone()
+            if build is None:
+                return {"mined": False, "build_id": None}
+            cur = await conn.execute(
+                """SELECT document_snapshot_id FROM asset_build_document_snapshots
+                   WHERE build_id = %s AND document_id = %s""",
+                [build["id"], document_id],
+            )
+            sel = await cur.fetchone()
+            if sel is None:
+                return {"mined": False, "build_id": build["id"]}
+            snap_id = sel["document_snapshot_id"]
+            cur = await conn.execute(
+                """SELECT segment_index, block_type, semantic_role, section_title,
+                          raw_text, normalized_text
+                   FROM asset_raw_segments
+                   WHERE document_snapshot_id = %s ORDER BY segment_index""",
+                [snap_id],
+            )
+            segments = [dict(r) for r in await cur.fetchall()]
+            cur = await conn.execute(
+                """SELECT unit_key, unit_type, title, text, block_type, semantic_role
+                   FROM asset_retrieval_units
+                   WHERE document_snapshot_id = %s ORDER BY unit_key""",
+                [snap_id],
+            )
+            units = [dict(r) for r in await cur.fetchall()]
+            cur = await conn.execute(
+                """SELECT node_type, mention_text, canonical_name, resolve_status
+                   FROM asset_segment_entity_mentions
+                   WHERE document_snapshot_id = %s ORDER BY id""",
+                [snap_id],
+            )
+            mentions = [dict(r) for r in await cur.fetchall()]
+            cur = await conn.execute(
+                """SELECT r.relation_type, r.weight, r.confidence, r.distance,
+                          src.raw_text AS source_segment_text,
+                          dst.raw_text AS target_segment_text
+                   FROM asset_raw_segment_relations r
+                   JOIN asset_raw_segments src ON src.id = r.source_segment_id
+                   JOIN asset_raw_segments dst ON dst.id = r.target_segment_id
+                   WHERE r.document_snapshot_id = %s
+                   ORDER BY r.id""",
+                [snap_id],
+            )
+            relations = [dict(r) for r in await cur.fetchall()]
+            return {
+                "mined": True,
+                "build_id": build["id"],
+                "document_snapshot_id": snap_id,
+                "segments": segments,
+                "retrieval_units": units,
+                "entity_mentions": mentions,
+                "relations": relations,
+            }
 
     # ---------------------------------------------------------------- members
 
