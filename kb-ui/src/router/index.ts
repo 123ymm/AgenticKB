@@ -31,18 +31,16 @@ const router = createRouter({
           props: true,
         },
         {
-          path: 'mining',
-          name: 'mining',
-          component: () => import('@/views/mining/RunsView.vue'),
+          path: 'kb/:kbId/run/:runId',
+          name: 'kb-run-detail',
+          component: () => import('@/views/kb/KbRunDetailView.vue'),
+          props: true,
         },
         {
-          path: 'mining/new',
-          name: 'mining-create',
-          component: () => import('@/views/mining/CreateRunView.vue'),
-        },
-        {
-          path: 'mining/create',
-          redirect: { name: 'mining-create' },
+          path: 'kb/:kbId/run/:runId/doc/:docId',
+          name: 'kb-run-doc-detail',
+          component: () => import('@/views/kb/KbRunDocDetailView.vue'),
+          props: true,
         },
         {
           path: 'mining/workflows',
@@ -53,18 +51,6 @@ const router = createRouter({
           path: 'mining/workflows/:id',
           name: 'mining-workflow-editor',
           component: () => import('@/views/mining/WorkflowEditorView.vue'),
-          props: true,
-        },
-        {
-          path: 'mining/:runId',
-          name: 'mining-detail',
-          component: () => import('@/views/mining/RunDetailView.vue'),
-          props: true,
-        },
-        {
-          path: 'mining/:runId/documents/:docId',
-          name: 'mining-document-detail',
-          component: () => import('@/views/mining/RunDocumentDetailView.vue'),
           props: true,
         },
         {
