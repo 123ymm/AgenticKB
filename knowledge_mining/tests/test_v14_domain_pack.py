@@ -132,41 +132,6 @@ class TestDomainPackLoader:
 
 
 # ---------------------------------------------------------------------------
-# Test: Per-domain DB connection
-# ---------------------------------------------------------------------------
-
-class TestPerDomainDbConnection:
-    def test_conninfo_from_env_valid(self, monkeypatch):
-        from knowledge_mining.mining.infra.pg_config import conninfo_from_env
-        monkeypatch.setenv("TEST_DB_URL", "postgresql://myuser:mypass@dbhost:5433/mydb?sslmode=require")
-        conninfo = conninfo_from_env("TEST_DB_URL")
-        assert "host=dbhost" in conninfo
-        assert "port=5433" in conninfo
-        assert "dbname=mydb" in conninfo
-        assert "user=myuser" in conninfo
-        assert "password=mypass" in conninfo
-        assert "sslmode=require" in conninfo
-
-    def test_conninfo_from_env_missing(self):
-        from knowledge_mining.mining.infra.pg_config import conninfo_from_env
-        with pytest.raises(ValueError, match="not set"):
-            conninfo_from_env("NONEXISTENT_VAR_12345")
-
-    def test_conninfo_from_env_invalid_scheme(self, monkeypatch):
-        from knowledge_mining.mining.infra.pg_config import conninfo_from_env
-        monkeypatch.setenv("BAD_URL", "http://not-postgres.com/db")
-        with pytest.raises(ValueError, match="Invalid URL scheme"):
-            conninfo_from_env("BAD_URL")
-
-    def test_conninfo_from_env_post_scheme(self, monkeypatch):
-        from knowledge_mining.mining.infra.pg_config import conninfo_from_env
-        monkeypatch.setenv("POST_URL", "postgres://u:p@h:5432/d")
-        conninfo = conninfo_from_env("POST_URL")
-        assert "host=h" in conninfo
-        assert "dbname=d" in conninfo
-
-
-# ---------------------------------------------------------------------------
 # Test: Entity Schema from Profile
 # ---------------------------------------------------------------------------
 
@@ -311,11 +276,14 @@ class TestBackwardCompat:
         assert profile.domain_id == "cloud_core_network"
         assert "command" in profile.strong_entity_types
 
-    def test_mining_config_domain_field(self):
-        """MiningConfig.domain is the new primary field."""
+    def test_default_domain_comes_from_registry(self):
+        """默认域来自 domain_registry.yaml 顶层 default_domain，不在 MiningConfig。"""
+        from knowledge_mining.mining.infra.domain_pack import get_default_domain
+        assert get_default_domain() == "cloud_core_network"
+        # MiningConfig 不再持有 domain 字段（domain 统一由 registry 决定）
         from knowledge_mining.mining.infra.mining_config import MiningConfig
         cfg = MiningConfig(_env_file=None)
-        assert cfg.domain == "cloud_core_network"
+        assert not hasattr(cfg, "domain")
 
     def test_mining_config_defaults_to_workflow_submission(self, monkeypatch):
         """Workflow submission is enabled when no environment override exists."""
