@@ -111,6 +111,10 @@ export interface KbMineResult {
   workflow_id: string
   workflow_version: number
   workflow_graph_hash: string
+  /** 本次是否强制重挖（用户显式或签名变更自动触发）。 */
+  force_redo?: boolean
+  /** 是否因范式签名变更自动触发 force_redo。 */
+  auto_force_redo?: boolean
 }
 
 /** 整库挖掘状态码（与 mining_runs.status 对齐）。 */

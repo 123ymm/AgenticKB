@@ -166,10 +166,18 @@ export function useKbApi() {
      * 触发挖掘。documentIds 非空 → 仅挖所选文档子集（选择性挖掘）；
      * 省略/空 → 整库增量。
      */
-    async mineKb(kbId: string, documentIds?: string[]): Promise<KbMineResult> {
-      const body =
-        documentIds && documentIds.length ? { document_ids: documentIds } : undefined
-      const { data } = await client.post(`/api/kb/${kbId}/mine`, body)
+    async mineKb(
+      kbId: string,
+      documentIds?: string[],
+      forceRedo?: boolean,
+    ): Promise<KbMineResult> {
+      const body: Record<string, unknown> = {}
+      if (documentIds && documentIds.length) body.document_ids = documentIds
+      if (forceRedo) body.force_redo = true
+      const { data } = await client.post(
+        `/api/kb/${kbId}/mine`,
+        Object.keys(body).length ? body : undefined,
+      )
       return data
     },
 

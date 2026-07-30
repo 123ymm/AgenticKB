@@ -23,8 +23,15 @@
         <span v-if="!canWrite" class="kb-mining__readonly-hint">仅拥有者或编辑者可修改</span>
       </div>
       <div class="kb-mining__trigger">
+        <el-tooltip
+          v-if="canWrite"
+          content="忽略内容哈希缓存，对所有文档重跑 pipeline（含 LLM 阶段），重生已挖知识"
+          placement="top"
+        >
+          <el-checkbox v-model="forceRedo">强制重挖</el-checkbox>
+        </el-tooltip>
         <el-button v-if="canWrite" type="primary" :loading="mining" :disabled="!workflowId" @click="triggerMine">
-          <el-icon class="el-icon--left"><Cpu /></el-icon>整库挖掘
+          <el-icon class="el-icon--left"><Cpu /></el-icon>{{ forceRedo ? '强制整库重挖' : '整库挖掘' }}
         </el-button>
         <el-button :loading="loadingRuns" @click="loadRuns">
           <el-icon class="el-icon--left"><Refresh /></el-icon>
@@ -158,6 +165,7 @@ const workflowId = ref<string | null>(props.selectedWorkflowId)
 const runs = ref<KbRunRecord[]>([])
 const loadingRuns = ref(false)
 const mining = ref(false)
+const forceRedo = ref(false)
 
 let pollTimer: number | null = null
 
@@ -202,8 +210,11 @@ async function triggerMine() {
   }
   mining.value = true
   try {
-    const res = await kbApi.mineKb(props.kbId)
-    ElMessage.success(`整库挖掘已排队（run ${res.run_id.slice(0, 8)}）`)
+    const res = await kbApi.mineKb(props.kbId, undefined, forceRedo.value)
+    ElMessage.success(
+      `${forceRedo.value ? '强制整库重挖' : '整库挖掘'}已排队（run ${res.run_id.slice(0, 8)}）` +
+        (res.auto_force_redo ? '（范式已变更，自动强制重挖）' : ''),
+    )
     await loadRuns()
     schedulePolling()
   } catch (e) {
