@@ -1,8 +1,9 @@
 """KB 文件夹管理 —— 一等文件夹（kb_folders）的磁盘 + DB 协调。
 
 kb_folders 是文件夹结构的唯一真相源；磁盘目录与之镜像（建→mkdir，删空→rmdir）。
-权限复用 KbService._assert_write/_assert_read。document_key/id 在所有文件夹操作中
-不变（G3 的移动/改名只动位置）。mining 的 rglob 会自然 walk 出层级。
+权限复用 KbService._assert_write/_assert_read。移动/改名同步 document_key 为新磁盘相对路径
+（mining 按磁盘相对路径派生 key，否则状态派生 LATERAL 对不上 → 永远 uploaded）；id 不变。
+mining 的 rglob 会自然 walk 出层级。
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from knowledge_mining.mining.infra.upload_config import UploadConfig
+from knowledge_mining.mining.kb.storage import build_document_key
 from knowledge_mining.mining.kb.db import KbDB
 from knowledge_mining.mining.kb.services.kb_service import Duplicate, KbService, NotFound
 from knowledge_mining.mining.kb.storage import (
@@ -95,9 +97,9 @@ class FolderService:
         return str(base / directory_path / document_name) if directory_path else str(base / document_name)
 
     async def _relocate_docs(self, *, kb_id: str, old_prefix: str, new_prefix: str) -> None:
-        """把身处 old_prefix（含子文件夹）下的文档 directory_path/storage_path 前缀替换。
+        """把身处 old_prefix（含子文件夹）下的文档 directory_path/storage_path/document_key 前缀替换。
 
-        document_key / id 不动；storage_path 按新 directory_path 重构（base/new_dir/name）。
+        document_key 同步为新磁盘相对路径（mining 按磁盘相对路径派生 key）；id 不动。
         """
         for d in await self._db.list_docs_under_prefix(kb_id=kb_id, prefix=old_prefix):
             old_dir = d["directory_path"] or ""
@@ -106,6 +108,7 @@ class FolderService:
             new_storage = self._doc_storage(kb_id, new_dir, d["document_name"])
             await self._db.update_doc_location(
                 d["id"], directory_path=new_dir, storage_path=new_storage,
+                document_key=build_document_key(new_dir, d["document_name"]),
             )
 
     async def rename_folder(self, *, folder_id: str, name: str, user_id: str) -> dict[str, Any]:
@@ -192,13 +195,14 @@ class FolderService:
             return doc
         old_storage = doc["storage_path"]
         new_storage = self._doc_storage(kb_id, new_dir, doc["document_name"])
+        new_key = build_document_key(new_dir, doc["document_name"])
         base = self._kb_base(kb_id)
         if new_dir:
             (base / new_dir).mkdir(parents=True, exist_ok=True)
         shutil.move(old_storage, new_storage)
         try:
             await self._db.update_doc_location(
-                document_id, directory_path=new_dir, storage_path=new_storage)
+                document_id, directory_path=new_dir, storage_path=new_storage, document_key=new_key)
         except Exception:
             shutil.move(new_storage, old_storage)
             raise

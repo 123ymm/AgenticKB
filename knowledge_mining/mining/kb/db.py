@@ -608,11 +608,18 @@ class KbDB:
             return [dict(r) for r in await cur.fetchall()]
 
     async def update_doc_location(
-        self, document_id: str, *, directory_path: str, storage_path: str,
+        self, document_id: str, *, directory_path: str, storage_path: str, document_key: str,
     ) -> None:
-        """移动/改名文件：更新位置两字段。document_key / id 不变。"""
+        """移动文件：更新位置 + document_key。
+
+        document_key 必须同步为新磁盘相对路径——挖掘从磁盘相对路径派生 key
+        （jobs/run.py: doc_key = doc:/{relative_path}），若移动后 asset_documents.document_key
+        仍停在旧路径，状态派生 LATERAL 按 document_key 匹配 mining_run_documents 会失败 →
+        永远显示 uploaded。改名（patch_document）不动磁盘文件，document_key 不变。
+        """
         async with self._pool.connection() as conn:
             await conn.execute(
-                "UPDATE asset_documents SET directory_path = %s, storage_path = %s WHERE id = %s",
-                [directory_path, storage_path, document_id],
+                "UPDATE asset_documents SET directory_path = %s, storage_path = %s, document_key = %s "
+                "WHERE id = %s",
+                [directory_path, storage_path, document_key, document_id],
             )
