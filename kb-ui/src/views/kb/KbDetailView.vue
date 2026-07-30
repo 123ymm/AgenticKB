@@ -24,24 +24,14 @@
         >
           我：{{ roleLabel(kb.my_role) }}
         </el-tag>
-      </div>
-      <div class="kb-detail-view__head-right">
-        <el-tooltip
-          :content="canWrite ? '对该知识库中新增/变更的文档触发挖掘' : '仅拥有者或编辑者可触发挖掘'"
-          placement="top"
+        <el-tag
+          v-if="miningWorkflowId"
+          size="small"
+          type="success"
+          effect="plain"
         >
-          <span>
-            <el-button
-              type="primary"
-              :loading="mining"
-              :disabled="!canWrite"
-              @click="triggerMine"
-            >
-              <el-icon class="el-icon--left"><Cpu /></el-icon>
-              挖掘
-            </el-button>
-          </span>
-        </el-tooltip>
+          范式已绑定
+        </el-tag>
       </div>
     </div>
 
@@ -58,10 +48,23 @@
     <!-- Tabs -->
     <el-tabs v-if="kb" v-model="activeTab" class="kb-detail-view__tabs">
       <el-tab-pane label="文件" name="files">
-        <KbFileManager :kb-id="kbId" :can-write="canWrite" />
+        <KbFileManager
+          :kb-id="kbId"
+          :can-write="canWrite"
+          :workflow-id="miningWorkflowId"
+          @mine-queued="onMineQueued"
+        />
       </el-tab-pane>
       <el-tab-pane label="成员" name="members">
         <KbMembersPanel :kb-id="kbId" :can-write="canWrite" />
+      </el-tab-pane>
+      <el-tab-pane label="挖掘" name="mining">
+        <KbMiningPanel
+          ref="miningPanelRef"
+          :kb-id="kbId"
+          v-model:selectedWorkflowId="miningWorkflowId"
+          :can-write="canWrite"
+        />
       </el-tab-pane>
       <el-tab-pane label="设置" name="settings">
         <KbSettingsPanel
@@ -76,9 +79,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft, Cpu } from '@element-plus/icons-vue'
+import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useDomainStore } from '@/stores/domain'
 import { useKbApi } from '@/api/kb'
@@ -86,6 +89,7 @@ import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
 import KbFileManager from '@/components/kb/KbFileManager.vue'
 import KbMembersPanel from '@/components/kb/KbMembersPanel.vue'
+import KbMiningPanel from '@/components/kb/KbMiningPanel.vue'
 import KbSettingsPanel from '@/components/kb/KbSettingsPanel.vue'
 import { roleLabel, roleTagType, visibilityLabel, visibilityTagType } from '@/views/kb/kbMeta'
 import type { KbSummary } from '@/types/kb'
@@ -97,8 +101,12 @@ const kbApi = useKbApi()
 
 const kb = ref<KbSummary | null>(null)
 const loading = ref(false)
-const mining = ref(false)
-const activeTab = ref<'files' | 'members' | 'settings'>('files')
+const activeTab = ref<'files' | 'members' | 'mining' | 'settings'>('files')
+const miningPanelRef = ref<InstanceType<typeof KbMiningPanel> | null>(null)
+
+/** 范式状态由父组件持有（单一真相源），修复旧版「按钮读列表快照 → 误报未选范式」的 Bug A。
+ * KbMiningPanel 通过 v-model:selectedWorkflowId 双向同步；KbFileManager 批量挖掘前读它判断是否已设。 */
+const miningWorkflowId = ref<string | null>(null)
 
 const canWrite = computed(
   () => kb.value?.my_role === 'owner' || kb.value?.my_role === 'editor',
@@ -110,6 +118,8 @@ async function reload() {
   try {
     const all = await kbApi.listKbs(domainStore.currentDomain)
     kb.value = all.find((k) => k.id === props.kbId) ?? null
+    // 同步范式状态（列表快照 → 父组件权威 ref）
+    miningWorkflowId.value = kb.value?.mining_workflow_id ?? null
   } catch (e) {
     kb.value = null
     ElMessage.error(await apiErrorDetail(e))
@@ -118,22 +128,10 @@ async function reload() {
   }
 }
 
-async function triggerMine() {
-  mining.value = true
-  try {
-    const res = await kbApi.mineKb(props.kbId)
-    ElMessage({
-      type: 'success',
-      message: `挖掘已排队（run ${res.run_id.slice(0, 8)}）`,
-      duration: 4000,
-    })
-    // 跳到挖掘进度页，方便观察。用户可返回继续操作文件。
-    router.push(`/mining/${res.run_id}`)
-  } catch (e) {
-    ElMessage.error(await apiErrorDetail(e))
-  } finally {
-    mining.value = false
-  }
+/** 文件列表多选 → 批量挖掘成功后：切到挖掘 tab 并刷新任务列表/启动轮询。 */
+function onMineQueued() {
+  activeTab.value = 'mining'
+  nextTick(() => miningPanelRef.value?.refresh())
 }
 
 function onDeleted() {

@@ -32,9 +32,29 @@
       </div>
     </div>
 
+    <!-- 批量操作栏（多选文件后出现） -->
+    <div v-if="selectedCount > 0" class="fm__batch">
+      <span class="fm__batch-count">已选 {{ selectedCount }} 个文件</span>
+      <el-button v-if="canWrite" size="small" type="primary" :disabled="!workflowId" @click="batchMine">
+        <el-icon class="el-icon--left"><Cpu /></el-icon>挖掘选中 ({{ selectedCount }})
+      </el-button>
+      <el-button v-if="canWrite" size="small" type="danger" plain @click="batchDelete">
+        <el-icon class="el-icon--left"><Delete /></el-icon>删除选中
+      </el-button>
+      <el-button link size="small" @click="clearSelection">清除选择</el-button>
+      <span v-if="canWrite && !workflowId" class="fm__batch-warn">先到「挖掘」tab 绑定范式才能挖掘</span>
+    </div>
+
     <!-- List -->
     <div class="fm__list" v-loading="loading">
       <div class="fm__row fm__row--head">
+        <div class="fm__col fm__col--check">
+          <el-checkbox
+            v-if="files.length"
+            :model-value="allFilesSelected"
+            @change="toggleAllFiles"
+          />
+        </div>
         <div class="fm__col fm__col--name">名称</div>
         <div class="fm__col fm__col--type">类型</div>
         <div class="fm__col fm__col--size">大小</div>
@@ -64,6 +84,7 @@
         @dragleave="dragOverId = null"
         @drop.stop="onDrop($event, f.id)"
       >
+        <div class="fm__col fm__col--check"></div>
         <div class="fm__col fm__col--name" @click.stop>
           <el-icon class="fm__icon fm__icon--folder"><Folder /></el-icon>
           <span
@@ -91,6 +112,12 @@
         @dragstart="onDragStart($event, 'file', file.id)"
         @dragend="onDragEnd"
       >
+        <div class="fm__col fm__col--check" @click.stop>
+          <el-checkbox
+            :model-value="selectedFileIds.includes(file.id)"
+            @change="(v: boolean) => toggleFileSelect(file.id, v)"
+          />
+        </div>
         <div class="fm__col fm__col--name" @click.stop>
           <el-icon class="fm__icon" :class="fileIconClass(file)"><component :is="fileIcon(file)" /></el-icon>
           <span
@@ -141,7 +168,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Folder, FolderAdd, UploadFilled, Refresh,
-  Document, Picture, Tickets,
+  Document, Picture, Tickets, Cpu, Delete,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
@@ -155,7 +182,8 @@ import type { KbDocument, KbFolder } from '@/types/kb'
 
 const NAME_CLICK_DELAY = 250 // 区分「单击进入」与「双击改名」
 
-const props = defineProps<{ kbId: string; canWrite: boolean }>()
+const props = defineProps<{ kbId: string; canWrite: boolean; workflowId: string | null }>()
+const emit = defineEmits<{ (e: 'mine-queued'): void }>()
 const router = useRouter()
 const kbApi = useKbApi()
 
@@ -166,6 +194,24 @@ const loading = ref(false)
 const uploading = ref(0)
 const selId = ref<string | null>(null)
 const hint = ref(true)
+
+// ── 多选 + 批量操作（挖掘触发统一到这里，挖掘 Tab 只展示任务流） ──
+const selectedFileIds = ref<string[]>([])
+const selectedCount = computed(() => selectedFileIds.value.length)
+const allFilesSelected = computed(
+  () => files.value.length > 0 && files.value.every((f) => selectedFileIds.value.includes(f.id)),
+)
+function toggleFileSelect(id: string, checked: boolean) {
+  selectedFileIds.value = checked
+    ? (selectedFileIds.value.includes(id) ? selectedFileIds.value : [...selectedFileIds.value, id])
+    : selectedFileIds.value.filter((x) => x !== id)
+}
+function toggleAllFiles(checked: boolean) {
+  selectedFileIds.value = checked ? files.value.map((f) => f.id) : []
+}
+function clearSelection() {
+  selectedFileIds.value = []
+}
 
 const currentFolder = computed(() => folders.value.find((f) => f.id === currentFolderId.value) ?? null)
 const currentPath = computed(() => currentFolder.value?.path ?? '')
@@ -300,6 +346,49 @@ async function deleteFile(file: KbDocument) {
   } catch (e) { ElMessage.error(await apiErrorDetail(e)) }
 }
 
+// ── 批量操作（多选文件后出现批量栏） ──
+async function batchMine() {
+  if (!props.workflowId) {
+    ElMessage.warning('请先在「挖掘」tab 选择挖掘范式')
+    return
+  }
+  const ids = [...selectedFileIds.value]
+  if (!ids.length) return
+  try {
+    const res = await kbApi.mineKb(props.kbId, ids)
+    ElMessage.success(`已排队挖掘 ${ids.length} 个文档（run ${res.run_id.slice(0, 8)}）`)
+    clearSelection()
+    emit('mine-queued') // 通知父组件切到挖掘 tab 并刷新任务列表
+  } catch (e) {
+    ElMessage.error(await apiErrorDetail(e))
+  }
+}
+async function batchDelete() {
+  const ids = [...selectedFileIds.value]
+  if (!ids.length) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${ids.length} 个文件？磁盘文件与库内记录一并删除。`,
+      '批量删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  let ok = 0
+  for (const id of ids) {
+    try {
+      await kbApi.deleteDocument(props.kbId, id)
+      ok += 1
+    } catch {
+      /* 单个失败继续删其余 */
+    }
+  }
+  ElMessage.success(`已删除 ${ok}/${ids.length} 个文件`)
+  clearSelection()
+  await loadFiles()
+}
+
 // ── 拖拽移动 ──
 const dragId = ref<string | null>(null)
 const dragKind = ref<'file' | 'folder' | null>(null)
@@ -414,7 +503,7 @@ watch(() => props.kbId, reload)
 
 .fm__row {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) 80px 90px 100px 120px;
+  grid-template-columns: 36px minmax(240px, 1fr) 80px 90px 100px 120px;
   align-items: center; gap: 10px;
   padding: 8px 14px; border-bottom: 1px solid var(--kb-border-light);
   font-size: 13px; color: var(--kb-text-primary); user-select: none;
@@ -444,6 +533,28 @@ watch(() => props.kbId, reload)
 .fm__icon--doc { color: var(--kb-danger); }
 
 .fm__hint { font-size: 11.5px; color: var(--kb-text-tertiary); }
+
+.fm__col--check { display: flex; align-items: center; }
+.fm__batch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  background: var(--kb-accent-soft);
+  border: 1px solid var(--kb-accent);
+  border-radius: var(--kb-radius);
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.fm__batch-count {
+  font-weight: 600;
+  color: var(--kb-accent);
+  margin-right: 4px;
+}
+.fm__batch-warn {
+  font-size: 11.5px;
+  color: var(--kb-warning);
+}
 </style>
 
 <style>
