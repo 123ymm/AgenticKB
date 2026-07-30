@@ -74,14 +74,10 @@ class KbService:
         return kb
 
     async def update_kb(
-        self, *, kb_id: str, actor_id: str,
-        name: str | None = None, description: str | None = None,
-        visibility: str | None = None,
+        self, *, kb_id: str, actor_id: str, fields: dict[str, Any],
     ) -> dict[str, Any]:
         await self._assert_write(kb_id, actor_id)
-        updated = await self._db.update_kb(
-            kb_id, name=name, description=description, visibility=visibility,
-        )
+        updated = await self._db.update_kb(kb_id, fields=fields)
         if updated is None:
             raise NotFound(kb_id)
         return updated

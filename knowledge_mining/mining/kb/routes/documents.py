@@ -13,7 +13,8 @@ from pydantic import BaseModel
 
 from knowledge_mining.mining.infra.upload_config import UploadConfig
 from knowledge_mining.mining.kb.auth import current_user
-from knowledge_mining.mining.kb.deps import get_document_service, get_folder_service
+from knowledge_mining.mining.kb.db import KbDB
+from knowledge_mining.mining.kb.deps import get_document_service, get_folder_service, get_kb_db
 from knowledge_mining.mining.kb.routes.kbs import _map_error
 from knowledge_mining.mining.kb.services.document_service import DocumentService
 from knowledge_mining.mining.kb.services.folder_service import FolderService
@@ -35,6 +36,20 @@ class DocPatch(BaseModel):
 
 class DocMove(BaseModel):
     target_folder_id: str | None = None  # None = 移到根
+
+
+@router.get("/{doc_id}/knowledge")
+async def document_knowledge(
+    kb_id: str,
+    doc_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    kbdb: KbDB = Depends(get_kb_db),
+):
+    """文档当前知识（文件详情多 tab 用）：原始预览之外的切片/检索单元/实体提及。
+    KB 无 build 或文档未入选 → {"mined": False}，前端只显原始预览。"""
+    if not await kbdb.is_visible(kb_id=kb_id, user_id=user["id"]):
+        raise HTTPException(404, f"KB {kb_id} not found")
+    return await kbdb.get_document_knowledge(kb_id, doc_id)
 
 
 @router.post("", status_code=201)

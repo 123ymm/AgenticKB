@@ -22,23 +22,38 @@ DOMAIN = "cloud_core_network"
 
 @pytest.fixture(scope="module")
 def upload_root(tmp_path_factory):
+    """把上传根指到 tmp 目录（覆盖控制面服务配置缓存的 upload.root）。"""
+    from knowledge_mining.mining.infra.control_plane import override_upload_root
     p = tmp_path_factory.mktemp("kb_uploads_mine")
-    old = os.environ.get("UPLOAD_ROOT")
-    os.environ["UPLOAD_ROOT"] = str(p)
-    try:
-        yield p
-    finally:
-        if old is None:
-            os.environ.pop("UPLOAD_ROOT", None)
-        else:
-            os.environ["UPLOAD_ROOT"] = old
+    override_upload_root(str(p))
+    yield p
 
 
 async def _client(async_pool):
+    from types import SimpleNamespace
     from knowledge_mining.mining.infra.pg_config import MiningDbConfig
     app = FastAPI()
     app.state.pg_pool = async_pool
     app.state.db_config = MiningDbConfig()
+
+    # mine_kb 走 workflow 引擎，依赖 app.state.domain_pools + workflow_run_binder。
+    # 单测里 stub：async_pool 返回真实 async_pool（让 insert_queued_run 真写 mining_runs），
+    # binding resolve 返回带 manifest 的 fake binding（insert_queued_run 要求 binding 完整）。
+    async def _async_pool(_domain):
+        return async_pool
+
+    async def _resolve_binding(**_kwargs):
+        return SimpleNamespace(
+            workflow_id="wf-test", workflow_version=1,
+            workflow_version_id="wfv-test", graph_hash="graph-hash-test",
+            manifest={"compiled_manifest": "stub"},
+        )
+
+    app.state.domain_pools = SimpleNamespace(
+        async_pool=_async_pool, sync_pool=lambda _d: None,
+    )
+    app.state.workflow_run_binder = SimpleNamespace(resolve=_resolve_binding)
+
     app.include_router(kb_router)
     app.include_router(docs_router)
     app.include_router(kb_mining_router)
@@ -88,24 +103,39 @@ async def test_mine_owner_202_creates_run_row(async_pool, upload_root, monkeypat
     def _stub_run(*args, **kwargs):
         return None
     monkeypatch.setattr("knowledge_mining.mining.jobs.run.run", _stub_run)
+    # mine_kb 调 resolve_domain 取 channel；stub 掉避免依赖 domain registry
+    monkeypatch.setattr(
+        "knowledge_mining.mining.kb.routes.mining.resolve_domain",
+        lambda _d: {"default_channel": "prod"},
+    )
 
     async with await _client(async_pool) as c:
         h = {"X-KB-User": "alice"}
         kb_id = await _make_kb_with_upload(c, h, name="ok-mine")
+        # KB 必须先选挖掘范式（mine_kb 校验 mining_workflow_id 非空，否则 400）
+        pr = await c.patch(f"/api/kb/{kb_id}", json={"mining_workflow_id": "wf-test"}, headers=h)
+        assert pr.status_code == 200, pr.text
         r = await c.post(f"/api/kb/{kb_id}/mine", headers=h)
         assert r.status_code == 202, r.text
-        run_id = r.json()["run_id"]
-        assert r.json()["kb_id"] == kb_id
+        body = r.json()
+        run_id = body["run_id"]
+        assert body["kb_id"] == kb_id
+        assert body["execution_engine"] == "workflow"
 
         async with async_pool.connection() as conn:
             cur = await conn.execute(
-                "SELECT domain, metadata_json->>'kb_id' AS kb_id FROM mining_runs WHERE id = %s",
+                "SELECT domain, kb_id, execution_engine, metadata_json "
+                "FROM mining_runs WHERE id = %s",
                 [run_id],
             )
             row = await cur.fetchone()
         assert row is not None
         assert row["domain"] == DOMAIN
         assert row["kb_id"] == kb_id
+        assert row["execution_engine"] == "workflow"
+        meta = row["metadata_json"] or {}
+        assert meta.get("kb_id") == kb_id
+        assert meta.get("publish") is False  # KB 挖掘抑制 publish（B1 对冲）
 
         # 等 stub 线程释放域锁，避免污染后续测试
         await asyncio.sleep(0.3)

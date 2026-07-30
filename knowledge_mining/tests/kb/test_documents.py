@@ -18,17 +18,11 @@ DOMAIN = "cloud_core_network"
 
 @pytest.fixture(scope="module")
 def upload_root(tmp_path_factory):
-    """Redirect UPLOAD_ROOT to a tmp dir so tests don't write to the real upload root."""
+    """把上传根指到 tmp 目录（覆盖控制面服务配置缓存的 upload.root）。"""
+    from knowledge_mining.mining.infra.control_plane import override_upload_root
     p = tmp_path_factory.mktemp("kb_uploads")
-    old = os.environ.get("UPLOAD_ROOT")
-    os.environ["UPLOAD_ROOT"] = str(p)
-    try:
-        yield p
-    finally:
-        if old is None:
-            os.environ.pop("UPLOAD_ROOT", None)
-        else:
-            os.environ["UPLOAD_ROOT"] = old
+    override_upload_root(str(p))
+    yield p
 
 
 async def _client(async_pool):

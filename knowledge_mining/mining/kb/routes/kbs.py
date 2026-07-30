@@ -10,7 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from knowledge_mining.mining.kb.auth import current_user
-from knowledge_mining.mining.kb.deps import get_kb_service
+from knowledge_mining.mining.kb.db import KbDB
+from knowledge_mining.mining.kb.deps import get_kb_db, get_kb_service
 from knowledge_mining.mining.kb.services.kb_service import (
     Duplicate, Forbidden, InvalidDomain, KbService, NotFound,
 )
@@ -31,6 +32,7 @@ class KbUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     visibility: str | None = None
+    mining_workflow_id: str | None = None
 
 
 class MemberAdd(BaseModel):
@@ -100,11 +102,10 @@ async def update_kb(
     user: dict[str, Any] = Depends(current_user),
     svc: KbService = Depends(get_kb_service),
 ):
+    # model_fields_set 区分「未传」与「显式置 null」：未传的列不动，显式 null → 清空（SET NULL）。
+    fields = body.model_dump(exclude_unset=True)
     try:
-        return await svc.update_kb(
-            kb_id=kb_id, actor_id=user["id"],
-            name=body.name, description=body.description, visibility=body.visibility,
-        )
+        return await svc.update_kb(kb_id=kb_id, actor_id=user["id"], fields=fields)
     except (NotFound, Forbidden, InvalidDomain) as exc:
         raise _map_error(exc) from None
 
@@ -119,6 +120,18 @@ async def delete_kb(
         return await svc.soft_delete(kb_id=kb_id, actor_id=user["id"])
     except (NotFound, Forbidden) as exc:
         raise _map_error(exc) from None
+
+
+@router.get("/{kb_id}/runs")
+async def list_kb_runs(
+    kb_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    kbdb: KbDB = Depends(get_kb_db),
+):
+    """本 KB 的挖掘记录（KB「挖掘」tab 用，最新在前）。"""
+    if not await kbdb.is_visible(kb_id=kb_id, user_id=user["id"]):
+        raise HTTPException(404, f"KB {kb_id} not found")
+    return await kbdb.list_kb_runs(kb_id)
 
 
 # ----------------------------------------------------------------- members
