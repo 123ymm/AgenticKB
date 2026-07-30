@@ -279,30 +279,23 @@ BEGIN
                AND attributes.attnum = keys.attnum
               ORDER BY attributes.attname
           ) = ARRAY['document_key', 'kb_id']::name[]
+    ) AND NOT EXISTS (
+        -- 存在重复 (domain, document_key) 行时跳过——否则 ADD CONSTRAINT 会撞重复数据失败。
+        -- 此时身份唯一交给 KB 模式的 (kb_id, document_key) 或应用层。
+        SELECT 1 FROM asset_documents GROUP BY domain, document_key HAVING COUNT(*) > 1
     ) THEN
         ALTER TABLE asset_documents
             ADD CONSTRAINT uq_asset_documents_domain_document_key
             UNIQUE (domain, document_key);
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint AS constraints
-        WHERE constraints.conrelid = 'asset_document_snapshots'::regclass
-          AND constraints.contype = 'u'
-          AND ARRAY(
-              SELECT attributes.attname
-              FROM unnest(constraints.conkey) AS keys(attnum)
-              JOIN pg_attribute AS attributes
-                ON attributes.attrelid = constraints.conrelid
-               AND attributes.attnum = keys.attnum
-              ORDER BY attributes.attname
-          ) = ARRAY['domain', 'normalized_content_hash']::name[]
-    ) THEN
-        ALTER TABLE asset_document_snapshots
-            ADD CONSTRAINT uq_asset_document_snapshots_domain_hash
-            UNIQUE (domain, normalized_content_hash);
-    END IF;
+    -- snapshot 的 (domain, normalized_content_hash) 唯一约束【不在这里建】：
+    -- master 的 workflow 绑定允许「同内容 + 不同 workflow_graph_hash」的多快照（D-5），
+    -- 一个全局 UNIQUE(domain, normalized_content_hash) 会拒绝它，直接破坏该特性。
+    -- snapshot 的唯一性完全交给 004_asset_snapshot_workflow_binding 的两个 partial unique：
+    --   uq_asset_snapshot_legacy_content   WHERE workflow_graph_hash IS NULL
+    --   uq_asset_snapshot_workflow_content WHERE workflow_graph_hash IS NOT NULL
+    -- 004 的第一个 DO 块也会按列集 DROP 掉 002 建表时遗留的同形 legacy 约束，无需此处插手。
 
     IF NOT EXISTS (
         SELECT 1
