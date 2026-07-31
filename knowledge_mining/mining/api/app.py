@@ -113,6 +113,11 @@ async def lifespan(app: FastAPI):
         lambda: safe_config_fingerprint,
     )
 
+    # 预热挖掘管线重模块（jobs.run 拉起整条 parse/segment/embedding/...，冷导入实测约 2.5s）：
+    # 否则每个挖掘请求的后台线程首次冷导入会占 GIL，卡住 202 响应数秒——这正是"点挖掘要等
+    # 好几秒才弹进入队列"的根因。放启动期一次性付，请求期 import 命中缓存→瞬完。
+    import knowledge_mining.mining.jobs.run  # noqa: F401  (warm sys.modules cache)
+
     logger.info("Mining API started — PostgreSQL %s:%d/%s", cfg.pg_host, cfg.pg_port, cfg.pg_dbname)
 
     yield
