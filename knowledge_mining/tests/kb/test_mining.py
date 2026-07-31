@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 import pytest
@@ -138,4 +139,60 @@ async def test_mine_owner_202_creates_run_row(async_pool, upload_root, monkeypat
         assert meta.get("publish") is False  # KB 挖掘抑制 publish（B1 对冲）
 
         # 等 stub 线程释放域锁，避免污染后续测试
+        await asyncio.sleep(0.3)
+
+
+async def test_mine_force_redo_propagates_to_metadata(async_pool, upload_root, monkeypatch):
+    """档1：force_redo=True 经 body → mining_runs.metadata_json.force_redo 透传给 pipeline。"""
+    monkeypatch.setattr("knowledge_mining.mining.jobs.run.run", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "knowledge_mining.mining.kb.routes.mining.resolve_domain",
+        lambda _d: {"default_channel": "prod"},
+    )
+    async with await _client(async_pool) as c:
+        h = {"X-KB-User": "alice"}
+        kb_id = await _make_kb_with_upload(c, h, name="force-mine")
+        await c.patch(f"/api/kb/{kb_id}", json={"mining_workflow_id": "wf-test"}, headers=h)
+        r = await c.post(f"/api/kb/{kb_id}/mine", json={"force_redo": True}, headers=h)
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["force_redo"] is True
+        async with async_pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT metadata_json FROM mining_runs WHERE id = %s", [body["run_id"]]
+            )
+            meta = (await cur.fetchone())["metadata_json"] or {}
+        assert meta.get("force_redo") is True
+        assert meta.get("signature") == "wf-test:1:graph-hash-test"
+        await asyncio.sleep(0.3)
+
+
+async def test_mine_auto_force_redo_on_signature_change(async_pool, upload_root, monkeypatch):
+    """档2：上一条已完成 run 的范式签名与本次不同 → 自动 force_redo（无需用户显式指定）。"""
+    monkeypatch.setattr("knowledge_mining.mining.jobs.run.run", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "knowledge_mining.mining.kb.routes.mining.resolve_domain",
+        lambda _d: {"default_channel": "prod"},
+    )
+    async with await _client(async_pool) as c:
+        h = {"X-KB-User": "alice"}
+        kb_id = await _make_kb_with_upload(c, h, name="sig-mine")
+        await c.patch(f"/api/kb/{kb_id}", json={"mining_workflow_id": "wf-test"}, headers=h)
+        # 伪造一条已完成 run，签名与本次(stub: wf-test:1:graph-hash-test)不同
+        async with async_pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO mining_runs (id, kb_id, input_path, domain, channel, status, "
+                "current_stage, started_at, finished_at, execution_engine, metadata_json) "
+                "VALUES (%s, %s, %s, %s, 'prod', 'completed', 'done', %s, %s, 'workflow', %s::jsonb)",
+                (
+                    "run-old-sig", kb_id, f"/tmp/{kb_id}", DOMAIN,
+                    "2026-01-01T00:00:00+00:00", "2026-01-01T00:01:00+00:00",
+                    json.dumps({"kb_id": kb_id, "signature": "wf-test:1:OLDHASH"}),
+                ),
+            )
+        r = await c.post(f"/api/kb/{kb_id}/mine", headers=h)
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["auto_force_redo"] is True
+        assert body["force_redo"] is True
         await asyncio.sleep(0.3)

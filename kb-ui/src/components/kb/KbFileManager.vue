@@ -35,8 +35,15 @@
     <!-- 批量操作栏（多选文件后出现） -->
     <div v-if="selectedCount > 0" class="fm__batch">
       <span class="fm__batch-count">已选 {{ selectedCount }} 个文件</span>
+      <el-tooltip
+        v-if="canWrite"
+        content="忽略内容哈希缓存，对选中文档重跑 pipeline（含 LLM 阶段），重生已挖知识"
+        placement="top"
+      >
+        <el-checkbox v-if="canWrite" v-model="forceRedo" size="small">强制重挖</el-checkbox>
+      </el-tooltip>
       <el-button v-if="canWrite" size="small" type="primary" :disabled="!workflowId" @click="batchMine">
-        <el-icon class="el-icon--left"><Cpu /></el-icon>挖掘选中 ({{ selectedCount }})
+        <el-icon class="el-icon--left"><Cpu /></el-icon>{{ forceRedo ? '强制重挖选中' : '挖掘选中' }} ({{ selectedCount }})
       </el-button>
       <el-button v-if="canWrite" size="small" type="danger" plain @click="batchDelete">
         <el-icon class="el-icon--left"><Delete /></el-icon>删除选中
@@ -182,7 +189,7 @@ import type { KbDocument, KbFolder } from '@/types/kb'
 
 const NAME_CLICK_DELAY = 250 // 区分「单击进入」与「双击改名」
 
-const props = defineProps<{ kbId: string; canWrite: boolean; workflowId: string | null }>()
+const props = defineProps<{ kbId: string; canWrite: boolean; workflowId: string | null; active: boolean }>()
 const emit = defineEmits<{ (e: 'mine-queued'): void }>()
 const router = useRouter()
 const kbApi = useKbApi()
@@ -197,6 +204,7 @@ const hint = ref(true)
 
 // ── 多选 + 批量操作（挖掘触发统一到这里，挖掘 Tab 只展示任务流） ──
 const selectedFileIds = ref<string[]>([])
+const forceRedo = ref(false)
 const selectedCount = computed(() => selectedFileIds.value.length)
 const allFilesSelected = computed(
   () => files.value.length > 0 && files.value.every((f) => selectedFileIds.value.includes(f.id)),
@@ -355,8 +363,12 @@ async function batchMine() {
   const ids = [...selectedFileIds.value]
   if (!ids.length) return
   try {
-    const res = await kbApi.mineKb(props.kbId, ids)
-    ElMessage.success(`已排队挖掘 ${ids.length} 个文档（run ${res.run_id.slice(0, 8)}）`)
+    const res = await kbApi.mineKb(props.kbId, ids, forceRedo.value)
+    ElMessage.success(
+      `已排队${forceRedo.value ? '强制重挖' : '挖掘'} ${ids.length} 个文档（run ${res.run_id.slice(0, 8)}）` +
+        (res.auto_force_redo ? '（范式已变更，自动强制重挖）' : ''),
+    )
+    forceRedo.value = false
     clearSelection()
     emit('mine-queued') // 通知父组件切到挖掘 tab 并刷新任务列表
   } catch (e) {
@@ -481,6 +493,10 @@ function formatDate(t?: string | null): string {
 onMounted(reload)
 watch(() => currentFolderId.value, loadFiles)
 watch(() => props.kbId, reload)
+// 切回文件 Tab 时刷新：挖掘结束后文件状态（uploaded→mined 等）能即时看到
+watch(() => props.active, (now, prev) => {
+  if (now && !prev) reload()
+})
 </script>
 
 <style scoped>

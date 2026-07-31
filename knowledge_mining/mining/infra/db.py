@@ -843,6 +843,27 @@ class AssetCoreDB(_DB):
             fetch="rowcount",
         )
 
+    def clear_snapshot_derived_assets(self, document_snapshot_id: str) -> None:
+        """清空一个 snapshot 的全部派生资产，保留 snapshot 行本身与 document 身份。
+
+        用于 force_redo 重跑前清理：persist_document_assets 见 snapshot 已有切片就会跳过持久化、
+        且按 unit_key upsert 不会删除不再生成的旧单元（如 table_row）。先整体清空，重跑才干净。
+        依赖：asset_retrieval_embeddings 由 retrieval_unit_id ON DELETE CASCADE 随单元删；
+        asset_segment_entity_mentions 由 segment_id ON DELETE CASCADE 随切片删。
+        """
+        self._execute(
+            "DELETE FROM asset_retrieval_units WHERE document_snapshot_id = %s",
+            (document_snapshot_id,),
+        )
+        self._execute(
+            "DELETE FROM asset_raw_segment_relations WHERE document_snapshot_id = %s",
+            (document_snapshot_id,),
+        )
+        self._execute(
+            "DELETE FROM asset_raw_segments WHERE document_snapshot_id = %s",
+            (document_snapshot_id,),
+        )
+
     def get_retrieval_units_by_snapshot(self, document_snapshot_id: str) -> list[dict[str, Any]]:
         return self._fetchall(
             "SELECT * FROM asset_retrieval_units WHERE document_snapshot_id = %s",
