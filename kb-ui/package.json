@@ -4,9 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/sync-help.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/sync-help.mjs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
+    "pretest": "node scripts/sync-help.mjs",
     "test": "vitest run"
   },
   "dependencies": {
