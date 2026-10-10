@@ -42,6 +42,16 @@ describe('renderHelpMarkdown', () => {
     const html = renderHelpMarkdown('见第 15 章（MCP）；第 99 章不存在；见第 12–16 章区间')
     expect(html).toContain('href="/help/15"')
     expect(html).not.toContain('/help/99')
+    expect(html).not.toContain('/help/12') // 区间引用（第 12–16 章）不转链
+  })
+
+  it('代码块与行内代码里的章号不转链（12/33 章流程图回归）', () => {
+    const html = renderHelpMarkdown(
+      '见第 13 章。\n\n```text\n上传 → 第 13 章发起挖掘\n```\n\n行内 `第 02 章` 也不动',
+    )
+    expect((html.match(/\/help\/13/g) ?? []).length).toBe(1) // 只有散文那处成链
+    expect(html).toContain('第 13 章发起挖掘') // 围栏内保持原样
+    expect(html).toContain('<code>第 02 章</code>') // 行内代码保持原样
   })
 
   it('全书每一章均可渲染、非空且无脚本注入（冒烟）', async () => {

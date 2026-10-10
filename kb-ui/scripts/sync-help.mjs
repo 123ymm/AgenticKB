@@ -1,7 +1,9 @@
 // 把 docs/平台指南 的书页同步进 kb-ui：生成 src/help/content/*.md 与 src/help/helpManifest.ts。
 //
 // 铁律：
-//  - 真相源永远是仓库的 docs/平台指南/（repo 读者看全书）；本目录下的生成物不进 git。
+//  - 真相源永远是仓库的 docs/平台指南/（repo 读者看全书）。
+//  - 生成物随 git 提交（Docker 镜像构建上下文只 COPY kb-ui/ 且 .dockerignore 排除 docs/，
+//    不提交则镜像内 prebuild 必失败）；docs/ 在场时每次构建重新生成，保证不脏。
 //  - 本脚本挂在 npm 的 predev / prebuild / pretest 钩子上自动执行，无需手动调用。
 //  - 缺章、多章、编号越界、命名不规范 → 立即失败，让构建在第一时间发现书结构漂移。
 //
@@ -31,7 +33,18 @@ function fail(message) {
 }
 
 if (!fs.existsSync(srcDir)) {
-  fail(`找不到书目录 ${srcDir}（本脚本必须在仓库完整检出内运行）`)
+  // 构建上下文可能不含 docs/（Docker 镜像构建只 COPY kb-ui/，.dockerignore 排除 docs）。
+  // 生成物随 git 提交（src/help/content/ 与 helpManifest.ts），此时沿用生成物继续构建；
+  // 两者都没有才是真失败。docs/ 存在的环境（本地/CI 全检出）永远走正常同步，保证新鲜。
+  const hasGenerated =
+    fs.existsSync(manifestPath) &&
+    fs.existsSync(contentDir) &&
+    fs.readdirSync(contentDir).some((f) => f.endsWith('.md'))
+  if (hasGenerated) {
+    console.warn(`[sync-help] 书目录 ${srcDir} 不在构建上下文内，沿用已提交的 src/help/content/ 生成物`)
+    process.exit(0)
+  }
+  fail(`找不到书目录 ${srcDir}，也没有可沿用的生成物（完整检出后先跑一次 npm run build）`)
 }
 
 const files = fs.readdirSync(srcDir).filter((f) => f.endsWith('.md')).sort()

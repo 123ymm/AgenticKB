@@ -11,11 +11,27 @@ import { HELP_PARTS } from './helpManifest'
 
 const CHAPTER_IDS = new Set(HELP_PARTS.flatMap((p) => p.chapters.map((c) => c.id)))
 
-/** 章号引用（「第 15 章」）→ markdown 链接；书里所有引用都带空格，无空格形态一并兼容。 */
+/**
+ * 章号引用（「第 15 章」）→ markdown 链接；书里所有引用都带空格，无空格形态一并兼容。
+ * 只动散文：``` 围栏与行内 `code` 里的章号保持原样（书的流程图块内有「第 NN 章」字样，
+ * 误转会把链接语法当字面文本渲染进 <code>——12/33 章已踩中）。
+ */
 function linkChapterRefs(md: string): string {
-  return md.replace(/第\s?(\d{2})\s?章/g, (whole, id: string) =>
-    CHAPTER_IDS.has(id) ? `[${whole}](/help/${id})` : whole,
-  )
+  const replaceProse = (text: string) =>
+    text.replace(/第\s?(\d{2})\s?章/g, (whole, id: string) =>
+      CHAPTER_IDS.has(id) ? `[${whole}](/help/${id})` : whole,
+    )
+  return md
+    .split(/(```[\s\S]*?```)/g)
+    .map((segment) =>
+      segment.startsWith('```')
+        ? segment
+        : segment
+            .split(/(`[^`\n]*`)/g)
+            .map((piece) => (piece.startsWith('`') ? piece : replaceProse(piece)))
+            .join(''),
+    )
+    .join('')
 }
 
 export function renderHelpMarkdown(md: string): string {

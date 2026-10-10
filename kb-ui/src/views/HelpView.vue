@@ -59,7 +59,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { HELP_CHAPTER_COUNT, HELP_PARTS, type HelpChapter } from '@/help/helpManifest'
-import { helpContentCache, loadHelpRaw } from '@/help/helpContent'
+import { helpContentCache, helpContentVersion, loadHelpRaw } from '@/help/helpContent'
 import { renderHelpMarkdown } from '@/help/renderMarkdown'
 
 /** 全书平铺（按章号升序）——上一章/下一章与搜索都吃它。 */
@@ -87,6 +87,7 @@ const notFound = computed(() => currentId.value === '')
 async function loadChapter(id: string): Promise<void> {
   if (!id) return
   loading.value = true
+  html.value = '' // 先清空：侧栏高亮/pager 立即切到新章，旧章正文若残留会造成"标题B内容A"错位
   try {
     const chapter = allChapters.value.find((c) => c.id === id)
     if (!chapter) return
@@ -115,10 +116,11 @@ onMounted(() => {
   }
 })
 
-/** 关键词过滤：标题必匹配源；正文对已预取的内容匹配。 */
+/** 关键词过滤：标题必匹配源；正文对已预取的内容匹配（依赖版本号感知预取完成）。 */
 const visibleParts = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   if (!kw) return HELP_PARTS
+  void helpContentVersion.value // 建立依赖：预取推进时过滤结果自动刷新
   const hit = (ch: HelpChapter) => {
     if (ch.title.toLowerCase().includes(kw)) return true
     const raw = helpContentCache.get(ch.file)

@@ -23,6 +23,3 @@ dist-ssr
 *.sln
 *.sw?
 
-# 平台指南生成物（node scripts/sync-help.mjs 自动生成，真相源在 docs/平台指南/）
-src/help/content/
-src/help/helpManifest.ts
