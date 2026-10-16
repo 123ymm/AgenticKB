@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
-CURRENT_SCHEMA_CHECKSUM = "0552fa01f5ba579b26854ad64f7ac3d2d6ac3929847cc65a4540784bd27c6319"
+CURRENT_SCHEMA_CHECKSUM = "517a3b7d2dae25e227c82a315387a0c74a8773c9abfbb7bea2770a6f039bec33"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")
@@ -68,6 +68,12 @@ FORMAL_TABLES: frozenset[str] = frozenset({
     "operator_paradigm_version",
     "knowledge_access_records",
     "knowledge_access_record_payloads",
+    "kb_artifacts",
+    "kb_artifact_revisions",
+    "kb_artifact_members",
+    "kb_artifact_batches",
+    "kb_table_columns",
+    "kb_table_rows",
 })
 EXPECTED_FORMAL_TABLES = len(FORMAL_TABLES)
 EXPECTED_PHYSICAL_TABLES = EXPECTED_FORMAL_TABLES + 1
@@ -109,5 +115,5 @@ RETIRED_TABLES: tuple[str, ...] = (
 if len(RETIRED_TABLES) != len(set(RETIRED_TABLES)):  # pragma: no cover - import guard
     raise RuntimeError("RETIRED_TABLES contains duplicates")
 
-if EXPECTED_FORMAL_TABLES != 53:  # pragma: no cover - import guard
-    raise RuntimeError("FORMAL_TABLES must contain exactly 53 names")
+if EXPECTED_FORMAL_TABLES != 59:  # pragma: no cover - import guard
+    raise RuntimeError("FORMAL_TABLES must contain exactly 59 names")

@@ -150,6 +150,15 @@ _KNOWLEDGE_ACCESS_RECORD_PAYLOADS_DDL = (
     / "schemas"
     / "016_knowledge_access_record_payloads.sql"
 )
+# 61号表格知识制品 MVP：制品六张表（自包含、身份列无 FK，挂链尾即可；
+# 存量库同文版本化迁移=core/20261016_007_kb_artifacts）。
+_KB_ARTIFACTS_DDL = (
+    _REPO_ROOT
+    / "databases"
+    / "kb"
+    / "schemas"
+    / "017_kb_artifacts.sql"
+)
 # KB 硬删任务化（013）：status 加 deleting + kb_purge_tasks 进度表。
 _KB_PURGE_TASKS_DDL = (
     _REPO_ROOT / "databases" / "kb" / "schemas" / "013_kb_purge_tasks.sql"
@@ -261,6 +270,8 @@ def domain_schema_paths() -> tuple[Path, ...]:
         _MCP_KEYS_DDL,
         _KNOWLEDGE_ACCESS_RECORDS_DDL,
         _KNOWLEDGE_ACCESS_RECORD_PAYLOADS_DDL,
+        # 61号表格知识制品：六张自包含表，紧跟 016（链尾）。
+        _KB_ARTIFACTS_DDL,
     )
 
 
