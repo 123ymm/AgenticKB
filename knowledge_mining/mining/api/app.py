@@ -29,6 +29,7 @@ from knowledge_mining.mining.api.routes.retrieval_records import (
     router as retrieval_records_router,
 )
 from knowledge_mining.mining.kb.routes.kbs import router as kb_router
+from knowledge_mining.mining.kb.routes.artifacts import router as artifacts_router
 from knowledge_mining.mining.kb.routes.documents import router as kb_documents_router
 from knowledge_mining.mining.kb.routes.mining import router as kb_mining_router
 from knowledge_mining.mining.kb.routes.folders import router as kb_folders_router
@@ -280,6 +281,9 @@ def create_app() -> FastAPI:
     # 不与 /api/kb/<字面量> 静态路由冲突）。
     app.include_router(onenet_router)
     app.include_router(onenet_refs_router)
+    # 61号：表格知识制品 REST。静态前缀 /api/artifacts（先于 kb_router 的动态
+    # /api/kb/{kb_id} 注册，二者前缀不同无冲突，遵循静态先于动态惯例）。
+    app.include_router(artifacts_router)
     app.include_router(kb_router)
     app.include_router(kb_documents_router)
     app.include_router(kb_mining_router)

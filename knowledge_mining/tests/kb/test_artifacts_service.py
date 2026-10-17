@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -37,6 +38,10 @@ class FakeArtifactDB:
         self.columns: dict[str, list[dict]] = {}
         self.domain_admins: set[tuple[str, str]] = set()
         self.calls: list[str] = []
+        # 61号批次2b：导入向导 + 创建域门禁
+        self.batches: dict[str, list[dict]] = {}
+        self.domain_bindings: set[tuple[str, str]] = set()  # (user_id, domain)
+        self.site_admins: set[str] = set()
 
     def _touch(self, artifact_id: str) -> None:
         art = self.artifacts[artifact_id]
@@ -93,6 +98,34 @@ class FakeArtifactDB:
         self.rev0_rows.pop(artifact_id, None)
         self.revision_rows.pop(artifact_id, None)
         self.columns.pop(artifact_id, None)
+        self.batches.pop(artifact_id, None)
+
+    # ---- 创建域门禁 / 导入批次 -------------------------------------------
+
+    async def can_create_in_domain(self, user_id: str, domain_id: str) -> bool:
+        return (user_id, domain_id) in self.domain_bindings \
+            or user_id in self.site_admins
+
+    async def first_domain_for_user(self, user_id: str) -> str | None:
+        domains = sorted(d for (u, d) in self.domain_bindings if u == user_id)
+        return domains[0] if domains else None
+
+    async def create_batch(
+        self, artifact_id: str, *, channel: str, file_name: str,
+        sheet_name: str, row_count: int, created_by: str,
+    ) -> dict:
+        batch = {
+            "batch_id": f"bat_{uuid.uuid4().hex[:12]}",
+            "artifact_id": artifact_id, "channel": channel,
+            "file_name": file_name, "sheet_name": sheet_name,
+            "row_count": row_count, "created_by": created_by,
+            "created_at": NOW,
+        }
+        self.batches.setdefault(artifact_id, []).append(batch)
+        return dict(batch)
+
+    async def list_batches(self, artifact_id: str) -> list[dict]:
+        return [dict(b) for b in self.batches.get(artifact_id, [])]
 
     async def list_artifacts_for_user(self, user_id: str) -> list[dict]:
         out = []
@@ -213,17 +246,21 @@ class FakeArtifactDB:
         return [dict(c) for c in cols if c.get("status") != "dropped"]
 
     async def upsert_column(
-        self, artifact_id: str, column_id: str, **fields,
+        self, artifact_id: str, column_id: str, fields: dict,
     ) -> dict:
         cols = self.columns.setdefault(artifact_id, [])
         for col in cols:
             if col["column_id"] == column_id:
                 col.update(fields)
                 return dict(col)
-        row = {"column_id": column_id, "column_name": column_id,
-               "column_type": "text", "is_indexed": False,
-               "is_primary_key": False, "ordinal": len(cols), "status": "active"}
-        row.update(fields)
+        row = {"column_id": column_id,
+               "column_name": str(fields.get("column_name") or column_id),
+               "column_type": fields.get("column_type", "text"),
+               "enum_values": fields.get("enum_values"),
+               "is_indexed": bool(fields.get("is_indexed", False)),
+               "is_primary_key": False, "alias": fields.get("alias") or [],
+               "ordinal": int(fields.get("ordinal", len(cols))),
+               "status": "active"}
         cols.append(row)
         return dict(row)
 
@@ -233,12 +270,16 @@ class FakeArtifactDB:
                 col["status"] = "dropped"
                 col["is_primary_key"] = False
 
-    async def set_primary_key(self, artifact_id: str, column_ids: list[str]) -> None:
+    async def set_primary_key(
+        self, artifact_id: str, column_ids: list[str],
+    ) -> dict:
         self.calls.append("set_primary_key")
         if getattr(self, "pk_conflict", False):
             raise ArtifactRepoError("primary_key_conflict")
         for col in self.columns.get(artifact_id, []):
             col["is_primary_key"] = col["column_id"] in column_ids
+        return {"artifact_id": artifact_id, "primary_key": list(column_ids),
+                "rekeyed_rows": 0}
 
     async def replace_columns_for_artifact(
         self, artifact_id: str, columns: list[dict],
@@ -264,6 +305,9 @@ class FakeArtifactDB:
                 hit["data"] = dict(row["data"])
                 hit["provenance"] = list(hit.get("provenance", [])) + \
                     list(row.get("provenance", []))
+                # conflicts 与 ordinal 按 UPSERT 语义覆盖（对齐真实仓储）
+                hit["conflicts"] = dict(row.get("conflicts", {}))
+                hit["ordinal"] = row.get("ordinal", hit.get("ordinal", 0))
                 updated += 1
         return {"inserted": inserted, "updated": updated}
 

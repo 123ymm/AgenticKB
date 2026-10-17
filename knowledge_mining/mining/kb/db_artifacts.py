@@ -297,6 +297,36 @@ class ArtifactDB:
             )
             return await cur.fetchone() is not None
 
+    async def can_create_in_domain(self, user_id: str, domain_id: str) -> bool:
+        """创建资格（61号创建域门禁）：active site admin 全通；其余须有该域
+        user_domains 绑定（member / domain admin 任一即放行）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT 1 FROM kb_users u
+                   WHERE u.id = %(uid)s AND u.status = 'active'
+                     AND u.deleted_at IS NULL
+                     AND (u.site_role = 'admin'
+                          OR EXISTS (SELECT 1 FROM user_domains ud
+                                     WHERE ud.user_id = u.id
+                                       AND ud.domain = %(dom)s))""",
+                {"uid": user_id, "dom": domain_id},
+            )
+            return await cur.fetchone() is not None
+
+    async def first_domain_for_user(self, user_id: str) -> str | None:
+        """用户首个绑定域（创建向导 domain_id 缺省回落；确定性=字典序）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT ud.domain FROM user_domains ud
+                   JOIN kb_users u ON u.id = ud.user_id
+                   WHERE ud.user_id = %s AND u.status = 'active'
+                     AND u.deleted_at IS NULL
+                   ORDER BY ud.domain LIMIT 1""",
+                (user_id,),
+            )
+            row = await cur.fetchone()
+            return str(row["domain"]) if row else None
+
     # ------------------------------------------------------------ 生命周期
 
     async def publish(

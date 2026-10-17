@@ -1,0 +1,700 @@
+"""知识制品 REST 路由 —— /api/artifacts（61号 §十）。
+
+薄 handler + _map_error 错误翻译（NotFound→404 反探测 / Forbidden→403 /
+UsageNoteRequired→422 / PrimaryKeyConflict·StaleArtifact→409（带 code）/
+InvalidOperation→400 / ArtifactImportError→413·410·422）。业务与权限全部
+在 ArtifactService（见 services/artifact_service.py 权限矩阵注释）。
+
+Excel 三步向导（§六）：upload（multipart→202 预览 token）→ preview/{token}
+（TTL 失效 410）→ import（plan 支持两种形态：build_mapping 产物，或
+{sheet, header_row, column_ops} 原始 ops——后者由本层补跑 build_mapping，
+返回前含 missing_columns 校验）。
+"""
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    UploadFile,
+)
+from pydantic import BaseModel, Field
+
+from knowledge_mining.mining.kb.auth import current_user
+from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
+from knowledge_mining.mining.kb.deps import (
+    get_artifact_db,
+    get_artifact_import_service,
+    get_artifact_service,
+)
+from knowledge_mining.mining.kb.services.artifact_import_service import (
+    MAX_UPLOAD_BYTES,
+    ArtifactImportError,
+    ArtifactImportService,
+)
+from knowledge_mining.mining.kb.services.artifact_service import (
+    ArtifactError,
+    ArtifactForbidden,
+    ArtifactNotFound,
+    ArtifactService,
+    InvalidOperation,
+    PrimaryKeyConflict,
+    StaleArtifact,
+    UsageNoteRequired,
+)
+from knowledge_mining.mining.infra.domain_pack import (
+    get_default_domain,
+    resolve_domain,
+)
+
+router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
+
+#: multipart 开销预算（对齐 auth_guard 用户导入预检口径）。
+_UPLOAD_BODY_BUDGET = MAX_UPLOAD_BYTES + 256 * 1024
+
+
+# ----------------------------------------------------------------- models
+
+class ArtifactCreate(BaseModel):
+    title: str
+    description: str | None = None
+    domain_id: str | None = Field(default=None, max_length=128)
+
+
+class ArtifactMetaPatch(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    usage_note: str | None = None
+    expected_updated_at: str | None = None
+
+
+class PublishReq(BaseModel):
+    change_summary: str = ""
+    expected_updated_at: str | None = None
+
+
+class RevisionActionReq(BaseModel):
+    expected_updated_at: str | None = None
+
+
+class MemberAdd(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    role: str = Field(default="viewer", pattern="^(owner|editor|viewer)$")
+
+
+class MemberPatch(BaseModel):
+    role: str = Field(pattern="^(owner|editor|viewer)$")
+
+
+class ImportReq(BaseModel):
+    preview_token: str = Field(min_length=8, max_length=64)
+    plan: dict[str, Any]
+    conflict_policy: dict[str, Any] | str | None = None
+
+
+class ColumnAdd(BaseModel):
+    column_name: str = Field(min_length=1, max_length=200)
+    column_type: str = "text"
+    enum_values: list[str] | None = None
+    is_indexed: bool = False
+    expected_updated_at: str | None = None
+
+
+class ColumnPatch(BaseModel):
+    column_name: str | None = Field(default=None, min_length=1, max_length=200)
+    column_type: str | None = None
+    enum_values: list[str] | None = None
+    is_indexed: bool | None = None
+    status: str | None = Field(default=None, pattern="^dropped$")
+    expected_updated_at: str | None = None
+
+
+class PrimaryKeyReq(BaseModel):
+    column_ids: list[str] = Field(min_length=0)
+    expected_updated_at: str | None = None
+
+
+class CellPatch(BaseModel):
+    column: str = Field(min_length=1)
+    value: Any = None
+    expected_updated_at: str | None = None
+
+
+class BatchAssignReq(BaseModel):
+    column: str = Field(min_length=1)
+    value: Any = None
+    where: list[dict[str, Any]] = Field(default_factory=list)
+    expected_updated_at: str | None = None
+
+
+class RowDeleteReq(BaseModel):
+    expected_updated_at: str | None = None
+
+
+# ---------------------------------------------------------------- helpers
+
+def _map_error(exc: ArtifactError) -> HTTPException:
+    if isinstance(exc, ArtifactImportError):
+        if exc.code == "file_too_large":
+            return HTTPException(413, "file_too_large")
+        if exc.code == "preview_expired":
+            return HTTPException(410, "preview_expired")
+        return HTTPException(422, exc.code)
+    if isinstance(exc, ArtifactNotFound):
+        return HTTPException(404, str(exc) or "not_found")
+    if isinstance(exc, ArtifactForbidden):
+        return HTTPException(403, str(exc) or "forbidden")
+    if isinstance(exc, UsageNoteRequired):
+        return HTTPException(422, "usage_note_required: 发布前必须填写使用说明")
+    if isinstance(exc, PrimaryKeyConflict):
+        return HTTPException(409, {"code": "primary_key_conflict",
+                                   "message": str(exc)})
+    if isinstance(exc, StaleArtifact):
+        return HTTPException(409, {"code": "stale_artifact",
+                                   "message": "制品已被他人修改，请刷新后重试"})
+    if isinstance(exc, InvalidOperation):
+        return HTTPException(400, str(exc))
+    return HTTPException(500, str(exc))
+
+
+def _check_upload_size(request: Request, file: UploadFile) -> None:
+    """content-length 预检（对齐 api/auth_guard.py 用户导入口径）+ 实读兜底。"""
+    raw_length = request.headers.get("content-length", "").strip()
+    if raw_length:
+        try:
+            if int(raw_length) > _UPLOAD_BODY_BUDGET:
+                raise HTTPException(413, "file_too_large")
+        except ValueError:
+            raise HTTPException(400, "invalid_content_length") from None
+    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "file_too_large")
+
+
+async def _require_editor(
+    svc: ArtifactService, user: dict[str, Any], artifact_id: str,
+) -> None:
+    """向导三端点共用的设计态门禁（owner/editor；非成员 404 反探测）。"""
+    try:
+        await svc.list_columns(user=user, artifact_id=artifact_id)
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------------------ 制品 CRUD
+
+@router.post("", status_code=201)
+async def create_artifact(
+    body: ArtifactCreate,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+    adb: ArtifactDB = Depends(get_artifact_db),
+):
+    """domain_id 缺省回落用户首个绑定域；site admin 再回落 registry 默认域。
+    域门禁（批次2a 疑虑2）：site admin / 域 admin / 该域 user_domains 绑定。"""
+    user_id = str(user["id"])
+    domain_id = (body.domain_id or "").strip()
+    if not domain_id:
+        domain_id = await adb.first_domain_for_user(user_id)
+        if not domain_id and user.get("site_role") == "admin":
+            domain_id = get_default_domain()
+    if not domain_id:
+        raise HTTPException(422, "domain_id_required: 未提供 domain_id 且用户无绑定域")
+    try:
+        resolve_domain(domain_id)
+    except Exception as exc:
+        raise HTTPException(400, f"invalid_domain:{domain_id}") from exc
+    if not await adb.can_create_in_domain(user_id, domain_id):
+        raise HTTPException(403, f"domain_not_bound:{domain_id}")
+    try:
+        return await svc.create_artifact(
+            user=user, domain_id=domain_id, kind="table",
+            title=body.title, description=body.description,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.get("")
+async def list_artifacts(
+    domain_id: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return {"artifacts": await svc.list_artifacts(
+            user=user, domain_id=domain_id)}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.get("/{artifact_id}")
+async def get_artifact(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    """详情 = 元信息 + schema（设计态优先，viewer 回落发布快照）+ 采样行 5。"""
+    try:
+        artifact = await svc.get_artifact(user=user, artifact_id=artifact_id)
+        try:
+            schema = await svc.list_columns(user=user, artifact_id=artifact_id)
+            rows = await svc.list_rows(
+                user=user, artifact_id=artifact_id, draft=True, page=1, size=5)
+        except ArtifactForbidden:  # viewer：运行态视图
+            schema = await svc.list_columns(
+                user=user, artifact_id=artifact_id, runtime=True)
+            rows = await svc.list_rows(
+                user=user, artifact_id=artifact_id, page=1, size=5)
+        return {**artifact, "schema": schema, "sample_rows": rows["rows"]}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.patch("/{artifact_id}")
+async def update_artifact_meta(
+    artifact_id: str,
+    body: ArtifactMetaPatch,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    fields = body.model_dump(exclude_unset=True)
+    expected = fields.pop("expected_updated_at", None)
+    try:
+        return await svc.update_meta(
+            user=user, artifact_id=artifact_id, fields=fields,
+            expected_updated_at=expected,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.delete("/{artifact_id}")
+async def delete_artifact(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        await svc.delete_artifact(user=user, artifact_id=artifact_id)
+        return {"deleted": True}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+# -------------------------------------------------------------- 生命周期
+
+@router.post("/{artifact_id}/publish")
+async def publish_artifact(
+    artifact_id: str,
+    body: PublishReq,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.publish(
+            user=user, artifact_id=artifact_id,
+            change_summary=body.change_summary,
+            expected_updated_at=body.expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/rollback/{revision}")
+async def rollback_artifact(
+    artifact_id: str,
+    revision: int = Path(..., ge=1),
+    body: RevisionActionReq | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.rollback_to(
+            user=user, artifact_id=artifact_id, revision=revision,
+            expected_updated_at=(body or RevisionActionReq()).expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/deprecate")
+async def deprecate_artifact(
+    artifact_id: str,
+    body: RevisionActionReq | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.deprecate(
+            user=user, artifact_id=artifact_id,
+            expected_updated_at=(body or RevisionActionReq()).expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/republish")
+async def republish_artifact(
+    artifact_id: str,
+    body: RevisionActionReq | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.republish(
+            user=user, artifact_id=artifact_id,
+            expected_updated_at=(body or RevisionActionReq()).expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/discard")
+async def discard_draft(
+    artifact_id: str,
+    body: RevisionActionReq | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.discard_draft(
+            user=user, artifact_id=artifact_id,
+            expected_updated_at=(body or RevisionActionReq()).expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.get("/{artifact_id}/diff")
+async def diff_draft(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.diff_draft_vs_current(user=user, artifact_id=artifact_id)
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------------------------ 成员
+
+@router.get("/{artifact_id}/members")
+async def list_members(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return {"members": await svc.list_members(
+            user=user, artifact_id=artifact_id)}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/members", status_code=201)
+async def add_member(
+    artifact_id: str,
+    body: MemberAdd,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.upsert_member(
+            user=user, artifact_id=artifact_id,
+            member_user_id=body.user_id, role=body.role,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.patch("/{artifact_id}/members/{user_id}")
+async def update_member(
+    artifact_id: str,
+    user_id: str,
+    body: MemberPatch,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.upsert_member(
+            user=user, artifact_id=artifact_id,
+            member_user_id=user_id, role=body.role,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.delete("/{artifact_id}/members/{user_id}")
+async def remove_member(
+    artifact_id: str,
+    user_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        await svc.remove_member(
+            user=user, artifact_id=artifact_id, member_user_id=user_id)
+        return {"removed": True}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------------------ 导入向导
+
+@router.post("/{artifact_id}/table/upload", status_code=202)
+async def upload_table(
+    artifact_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+    imp: ArtifactImportService = Depends(get_artifact_import_service),
+):
+    await _require_editor(svc, user, artifact_id)
+    _check_upload_size(request, file)
+    filename = file.filename or ""
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(422, "unsupported_file_type: 仅支持 .xlsx")
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    try:
+        return imp.parse_upload(content, filename)
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.get("/{artifact_id}/table/preview/{preview_token}")
+async def get_table_preview(
+    artifact_id: str,
+    preview_token: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+    imp: ArtifactImportService = Depends(get_artifact_import_service),
+):
+    await _require_editor(svc, user, artifact_id)
+    try:
+        return imp.get_preview(preview_token)
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/table/import")
+async def import_table(
+    artifact_id: str,
+    body: ImportReq,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+    imp: ArtifactImportService = Depends(get_artifact_import_service),
+):
+    """plan 两种形态：build_mapping 产物（含 mode/columns），或原始
+    {sheet, header_row, column_ops}——后者本层补跑 build_mapping（含
+    missing_columns 与映射校验），再进 execute_import。"""
+    try:
+        plan = dict(body.plan)
+        if "column_ops" in plan:
+            target_columns = await svc.list_columns(
+                user=user, artifact_id=artifact_id)
+            plan = imp.build_mapping(
+                body.preview_token,
+                sheet=plan.get("sheet"),
+                header_row=int(plan.get("header_row") or 1),
+                column_ops=plan["column_ops"],
+                target_columns=target_columns,
+            )
+        return await imp.execute_import(
+            svc, user=user, artifact_id=artifact_id,
+            preview_token=body.preview_token, plan=plan,
+            conflict_policy=body.conflict_policy,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.get("/{artifact_id}/batches")
+async def list_import_batches(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+    adb: ArtifactDB = Depends(get_artifact_db),
+):
+    """导入批次历史（成员任一角色可读——导入账属制品元信息）。"""
+    try:
+        await svc.get_artifact(user=user, artifact_id=artifact_id)
+        return {"batches": await adb.list_batches(artifact_id)}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------------------ 列定义
+
+@router.get("/{artifact_id}/table/columns")
+async def list_columns(
+    artifact_id: str,
+    include_dropped: bool = Query(default=False),
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return {"columns": await svc.list_columns(
+            user=user, artifact_id=artifact_id, include_dropped=include_dropped)}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/table/columns", status_code=201)
+async def add_column(
+    artifact_id: str,
+    body: ColumnAdd,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    fields: dict[str, Any] = {
+        "column_name": body.column_name,
+        "column_type": body.column_type,
+        "is_indexed": body.is_indexed,
+    }
+    if body.enum_values is not None:
+        fields["enum_values"] = body.enum_values
+    try:
+        return await svc.upsert_column(
+            user=user, artifact_id=artifact_id,
+            column_id=f"c{uuid.uuid4().hex[:8]}",
+            fields=fields,
+            expected_updated_at=body.expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.patch("/{artifact_id}/table/columns/{column_id}")
+async def patch_column(
+    artifact_id: str,
+    column_id: str,
+    body: ColumnPatch,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    """改列名=写 alias（§7.1 旧名兼容读取）；status=dropped=软删。"""
+    fields = body.model_dump(exclude_unset=True)
+    expected = fields.pop("expected_updated_at", None)
+    status = fields.pop("status", None)
+    try:
+        if status == "dropped":
+            await svc.drop_column(
+                user=user, artifact_id=artifact_id, column_id=column_id,
+                expected_updated_at=expected)
+            return {"column_id": column_id, "status": "dropped"}
+        columns = await svc.list_columns(
+            user=user, artifact_id=artifact_id, include_dropped=True)
+        current = next(
+            (c for c in columns if c.get("column_id") == column_id), None)
+        if current is None:
+            raise HTTPException(404, f"column_not_found:{column_id}")
+        if "column_name" in fields and fields["column_name"] != current.get("column_name"):
+            alias = [str(a) for a in (current.get("alias") or [])]
+            old_name = str(current.get("column_name"))
+            if old_name and old_name not in alias:
+                alias.append(old_name)
+            fields["alias"] = alias
+        return await svc.upsert_column(
+            user=user, artifact_id=artifact_id, column_id=column_id,
+            fields=fields, expected_updated_at=expected,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/table/primary-key")
+async def set_primary_key(
+    artifact_id: str,
+    body: PrimaryKeyReq,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.set_primary_key(
+            user=user, artifact_id=artifact_id, column_ids=body.column_ids,
+            expected_updated_at=body.expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------------------------ 行
+
+@router.get("/{artifact_id}/table/rows")
+async def list_rows(
+    artifact_id: str,
+    draft: bool = Query(default=False),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=50, ge=1, le=500),
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.list_rows(
+            user=user, artifact_id=artifact_id,
+            draft=draft, page=page, size=size,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.patch("/{artifact_id}/table/rows/{row_key}")
+async def update_row_cell(
+    artifact_id: str,
+    row_key: str,
+    body: CellPatch,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.update_cell(
+            user=user, artifact_id=artifact_id, row_key=row_key,
+            column=body.column, value=body.value,
+            expected_updated_at=body.expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/table/rows/batch-assign")
+async def batch_assign(
+    artifact_id: str,
+    body: BatchAssignReq,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        return await svc.batch_assign(
+            user=user, artifact_id=artifact_id, column=body.column,
+            value=body.value, where_clauses=body.where,
+            expected_updated_at=body.expected_updated_at,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.delete("/{artifact_id}/table/rows/{row_key}")
+async def delete_row(
+    artifact_id: str,
+    row_key: str,
+    body: RowDeleteReq | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    try:
+        await svc.delete_row(
+            user=user, artifact_id=artifact_id, row_key=row_key,
+            expected_updated_at=(body or RowDeleteReq()).expected_updated_at,
+        )
+        return {"deleted": True}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
