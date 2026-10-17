@@ -384,6 +384,22 @@ async def diff_draft(
         raise _map_error(exc) from None
 
 
+@router.get("/{artifact_id}/revisions")
+async def list_revisions(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+    adb: ArtifactDB = Depends(get_artifact_db),
+):
+    """版本历史（成员任一角色可读——运行态信息，对齐 batches 端点口径）。"""
+    try:
+        await svc.get_artifact(user=user, artifact_id=artifact_id)
+        rows = await adb.list_revisions(artifact_id)
+        return {"revisions": [{**r, "artifact_id": artifact_id} for r in rows]}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
 # ------------------------------------------------------------------ 成员
 
 @router.get("/{artifact_id}/members")

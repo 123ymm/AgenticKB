@@ -195,6 +195,39 @@ async def test_wizard_upload_preview_import_publish_rows(env):
     assert r.status_code == 410
 
 
+# ------------------------------------------------------------- 版本历史
+
+async def test_list_revisions_runtime_readable(env):
+    """GET /revisions：运行态信息（viewer+ 可读），倒序，非成员 404 反探测。"""
+    aid = await _create_artifact(env)
+    env.db.rev0_rows[aid] = [{"row_key": "r1", "data": {"MOP": "NC-1"}}]
+    await env.client.patch(f"/api/artifacts/{aid}", json={"usage_note": "查责任域"})
+    r = await env.client.post(f"/api/artifacts/{aid}/publish", json={"change_summary": "首版"})
+    assert r.status_code == 200, r.text
+    env.db.rev0_rows[aid] = [{"row_key": "r2", "data": {"MOP": "NC-2"}}]
+    r = await env.client.post(f"/api/artifacts/{aid}/publish", json={"change_summary": "补充行"})
+    assert r.status_code == 200 and r.json()["revision"] == 2
+
+    r = await env.client.get(f"/api/artifacts/{aid}/revisions")
+    assert r.status_code == 200, r.text
+    revisions = r.json()["revisions"]
+    assert [rev["revision"] for rev in revisions] == [2, 1]  # revision 倒序
+    assert revisions[0]["artifact_id"] == aid
+    assert revisions[0]["row_count"] == 1
+    assert revisions[0]["change_summary"] == "补充行"
+    assert revisions[0]["published_by"] == "u-alice"
+    assert revisions[0]["published_at"]
+
+    # viewer 成员可读（运行态信息）；非成员 404 反探测
+    env.db.members[aid]["u-viewer"] = "viewer"
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{aid}/revisions")
+    assert r.status_code == 200
+    env.holder["user"] = _user("u-stranger")
+    r = await env.client.get(f"/api/artifacts/{aid}/revisions")
+    assert r.status_code == 404
+
+
 # ------------------------------------------------------------- 错误映射
 
 async def test_permission_404_and_403_mapping(env):

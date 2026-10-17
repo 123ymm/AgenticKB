@@ -35,6 +35,8 @@ class FakeArtifactDB:
         self.members: dict[str, dict[str, str]] = {}   # artifact_id -> user_id -> role
         self.rev0_rows: dict[str, list[dict]] = {}
         self.revision_rows: dict[str, dict[int, list[dict]]] = {}
+        # 版本历史（镜像真库 list_revisions：不含 artifact_id，由路由层补）
+        self.revisions: dict[str, list[dict]] = {}
         self.columns: dict[str, list[dict]] = {}
         self.domain_admins: set[tuple[str, str]] = set()
         self.calls: list[str] = []
@@ -97,6 +99,7 @@ class FakeArtifactDB:
         self.members.pop(artifact_id, None)
         self.rev0_rows.pop(artifact_id, None)
         self.revision_rows.pop(artifact_id, None)
+        self.revisions.pop(artifact_id, None)
         self.columns.pop(artifact_id, None)
         self.batches.pop(artifact_id, None)
 
@@ -174,12 +177,21 @@ class FakeArtifactDB:
         new_rev = art["current_revision"] + 1
         rows = self.rev0_rows.get(artifact_id, [])
         self.revision_rows.setdefault(artifact_id, {})[new_rev] = [dict(r) for r in rows]
+        self.revisions.setdefault(artifact_id, []).append({
+            "revision": new_rev, "row_count": len(rows),
+            "change_summary": change_summary, "published_by": published_by,
+            "published_at": NOW,
+        })
         self.rev0_rows[artifact_id] = []
         art.update(
             current_revision=new_rev, status="published", draft_open=False,
         )
         self._touch(artifact_id)
         return {"revision": new_rev, "row_count": len(rows)}
+
+    async def list_revisions(self, artifact_id: str) -> list[dict]:
+        # 与真库一致：revision 倒序
+        return [dict(r) for r in reversed(self.revisions.get(artifact_id, []))]
 
     async def get_revision(self, artifact_id: str, revision: int) -> dict | None:
         if revision not in self.revision_rows.get(artifact_id, {}):
