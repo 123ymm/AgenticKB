@@ -12,6 +12,12 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AppLayout: typeof import('./src/components/layout/AppLayout.vue')['default']
+    ArtifactImportWizard: typeof import('./src/components/artifacts/ArtifactImportWizard.vue')['default']
+    ArtifactMembersPanel: typeof import('./src/components/artifacts/ArtifactMembersPanel.vue')['default']
+    ArtifactPublishDialog: typeof import('./src/components/artifacts/ArtifactPublishDialog.vue')['default']
+    ArtifactRowsPanel: typeof import('./src/components/artifacts/ArtifactRowsPanel.vue')['default']
+    ArtifactSchemaPanel: typeof import('./src/components/artifacts/ArtifactSchemaPanel.vue')['default']
+    ArtifactVersionsPanel: typeof import('./src/components/artifacts/ArtifactVersionsPanel.vue')['default']
     BarChart: typeof import('./src/components/charts/BarChart.vue')['default']
     BrandAppearanceTab: typeof import('./src/components/settings/BrandAppearanceTab.vue')['default']
     DocumentStructureGraph: typeof import('./src/components/kb/DocumentStructureGraph.vue')['default']
@@ -30,6 +36,7 @@ declare module 'vue' {
     ElDescriptions: typeof import('element-plus/es')['ElDescriptions']
     ElDescriptionsItem: typeof import('element-plus/es')['ElDescriptionsItem']
     ElDialog: typeof import('element-plus/es')['ElDialog']
+    ElDivider: typeof import('element-plus/es')['ElDivider']
     ElDrawer: typeof import('element-plus/es')['ElDrawer']
     ElDropdown: typeof import('element-plus/es')['ElDropdown']
     ElDropdownItem: typeof import('element-plus/es')['ElDropdownItem']

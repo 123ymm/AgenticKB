@@ -8,7 +8,8 @@
 export type ArtifactKind = 'table' | 'wiki'
 export type ArtifactStatus = 'draft' | 'published' | 'deprecated'
 export type ArtifactRole = 'owner' | 'editor' | 'viewer'
-export type ArtifactColumnType = 'text' | 'enum' | 'number' | 'date' | 'boolean'
+/** 与后端 _VALID_COLUMN_TYPES 对齐（build_mapping / 索引 cast 同口径）。 */
+export type ArtifactColumnType = 'text' | 'enum' | 'int' | 'float' | 'date' | 'bool'
 
 /** 制品元信息（列表行 = 同形状 + my_role）。 */
 export interface Artifact {
@@ -24,7 +25,7 @@ export interface Artifact {
   draft_open: boolean
   created_at: string
   updated_at: string
-  /** 列表口径（list_artifacts_for_user）附带；详情不含。 */
+  /** 列表与详情口径附带（get_artifact 附 my_role；admin 归一 owner）。 */
   my_role?: ArtifactRole
 }
 
@@ -139,11 +140,20 @@ export interface ImportConflictPolicy {
   key_conflict?: 'block' | 'keep_first'
 }
 
+/** import 执行报告（execute_import 返回体）。 */
 export interface ImportReport {
+  artifact_id?: string
+  mode?: 'create' | 'append' | string
   batch_id?: string
+  sheet?: string
+  row_count?: number
   inserted?: number
   updated?: number
-  skipped?: number
-  columns?: ArtifactColumn[]
+  type_errors?: number
+  key_conflicts?: number
+  /** 冲突样例（≤20 条）：{row_index, row_key, column, message}。 */
+  conflicts_sample?: Array<Record<string, unknown>>
+  /** 追加模式 schema 有文件无（该批置 null）的列。 */
+  missing_columns?: Array<{ column_id: string; column_name: string }>
   [key: string]: unknown
 }

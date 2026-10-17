@@ -56,7 +56,8 @@ export interface ColumnPatchRequest {
 export interface BatchAssignRequest {
   column: string
   value: unknown
-  where: Array<{ column: string; op: string; value: unknown }>
+  /** is_null / not_null 条件不带 value。 */
+  where: Array<{ column: string; op: string; value?: unknown }>
   expected_updated_at?: string
 }
 

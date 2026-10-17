@@ -18,7 +18,7 @@
           draft 开放中
         </el-tag>
       </div>
-      <div v-if="artifact" class="artifact-detail__actions">
+      <div v-if="artifact && canWrite" class="artifact-detail__actions">
         <el-button type="primary" data-test="open-publish" @click="publishVisible = true">发布</el-button>
         <el-button v-if="artifact.status === 'published'" @click="deprecateArtifact">停用</el-button>
         <el-button v-if="artifact.status === 'deprecated'" @click="republishArtifact">恢复</el-button>
@@ -41,26 +41,34 @@
     </div>
 
     <el-tabs v-if="artifact" v-model="activeTab" class="artifact-detail__tabs">
-      <!-- ── 设计态：批次4b 填充（导入向导 / 列定义 / 行编辑三面板）── -->
+      <!-- ── 设计态：导入向导 / 列定义 / 行编辑三面板（owner+editor；viewer 无设计态）── -->
       <el-tab-pane label="设计态" name="design">
-        <!--
-          下一棒（61号批次4b）子组件 props 接口约定：
-          <ArtifactImportWizard :artifact-id="artifactId" :active="activeTab === 'design'"
-                                @imported="onDesignChanged" />
-            — 三步向导（上传 xlsx → 预览/列映射 → 导入），emit('imported', ImportReport)
-          <ArtifactSchemaPanel :artifact-id="artifactId" :can-write="canWrite"
-                               :columns="artifact.schema" @changed="reload" />
-            — 列定义（加列/改列/主键/软删），emit('changed')
-          <ArtifactRowsPanel :artifact-id="artifactId" :can-write="canWrite"
-                             :columns="artifact.schema" @changed="reload" />
-            — draft 行编辑（单格/批量赋值/删行），emit('changed')
-          canWrite = my_role ∈ {owner, editor}（my_role 需从列表页路由参数或 members 面板带入）。
-        -->
-        <EmptyState text="导入向导 / 列定义 / 数据编辑将在下一批接入（批次4b）">
-          <template #action>
-            <el-button disabled>上传 Excel</el-button>
-          </template>
-        </EmptyState>
+        <template v-if="canWrite">
+          <ArtifactImportWizard
+            :artifact-id="artifactId"
+            :active="activeTab === 'design'"
+            @imported="onDesignChanged"
+          />
+          <el-divider content-position="left">列定义</el-divider>
+          <ArtifactSchemaPanel
+            :artifact-id="artifactId"
+            :can-write="canWrite"
+            :columns="artifact.schema"
+            :expected-updated-at="artifact.updated_at"
+            @changed="refreshAfterMutation"
+          />
+          <el-divider content-position="left">数据编辑</el-divider>
+          <ArtifactRowsPanel
+            ref="rowsPanel"
+            :artifact-id="artifactId"
+            :can-write="canWrite"
+            :columns="artifact.schema"
+            :expected-updated-at="artifact.updated_at"
+            :draft-open="artifact.draft_open"
+            @changed="reload"
+          />
+        </template>
+        <EmptyState v-else text="设计态仅 owner / editor 可见（你当前是 viewer——请看运行态）" />
       </el-tab-pane>
 
       <!-- ── 运行态：说明卡 + 只读行表格（本棒可用）── -->
@@ -107,35 +115,25 @@
         />
       </el-tab-pane>
 
-      <!-- ── 成员：批次4b 填充（ArtifactMembersPanel）── -->
-      <el-tab-pane label="成员" name="members">
-        <!--
-          下一棒 props 接口约定：
-          <ArtifactMembersPanel :artifact-id="artifactId" :can-write="canWrite" @changed="reload" />
-            — 成员增删改（owner/editor/viewer），emit('changed')
-        -->
-        <EmptyState text="成员管理将在下一批接入（批次4b）" />
+      <!-- ── 成员：成员管理仅 owner（后端 ROLE_OWNER_ONLY）── -->
+      <el-tab-pane label="成员" name="members" lazy>
+        <ArtifactMembersPanel
+          :artifact-id="artifactId"
+          :can-manage="isOwner"
+          @changed="reload"
+        />
       </el-tab-pane>
 
-      <!-- ── 版本：revisions 列表（本棒可用；回滚在批次4b 面板内做）── -->
-      <el-tab-pane label="版本" name="versions">
-        <el-table v-loading="revisionsLoading" :data="revisions" size="small">
-          <el-table-column label="版本" width="80">
-            <template #default="{ row }">
-              r{{ row.revision }}
-              <el-tag v-if="artifact && row.revision === artifact.current_revision" size="small" type="success">当前</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="row_count" label="行数" width="90" />
-          <el-table-column prop="change_summary" label="变更摘要" min-width="200" show-overflow-tooltip />
-          <el-table-column prop="published_by" label="发布人" width="130" />
-          <el-table-column label="发布时间" width="170">
-            <template #default="{ row }">{{ formatTime(row.published_at) }}</template>
-          </el-table-column>
-          <template #empty>
-            <EmptyState text="尚未发布过版本" />
-          </template>
-        </el-table>
+      <!-- ── 版本：revisions 列表 + 回滚（面板内）── -->
+      <el-tab-pane label="版本" name="versions" lazy>
+        <ArtifactVersionsPanel
+          ref="versionsPanel"
+          :artifact-id="artifactId"
+          :can-write="canWrite"
+          :current-revision="artifact.current_revision"
+          :expected-updated-at="artifact.updated_at"
+          @changed="refreshAfterMutation"
+        />
       </el-tab-pane>
     </el-tabs>
 
@@ -163,24 +161,15 @@
       </template>
     </el-dialog>
 
-    <!-- 发布占位 dialog：diff 预览与确认在批次4b（Task 12）填充 -->
-    <el-dialog v-model="publishVisible" title="发布制品" width="560px">
-      <el-alert
-        type="info"
-        :closable="false"
-        title="发布 diff 预览与确认将在下一批接入（批次4b）"
-        description="届时此处先展示 draft vs current 的行级/列级差异（新增/删除/修改计数），再确认 change_summary 后调用 POST /publish。"
-      />
-      <el-form label-width="80px" class="artifact-detail__publish-form">
-        <el-form-item label="变更摘要">
-          <el-input v-model="publishSummary" type="textarea" :rows="2" placeholder="本次发布改了什么" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="publishVisible = false">取消</el-button>
-        <el-button type="primary" disabled>确认发布（下一批开放）</el-button>
-      </template>
-    </el-dialog>
+    <!-- 发布：diff 三段预览 + usage_note 门禁 + change_summary（Task 12） -->
+    <ArtifactPublishDialog
+      v-model="publishVisible"
+      :artifact-id="artifactId"
+      :expected-updated-at="artifact?.updated_at"
+      :usage-note="artifact?.usage_note || ''"
+      @published="onPublished"
+      @changed="reload"
+    />
   </div>
 </template>
 
@@ -191,7 +180,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
-import type { ArtifactColumn, ArtifactDetail, ArtifactRow, RevisionInfo } from '@/types/artifacts'
+import ArtifactImportWizard from '@/components/artifacts/ArtifactImportWizard.vue'
+import ArtifactSchemaPanel from '@/components/artifacts/ArtifactSchemaPanel.vue'
+import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
+import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
+import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.vue'
+import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
+import type { ArtifactColumn, ArtifactDetail, ArtifactRow, ImportReport, PublishResult } from '@/types/artifacts'
 
 const props = defineProps<{ artifactId: string }>()
 
@@ -210,19 +205,22 @@ const rowsPageSize = 20
 const rowsLoading = ref(false)
 const rowsLoaded = ref(false)
 
-// 版本历史（revisions 倒序）
-const revisions = ref<RevisionInfo[]>([])
-const revisionsLoading = ref(false)
-const revisionsLoaded = ref(false)
+// 版本面板（发布后命令式刷新 revisions）+ 行面板（跨面板变更后刷新行）
+const versionsPanel = ref<InstanceType<typeof ArtifactVersionsPanel> | null>(null)
+const rowsPanel = ref<InstanceType<typeof ArtifactRowsPanel> | null>(null)
 
 // 元信息编辑
 const metaVisible = ref(false)
 const metaSaving = ref(false)
 const metaForm = ref({ title: '', description: '', usage_note: '' })
 
-// 发布占位
+// 发布
 const publishVisible = ref(false)
-const publishSummary = ref('')
+
+/** canWrite = my_role ∈ {owner, editor}（详情响应附带；admin 后端归一 owner）。 */
+const canWrite = computed(() => artifact.value?.my_role === 'owner' || artifact.value?.my_role === 'editor')
+/** 成员管理仅 owner（后端 ROLE_OWNER_ONLY）。 */
+const isOwner = computed(() => artifact.value?.my_role === 'owner')
 
 /** 只读行列 = 详情 schema（viewer 已由后端回落到发布快照列）。 */
 const runtimeColumns = computed<ArtifactColumn[]>(() => artifact.value?.schema ?? [])
@@ -238,6 +236,24 @@ async function reload() {
   } finally {
     loading.value = false
   }
+}
+
+/** 跨面板变更（导入/列变更/回滚/发布）后：重载详情（乐观锁令牌+schema）并刷新行面板。 */
+async function refreshAfterMutation() {
+  await reload()
+  rowsPanel.value?.loadRows()
+}
+
+/** 导入向导回报：schema/行数都变了——重载详情并刷新行编辑面板。 */
+async function onDesignChanged(_report: ImportReport) {
+  await refreshAfterMutation()
+}
+
+/** 发布成功：详情 + 运行态 + 行面板 + 版本面板刷新。 */
+async function onPublished(_result: PublishResult) {
+  await refreshAfterMutation()
+  if (rowsLoaded.value) await loadRuntimeRows()
+  versionsPanel.value?.loadRevisions()
 }
 
 async function loadRuntimeRows() {
@@ -256,22 +272,9 @@ async function loadRuntimeRows() {
   }
 }
 
-async function loadRevisions() {
-  revisionsLoading.value = true
-  try {
-    revisions.value = await api.listRevisions(props.artifactId)
-    revisionsLoaded.value = true
-  } catch (error) {
-    ElMessage.error(`加载版本历史失败：${await apiErrorDetail(error)}`)
-  } finally {
-    revisionsLoading.value = false
-  }
-}
-
-// tab 首次切入再拉数据（运行态/版本懒加载）
+// tab 首次切入再拉数据（运行态懒加载；成员/版本面板走 el-tab-pane lazy 自加载）
 watch(activeTab, (tab) => {
   if (tab === 'runtime' && !rowsLoaded.value) loadRuntimeRows()
-  if (tab === 'versions' && !revisionsLoaded.value) loadRevisions()
 })
 
 function onRowsPageChange(page: number) {
@@ -326,7 +329,7 @@ async function lifecycleAction(fn: () => Promise<unknown>, confirmText: string) 
     ElMessage.success('操作成功')
     await reload()
     if (rowsLoaded.value) await loadRuntimeRows()
-    if (revisionsLoaded.value) await loadRevisions()
+    versionsPanel.value?.loadRevisions()
   } catch (error) {
     ElMessage.error(await apiErrorDetail(error))
   }
@@ -374,10 +377,6 @@ function displayValue(value: unknown): string {
   return String(value)
 }
 
-function formatTime(value: string | null): string {
-  return value ? value.replace('T', ' ').slice(0, 19) : '—'
-}
-
 onMounted(reload)
 </script>
 
@@ -393,5 +392,4 @@ onMounted(reload)
 .artifact-detail__desc-card { flex: 1; max-width: 720px; }
 .artifact-detail__usage-missing { color: var(--el-color-warning); }
 .artifact-detail__pager { margin-top: 12px; justify-content: flex-end; }
-.artifact-detail__publish-form { margin-top: 12px; }
 </style>

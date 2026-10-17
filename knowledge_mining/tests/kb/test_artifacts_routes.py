@@ -105,6 +105,8 @@ async def test_create_list_detail_patch_delete(env):
     assert r.status_code == 200
     assert r.json()["title"] == "MOP 责任域表"
     assert r.json()["schema"] == []
+    # 批次4b：详情附 my_role（创建者 owner 兜底）——前端 canWrite 判定口径
+    assert r.json()["my_role"] == "owner"
 
     r = await env.client.patch(
         f"/api/artifacts/{aid}",

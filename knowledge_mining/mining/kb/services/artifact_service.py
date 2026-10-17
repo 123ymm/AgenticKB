@@ -189,10 +189,13 @@ class ArtifactService:
     async def get_artifact(
         self, *, user: dict[str, Any], artifact_id: str,
     ) -> dict[str, Any]:
-        artifact, _ = await self._assert_role(
+        """详情附 my_role（批次4b 遗留修复）：admin/domain_admin 旁路归一为
+        owner（前端 canWrite = my_role ∈ {owner, editor} 判定口径）。"""
+        artifact, role = await self._assert_role(
             user, artifact_id, *ROLE_RUNTIME_READ,
         )
-        return artifact
+        my_role = "owner" if role in ("admin", "domain_admin") else role
+        return {**artifact, "my_role": my_role}
 
     async def update_meta(
         self, *, user: dict[str, Any], artifact_id: str,
