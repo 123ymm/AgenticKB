@@ -81,6 +81,7 @@ describe('artifacts API', () => {
     await api.setPrimaryKey('a1', ['c1'])
     await api.listRows('a1', { draft: true, page: 2, size: 20 })
     await api.updateCell('a1', 'NC-1', { column: 'L1分类', value: '数据业务' })
+    await api.insertRow('a1', { data: { MOP: 'NC-2' } })
     await api.batchAssign('a1', { column: 'L1分类', value: 'x', where: [] })
     await api.deleteRow('a1', 'NC-1')
 
@@ -108,6 +109,7 @@ describe('artifacts API', () => {
       'post /api/artifacts/a1/table/primary-key',
       'get /api/artifacts/a1/table/rows',
       'patch /api/artifacts/a1/table/rows/NC-1',
+      'post /api/artifacts/a1/table/rows',
       'post /api/artifacts/a1/table/rows/batch-assign',
       'delete /api/artifacts/a1/table/rows/NC-1',
     ])

@@ -4,6 +4,13 @@
 set_primary_key 重算与冲突 / 表达式索引生成等机制级断言。本机无 PG 时整个
 模块在收集期跳过（与 KB_RUN_POSTGRES_ACCEPTANCE 验收门同款门槛，跑法见
 tests/conftest.py 的 control_pool/domain_pool 注释）。
+
+对抗审查修复（61号 21项）后断言已对齐实现语义：rollback 拨回 > current 的
+历史版放行（数据不动）、set_primary_key 按 column_name 重算键、diff 干净态
+（draft_open=FALSE 且 current>0）零差异投影、publish 无待发布变更拒绝
+（no_pending_changes）。本模块真库跑绿 = 部署前预演项（KB_RUN_POSTGRES_
+ACCEPTANCE=1）；本地静态守卫（占位符计数等非门控回归）见
+test_artifacts_service.py 尾部。
 """
 from __future__ import annotations
 
@@ -151,6 +158,14 @@ async def test_publish_freezes_rev_clears_draft_and_builds_indexes(async_pool) -
     assert art["draft_open"] is False
     assert await db.count_rows(aid, 0) == 0            # draft 清空
     assert await db.count_rows(aid, 1) == 3
+
+    # 干净态（draft 关闭且 current>0）：再发布拒绝 + diff 零差异投影（修复③）
+    with pytest.raises(ArtifactError, match="no_pending_changes"):
+        await db.publish(aid, "again", owner["id"])
+    assert await db.diff_draft_vs_current(aid) == {
+        "added": [], "removed": [], "changed": [],
+        "added_count": 0, "removed_count": 0, "changed_count": 0,
+    }
 
     revision = await db.get_revision(aid, 1)
     assert revision is not None and revision["row_count"] == 3
@@ -338,9 +353,11 @@ async def test_rollback_keeps_history_and_republish_numbers_beyond_max(async_poo
     assert await db.count_rows(aid, 1) == 2
     assert await db.count_rows(aid, 2) == 1          # 历史仍留档
 
-    # 非法回滚
-    with pytest.raises(ArtifactError, match="invalid_revision"):
-        await db.rollback_to(aid, 2)                  # > current
+    # 拨回 rev2（> current 的历史版）：数据不动语义下放行（对抗审查修复④）
+    rolled = await db.rollback_to(aid, 2)
+    assert rolled["current_revision"] == 2
+    await db.rollback_to(aid, 1)                      # 回到低位继续用例
+    # 非法回滚：仅剩「版本行不存在」判据
     with pytest.raises(ArtifactError, match="invalid_revision"):
         await db.rollback_to(aid, 99)                 # 无版本行
 

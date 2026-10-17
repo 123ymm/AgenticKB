@@ -15,7 +15,7 @@ user 对象形态 = auth.current_user 返回的 kb_users 行（id / site_role）
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from knowledge_mining.mining.kb.db_artifacts import ArtifactError as ArtifactRepoError
@@ -60,6 +60,10 @@ class StaleArtifact(ArtifactError):
     """409——乐观锁失配（expected_updated_at ≠ 库内 updated_at）。"""
 
 
+class NoPendingChanges(ArtifactError):
+    """409——干净态发布（draft_open=FALSE 且 current>0，无待发布变更）。"""
+
+
 class InvalidOperation(ArtifactError):
     """400——状态机/参数非法（非法角色、行不存在、非法 revision 等）。"""
 
@@ -69,6 +73,7 @@ _REPO_CODE_TO_ERROR: dict[str, type[ArtifactError]] = {
     "usage_note_required": UsageNoteRequired,
     "primary_key_conflict": PrimaryKeyConflict,
     "artifact_not_found": ArtifactNotFound,
+    "no_pending_changes": NoPendingChanges,
 }
 
 
@@ -146,14 +151,52 @@ def _try_float(value: Any) -> float | None:
     return None
 
 
+def _is_formula(value: Any) -> bool:
+    """公式注入防御（对抗审查修复⑩，与 55号 user_import_service 同口径）：
+    以 ``= + - @`` 开头的文本一律拒绝。定义在本模块、artifact_import_service
+    反向 import——单向依赖（import→service），避免循环导入。"""
+    return isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@"))
+
+
 def _cast_cell(value: Any, column_type: str) -> tuple[bool, Any]:
-    """单格写入的数值类型校验（§7.2）：仅 int/float 设卡，其余类型不校验。
-    空白串与导入 _cast_value 同口径=合法置空。返回 (ok, casted)；
-    ok=False 即类型错误（置 null + conflicts 标记）。"""
-    if isinstance(value, str) and not value.strip():
+    """单格写入的类型校验（§7.2 + 对抗审查修复⑫）：int/float/date/bool 设卡
+    （date=fromisoformat 可解、bool=严格 true/false/1/0，与导入 _cast_value
+    同源）；text/enum 不校验。空白串=合法置空。返回 (ok, casted)；
+    ok=False 即类型错误（update_cell 置 null + conflicts 标记 /
+    batch_assign strict 400）。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
         return True, None
-    casted = _try_int(value) if column_type == "int" else _try_float(value)
-    return casted is not None, casted
+    if column_type == "int":
+        casted = _try_int(value)
+        return casted is not None, casted
+    if column_type == "float":
+        casted = _try_float(value)
+        return casted is not None, casted
+    if column_type == "date":
+        if isinstance(value, datetime):
+            return True, value.date().isoformat()
+        if isinstance(value, date):
+            return True, value.isoformat()
+        if isinstance(value, str):
+            try:
+                return True, datetime.fromisoformat(value.strip()).date().isoformat()
+            except ValueError:
+                return False, value
+        return False, value
+    if column_type == "bool":
+        if isinstance(value, bool):
+            return True, value
+        if isinstance(value, int) and value in (0, 1):
+            return True, bool(value)
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return True, value.strip().lower() == "true"
+        return False, value
+    # text / enum：datetime 归一 ISO；字符串 strip；数值/布尔原样
+    if isinstance(value, (datetime, date)):
+        return True, value.isoformat()
+    if isinstance(value, str):
+        return True, value.strip()
+    return True, value
 
 
 # ----------------------------------------------------------------- service
@@ -278,9 +321,29 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str,
         member_user_id: str, role: str,
     ) -> dict[str, Any]:
-        await self._assert_role(user, artifact_id, *ROLE_OWNER_ONLY)
+        """成员治理（对抗审查修复⑪）：①目标用户必须在 kb_users 且 active 且
+        未软删（查库为准，不存在/非 active → 400）；②last-owner 保护——目标行
+        现为 owner、制品 owner 数 ≤1 且新角色非 owner → 403（owner 兜底计数
+        含 owner_user_id 不落 members 行的形态）。"""
+        artifact, _ = await self._assert_role(user, artifact_id, *ROLE_OWNER_ONLY)
         if role not in ("owner", "editor", "viewer"):
             raise InvalidOperation("invalid_member_role")
+        status = await self._db.get_user_status(member_user_id)
+        if status != "active":
+            raise InvalidOperation(f"invalid_member_user:{member_user_id}")
+        members = await self._db.list_members(artifact_id)
+        target = next(
+            (m for m in members if str(m.get("user_id")) == str(member_user_id)),
+            None,
+        )
+        if target is not None and str(target.get("role")) == "owner" \
+                and role != "owner":
+            owner_ids = {
+                str(m["user_id"]) for m in members if m.get("role") == "owner"
+            }
+            owner_ids.add(str(artifact.get("owner_user_id")))
+            if len(owner_ids) <= 1:
+                raise ArtifactForbidden("last_owner")
         try:
             return await self._db.upsert_member(
                 artifact_id, member_user_id, role,
@@ -423,11 +486,32 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str, column_id: str,
         fields: dict[str, Any], expected_updated_at: Any = None,
     ) -> dict[str, Any]:
+        """PATCH 式列变更 + active 列名唯一校验（对抗审查修复⑳，DB 部分唯一
+        索引兜底）：改名/新建撞既有 active 列名 → 400。dropped 列不占名。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
+        new_name = fields.get("column_name")
+        if new_name is not None:
+            self._assert_name_not_taken(
+                await self._db.list_columns(artifact_id),
+                str(new_name), exclude_column_id=column_id,
+            )
         try:
             return await self._db.upsert_column(artifact_id, column_id, fields)
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
+
+    @staticmethod
+    def _assert_name_not_taken(
+        active_columns: list[dict[str, Any]], name: str,
+        *, exclude_column_id: str | None = None,
+    ) -> None:
+        clash = [
+            c for c in active_columns
+            if str(c.get("column_name")) == name
+            and str(c.get("column_id")) != str(exclude_column_id)
+        ]
+        if clash:
+            raise InvalidOperation(f"duplicate_column_name:{name}")
 
     async def drop_column(
         self, *, user: dict[str, Any], artifact_id: str, column_id: str,
@@ -455,8 +539,14 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str,
         columns: list[dict[str, Any]],
     ) -> None:
-        """首次导入建列（Task 5 导入服务调用；删旧插新，draft 态）。"""
+        """首次导入建列（Task 5 导入服务调用；删旧插新，draft 态）。计划内
+        列名重复 → 400（对抗审查修复⑳，DB 部分唯一索引兜底）。"""
         await self._require_design_session(user, artifact_id, None)
+        names = [str(c.get("column_name") or "") for c in columns]
+        if len(names) != len(set(names)):
+            duplicated = sorted({n for n in names if names.count(n) > 1})
+            raise InvalidOperation(
+                f"duplicate_column_name:{','.join(duplicated)}")
         try:
             await self._db.replace_columns_for_artifact(artifact_id, columns)
         except ArtifactRepoError as exc:
@@ -510,21 +600,26 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str, row_key: str,
         column: str, value: Any, expected_updated_at: Any = None,
     ) -> dict[str, Any]:
-        """单格更新（§7.2）。int/float 列 cast 失败 → 值置 null +
-        conflicts[column]="type_error:值"（与导入 tolerant 路径对称），不阻断。"""
+        """单格更新（§7.2 + 对抗审查修复⑨⑩）。行写防线：①值过 _is_formula
+        （=+-@ 前缀 400）；②列必须存在（name/alias 可寻址，未知 400）且以
+        规范 column_name 落库（防 alias 旧名写影子键）；③类型 cast 失败 →
+        值置 null + conflicts[column]="type_error:值"（与导入 tolerant 路径
+        对称），不阻断。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
-        ok, casted = True, value
+        if value is not None and _is_formula(value):
+            raise InvalidOperation("formula_not_allowed")
         column_def = await self._find_column(artifact_id, column)
-        if column_def is not None and value is not None \
-                and str(column_def.get("column_type")) in ("int", "float"):
-            ok, casted = _cast_cell(value, str(column_def["column_type"]))
+        if column_def is None:
+            raise InvalidOperation(f"unknown_column:{column}")
+        canonical = str(column_def["column_name"])
+        ok, casted = _cast_cell(value, str(column_def.get("column_type") or "text"))
         if ok:
             row = await self._db.update_cell(
-                artifact_id, row_key, column, casted, _uid(user),
+                artifact_id, row_key, canonical, casted, _uid(user),
             )
         else:
             row = await self._db.update_cell_conflict(
-                artifact_id, row_key, column, f"type_error:{value}", _uid(user),
+                artifact_id, row_key, canonical, f"type_error:{value}", _uid(user),
             )
         if row is None:
             raise InvalidOperation("row_not_found")
@@ -536,10 +631,23 @@ class ArtifactService:
         value: Any, where_clauses: list[dict[str, Any]],
         expected_updated_at: Any = None,
     ) -> dict[str, int]:
+        """批量赋值（§7.2 + 对抗审查修复⑥⑩）。校验前置（批量场景 intolerant）：
+        ①值过 _is_formula（400）；②目标列必须存在（unknown_column 400，alias
+        解析为规范名）；③int/float/date/bool 列值 cast 失败直接 400（strict——
+        批量写坏多行无逃生门，与单格 tolerant 语义刻意不同）。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
+        if value is not None and _is_formula(value):
+            raise InvalidOperation("formula_not_allowed")
+        column_def = await self._find_column(artifact_id, column)
+        if column_def is None:
+            raise InvalidOperation(f"unknown_column:{column}")
+        canonical = str(column_def["column_name"])
+        ok, casted = _cast_cell(value, str(column_def.get("column_type") or "text"))
+        if not ok:
+            raise InvalidOperation(f"type_error:{value}")
         try:
             updated = await self._db.batch_assign(
-                artifact_id, column, value, where_clauses, _uid(user),
+                artifact_id, canonical, casted, where_clauses, _uid(user),
             )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
@@ -572,20 +680,41 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str,
         data: dict[str, Any], expected_updated_at: Any = None,
     ) -> dict[str, Any]:
-        """手工行增（§7.2 行增）：无主键 → row_key=uuid；有主键 → 主键值拼接
-        （与导入同口径），rev0 已有同键 → PrimaryKeyConflict(409)，主键值缺失
-        → 400。复用 insert_rows_upsert 单行落库；provenance 记 manual 来源。"""
+        """手工行增（§7.2 行增 + 对抗审查修复⑩）。行写防线：①每值过
+        _is_formula（400）；②data 键必须是 active 列（name/alias 可寻址，
+        未知键 400，alias 归一到规范名）；③类型 cast 复用 _cast_cell（失败置
+        null + conflicts 标记——与 update_cell tolerant 同口径）。主键：有
+        主键 → 规范名取值拼接，rev0 已有同键 → 409、主键值缺失 → 400；
+        无主键 → row_key=uuid。provenance 记 manual 来源。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
         if not isinstance(data, dict):
             raise InvalidOperation("invalid_row_data")
+        columns = await self._db.list_columns(artifact_id)
         pk_names = [
-            str(c["column_name"])
-            for c in await self._db.list_columns(artifact_id)
-            if c.get("is_primary_key")
+            str(c["column_name"]) for c in columns if c.get("is_primary_key")
         ]
-        if pk_names and all(data.get(name) in (None, "") for name in pk_names):
+        canonical_data: dict[str, Any] = {}
+        conflicts: dict[str, Any] = {}
+        for raw_key, raw_value in data.items():
+            if raw_value is not None and _is_formula(raw_value):
+                raise InvalidOperation(f"formula_not_allowed:{raw_key}")
+            column_def = self._match_column(columns, str(raw_key))
+            if column_def is None:
+                raise InvalidOperation(f"unknown_column:{raw_key}")
+            name = str(column_def["column_name"])
+            ok, casted = _cast_cell(
+                raw_value, str(column_def.get("column_type") or "text"),
+            )
+            if ok:
+                canonical_data[name] = casted
+            else:
+                canonical_data[name] = None
+                conflicts[name] = f"type_error:{raw_value}"
+        if pk_names and all(
+            canonical_data.get(name) in (None, "") for name in pk_names
+        ):
             raise InvalidOperation("missing_primary_key")
-        row_key = _row_key_value(data, pk_names)
+        row_key = _row_key_value(canonical_data, pk_names)
         if pk_names and await self._db.get_row(artifact_id, 0, row_key) is not None:
             raise PrimaryKeyConflict(f"duplicate_key:{row_key}")
         ordinal = await self._db.count_rows(artifact_id, 0) + 1
@@ -593,9 +722,9 @@ class ArtifactService:
             artifact_id, 0,
             [{
                 "row_key": row_key,
-                "data": dict(data),
+                "data": canonical_data,
                 "provenance": [{"channel": "manual", "created_by": _uid(user)}],
-                "conflicts": {},
+                "conflicts": conflicts,
                 "ordinal": ordinal,
             }],
             updated_by=_uid(user),
@@ -610,7 +739,15 @@ class ArtifactService:
         self, artifact_id: str, column: str,
     ) -> dict[str, Any] | None:
         """按列名或 alias 找 active 列定义（§7.1 改名后旧名仍可寻址）。"""
-        for col in await self._db.list_columns(artifact_id):
+        return self._match_column(
+            await self._db.list_columns(artifact_id), column,
+        )
+
+    @staticmethod
+    def _match_column(
+        columns: list[dict[str, Any]], column: str,
+    ) -> dict[str, Any] | None:
+        for col in columns:
             if str(col.get("column_name")) == column or column in [
                 str(a) for a in (col.get("alias") or [])
             ]:

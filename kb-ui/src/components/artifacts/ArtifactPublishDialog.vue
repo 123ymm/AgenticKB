@@ -7,8 +7,16 @@
   >
     <div v-loading="diffLoading" class="publish-diff">
       <p class="publish-diff__title">本次发布将产生的变化（draft vs 当前已发布版）：</p>
+      <el-alert
+        v-if="noPendingChanges"
+        type="info"
+        :closable="false"
+        data-test="publish-no-pending"
+        title="无待发布变更"
+        description="当前已是发布态（草稿未开放）——编辑数据或改列后自动检出草稿，再来发布。"
+      />
       <el-empty
-        v-if="!diffLoading && !diffResult"
+        v-else-if="!diffLoading && !diffResult"
         description="差异加载失败或无差异数据"
         :image-size="60"
       />
@@ -103,6 +111,9 @@ const props = defineProps<{
   expectedUpdatedAt?: string
   /** 当前制品使用说明（usage_note 门禁——发布前必填）。 */
   usageNote: string
+  /** 干净态判定底料：draft_open=false 且 current_revision>0 → 无待发布变更（409 门禁前端镜像）。 */
+  draftOpen?: boolean
+  currentRevision?: number
 }>()
 
 const emit = defineEmits<{
@@ -121,8 +132,13 @@ const activeSections = ref(['added', 'changed', 'removed'])
 const usageNote = ref('')
 const changeSummary = ref('')
 
-/** usage_note 非空才允许发布（后端同门禁 422 兜底）。 */
-const canPublish = computed(() => usageNote.value.trim().length > 0)
+/** 干净态（draft 关闭且已有发布版）= 无待发布变更——后端 409 门禁的前端镜像。 */
+const noPendingChanges = computed(() =>
+  props.draftOpen === false && (props.currentRevision ?? 0) > 0)
+
+/** usage_note 非空才允许发布（后端同门禁 422 兜底）；干净态禁发（409 兜底）。 */
+const canPublish = computed(() =>
+  usageNote.value.trim().length > 0 && !noPendingChanges.value)
 
 watch(() => props.modelValue, (open) => {
   if (!open) return

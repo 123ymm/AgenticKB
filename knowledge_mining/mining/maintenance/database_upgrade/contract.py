@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
-CURRENT_SCHEMA_CHECKSUM = "517a3b7d2dae25e227c82a315387a0c74a8773c9abfbb7bea2770a6f039bec33"
+CURRENT_SCHEMA_CHECKSUM = "a385b7d10a0604fb8485561e18dc127314dd32a4f71756359a5fc8947b018d92"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")
@@ -79,9 +79,24 @@ EXPECTED_FORMAL_TABLES = len(FORMAL_TABLES)
 EXPECTED_PHYSICAL_TABLES = EXPECTED_FORMAL_TABLES + 1
 
 # This release accepts the complete immediately preceding table set: the old
-# Java log exists and the unified ledger does not yet exist.
+# Java log exists and the unified ledger does not yet exist. The kb_* artifact
+# six-table set (61号) is new in this release, so it is subtracted alongside
+# the access-ledger pair when reconstructing the previous release baseline.
 PREVIOUS_RELEASE_TABLES: frozenset[str] = frozenset(
-    (FORMAL_TABLES - {"knowledge_access_records", "knowledge_access_record_payloads"}) | {"serving_query_logs"}
+    (
+        FORMAL_TABLES
+        - {
+            "knowledge_access_records",
+            "knowledge_access_record_payloads",
+            "kb_artifacts",
+            "kb_artifact_revisions",
+            "kb_artifact_members",
+            "kb_artifact_batches",
+            "kb_table_columns",
+            "kb_table_rows",
+        }
+    )
+    | {"serving_query_logs"}
 )
 # Compatibility export for older callers/tests. New cutover source validation
 # uses PREVIOUS_RELEASE_TABLES.

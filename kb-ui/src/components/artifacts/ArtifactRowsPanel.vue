@@ -143,13 +143,13 @@
       </template>
     </el-dialog>
 
-    <!-- 新增行：按列生成表单（后端行新增端点 61号 MVP 未开放——提交时引导走导入） -->
+    <!-- 新增行：按列生成表单，接 POST /table/rows（主键拼接/uuid 由后端定） -->
     <el-dialog v-model="addVisible" title="新增行" width="560px">
       <el-alert
+        v-if="pkColumns.length"
         type="info"
         :closable="false"
-        title="行新增后端端点暂未开放（61号 MVP 边界）"
-        description="追加行请走上方「Excel 导入向导」（追加模式，主键 UPSERT + 来源记账）。"
+        :title="`主键列（${pkColumns.map(c => c.column_name).join('、')}）必须填写——同键已存在将被拒绝`"
       />
       <el-form label-width="120px" class="rows-panel__add-form">
         <el-form-item v-for="col in editableColumns" :key="col.column_id" :label="col.column_name">
@@ -161,7 +161,7 @@
       </el-form>
       <template #footer>
         <el-button @click="addVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitAdd">提交</el-button>
+        <el-button type="primary" :loading="saving" data-test="rows-add-submit" @click="submitAdd">提交</el-button>
       </template>
     </el-dialog>
   </div>
@@ -225,6 +225,8 @@ const addForm = ref<Record<string, unknown>>({})
 
 /** 可编辑列 = active 列（dropped 不进表单）。 */
 const editableColumns = computed(() => props.columns.filter(c => c.status === 'active'))
+/** 主键列（行增表单提示 + 前端预检必填）。 */
+const pkColumns = computed(() => editableColumns.value.filter(c => c.is_primary_key))
 
 onMounted(loadRows)
 
@@ -446,9 +448,37 @@ function openAdd(): void {
   addVisible.value = true
 }
 
-function submitAdd(): void {
-  ElMessage.warning('行新增后端端点暂未开放——追加行请使用「Excel 导入向导」（追加模式）')
-  addVisible.value = false
+/** 手工行增：按列类型归一表单值 → POST /table/rows（乐观锁令牌随请求）。 */
+async function submitAdd(): Promise<void> {
+  const data: Record<string, unknown> = {}
+  editableColumns.value.forEach(col => {
+    data[col.column_name] = coerceValue(col.column_name, addForm.value[col.column_name])
+  })
+  const missingPk = pkColumns.value.filter(
+    col => data[col.column_name] === null || data[col.column_name] === '')
+  if (missingPk.length) {
+    ElMessage.warning(`主键列必须填写：${missingPk.map(c => c.column_name).join('、')}`)
+    return
+  }
+  saving.value = true
+  try {
+    const row = await api.insertRow(props.artifactId, {
+      data, expected_updated_at: props.expectedUpdatedAt,
+    })
+    ElMessage.success(`已新增行「${row.row_key}」`)
+    addVisible.value = false
+    emit('changed')
+    await loadRows()
+  } catch (error) {
+    if (isStale(error)) {
+      ElMessage.error('制品已被他人修改（409 stale_artifact），已为你刷新——请重试新增')
+      emit('changed')
+    } else {
+      ElMessage.error(`新增行失败：${await apiErrorDetail(error)}`)
+    }
+  } finally {
+    saving.value = false
+  }
 }
 
 function deepEqual(a: unknown, b: unknown): boolean {
@@ -457,7 +487,7 @@ function deepEqual(a: unknown, b: unknown): boolean {
 
 defineExpose({
   loadRows, openEdit, submitEdit, removeRow, openAssign, submitAssign,
-  buildAssignPayload, onDraftChange,
+  openAdd, submitAdd, buildAssignPayload, onDraftChange,
 })
 </script>
 

@@ -19,7 +19,20 @@
         </el-tag>
       </div>
       <div v-if="artifact && canWrite" class="artifact-detail__actions">
-        <el-button type="primary" data-test="open-publish" @click="publishVisible = true">发布</el-button>
+        <el-tooltip
+          content="无待发布变更（编辑数据或改列后自动检出草稿）"
+          :disabled="hasPendingChanges"
+          placement="bottom"
+        >
+          <span>
+            <el-button
+              type="primary"
+              data-test="open-publish"
+              :disabled="!hasPendingChanges"
+              @click="publishVisible = true"
+            >发布</el-button>
+          </span>
+        </el-tooltip>
         <el-button v-if="artifact.status === 'published'" @click="deprecateArtifact">停用</el-button>
         <el-button v-if="artifact.status === 'deprecated'" @click="republishArtifact">恢复</el-button>
         <el-button v-if="artifact.draft_open" @click="discardDraftAction">丢弃 draft</el-button>
@@ -161,12 +174,14 @@
       </template>
     </el-dialog>
 
-    <!-- 发布：diff 三段预览 + usage_note 门禁 + change_summary（Task 12） -->
+    <!-- 发布：diff 三段预览 + usage_note 门禁 + change_summary + 干净态禁发（Task 12） -->
     <ArtifactPublishDialog
       v-model="publishVisible"
       :artifact-id="artifactId"
       :expected-updated-at="artifact?.updated_at"
       :usage-note="artifact?.usage_note || ''"
+      :draft-open="artifact?.draft_open"
+      :current-revision="artifact?.current_revision ?? 0"
       @published="onPublished"
       @changed="reload"
     />
@@ -221,6 +236,9 @@ const publishVisible = ref(false)
 const canWrite = computed(() => artifact.value?.my_role === 'owner' || artifact.value?.my_role === 'editor')
 /** 成员管理仅 owner（后端 ROLE_OWNER_ONLY）。 */
 const isOwner = computed(() => artifact.value?.my_role === 'owner')
+/** 干净态 = draft 关闭且已有发布版 → 无待发布变更（后端 409 门禁镜像）。 */
+const hasPendingChanges = computed(() =>
+  !!artifact.value && (artifact.value.draft_open || artifact.value.current_revision === 0))
 
 /** 只读行列 = 详情 schema（viewer 已由后端回落到发布快照列）。 */
 const runtimeColumns = computed<ArtifactColumn[]>(() => artifact.value?.schema ?? [])

@@ -35,4 +35,4 @@ migrations:
   - id: core/20261016_007_kb_artifacts
     path: core/20261016_007_kb_artifacts.sql
     mode: online_expand
-    checksum: 5a161c063fdcadac6efb8e0f64844422948d793345a7b1def252b45d6b86afb9
+    checksum: dfb0a1671249a41fe5efbe8055859df2352fb8670828e1af96b0535cb09a7793

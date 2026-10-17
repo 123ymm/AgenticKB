@@ -28,6 +28,9 @@ _ROW_INSERT_BATCH = 1000
 #: list_rows 的页大小护栏。
 _MAX_PAGE_SIZE = 500
 
+#: diff 样例截断（counts 恒全量，added/removed/changed 各只回前 N 条）。
+_DIFF_SAMPLE_LIMIT = 100
+
 _VALID_KINDS = {"table", "wiki"}
 _VALID_MEMBER_ROLES = {"owner", "editor", "viewer"}
 _VALID_COLUMN_TYPES = {"text", "int", "float", "date", "enum", "bool"}
@@ -168,7 +171,8 @@ class ArtifactDB:
             )
 
     async def delete_artifact(self, artifact_id: str) -> None:
-        """owner 硬删：显式级联（列约定无 FK，删除顺序自底向上）。"""
+        """owner 硬删：显式级联（列约定无 FK，删除顺序自底向上）。级联后清
+        本制品动态表达式索引（对抗审查修复⑤：idx_kbtr_{art}_* 不随行表清空）。"""
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 await conn.execute(
@@ -195,6 +199,7 @@ class ArtifactDB:
                     "DELETE FROM kb_artifacts WHERE artifact_id = %s",
                     (artifact_id,),
                 )
+        await self.drop_draft_expression_indexes(artifact_id)
 
     async def list_artifacts_for_user(self, user_id: str) -> list[dict[str, Any]]:
         """成员视角列表（含 owner 不落 members 行的兜底）；site/domain admin 全量
@@ -280,6 +285,17 @@ class ArtifactDB:
             row = await cur.fetchone()
             return str(row["role"]) if row else None
 
+    async def get_user_status(self, user_id: str) -> str | None:
+        """成员资格预检（对抗审查修复⑪）：kb_users 行存在且未软删 → status；
+        不存在/已软删 → None。是否 active 由 service 判定。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT status FROM kb_users WHERE id = %s AND deleted_at IS NULL",
+                (user_id,),
+            )
+            row = await cur.fetchone()
+            return str(row["status"]) if row else None
+
     async def is_domain_admin(self, user_id: str, domain_id: str) -> bool:
         """口径同 kb/db.py can_manage_domain：active site admin 全通 / 本域
         domain_role='admin'。以库为准（不信 user 对象缓存的域列表）。"""
@@ -335,6 +351,10 @@ class ArtifactDB:
         """发布事务（61号 §4.2）：①rev0→revN 复制定格 ②schema 快照+版本记录
         ③清 draft+拨指针+状态。usage_note 非空由 service 先拦、此处兜底（竞态安全）。
 
+        draft 门禁（对抗审查修复③）：draft_open=FALSE 且 current>0 = 干净态，
+        无待发布变更 → no_pending_changes（service 翻 409）。首次发布
+        （current=0）不受此门禁——rev0 即首发工作区。
+
         new_rev 取 max(current, 历史最大 revision)+1——回滚拨低指针后重发布
         不得与既有版本行撞主键（「数据不动」语义下历史版本仍留在表里）。
         返回 {"revision", "row_count"}；索引重建在事务外自愈式执行。
@@ -352,6 +372,8 @@ class ArtifactDB:
                     raise ArtifactError("invalid_status")
                 if not (art["usage_note"] or "").strip():
                     raise ArtifactError("usage_note_required")
+                if not art["draft_open"] and int(art["current_revision"]) > 0:
+                    raise ArtifactError("no_pending_changes")
                 cur = await conn.execute(
                     """SELECT GREATEST(
                            %(cur)s,
@@ -435,8 +457,10 @@ class ArtifactDB:
             return [dict(r) for r in await cur.fetchall()]
 
     async def rollback_to(self, artifact_id: str, revision: int) -> dict[str, Any]:
-        """拨指针（数据不动）。校验目标版本存在且 ≤ current——历史版本行留在
-        kb_table_rows / kb_artifact_revisions，之后重发布会接到 max+1。"""
+        """拨指针（数据不动）。仅校验目标版本存在于 kb_artifact_revisions——
+        「数据不动」语义下拨任何历史版（含 > current，回滚往返）都安全；
+        历史版本行留在 kb_table_rows / kb_artifact_revisions，之后重发布会
+        接到 max+1（对抗审查修复④：删去 revision > current 拒绝判据）。"""
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 cur = await conn.execute(
@@ -447,7 +471,7 @@ class ArtifactDB:
                 if art is None:
                     raise ArtifactError("artifact_not_found")
                 revision = int(revision)
-                if revision < 1 or revision > int(art["current_revision"]):
+                if revision < 1:
                     raise ArtifactError("invalid_revision")
                 cur = await conn.execute(
                     "SELECT 1 FROM kb_artifact_revisions"
@@ -650,14 +674,20 @@ class ArtifactDB:
                 if await cur.fetchone() is None:
                     raise ArtifactError("artifact_not_found")
                 cur = await conn.execute(
-                    """SELECT column_id FROM kb_table_columns
+                    """SELECT column_id, column_name FROM kb_table_columns
                        WHERE artifact_id = %s AND status = 'active'""",
                     (artifact_id,),
                 )
-                active_ids = {str(r["column_id"]) for r in await cur.fetchall()}
-                unknown = [c for c in column_ids if c not in active_ids]
+                # data 键 = column_name（不是 column_id）——重算键必须先做 id→name
+                # 映射（对抗审查修复②：曾直接拿 column_id 取 data，恒得空键）。
+                id_to_name = {
+                    str(r["column_id"]): str(r["column_name"])
+                    for r in await cur.fetchall()
+                }
+                unknown = [c for c in column_ids if c not in id_to_name]
                 if unknown:
                     raise ArtifactError("unknown_column")
+                pk_names = [id_to_name[c] for c in column_ids]
                 cur = await conn.execute(
                     """SELECT row_key, data FROM kb_table_rows
                        WHERE artifact_id = %s AND revision = 0 FOR UPDATE""",
@@ -667,7 +697,7 @@ class ArtifactDB:
                 remap: dict[str, str] = {}
                 seen: set[str] = set()
                 for row in rows:
-                    new_key = _row_key_value(row["data"], list(column_ids))
+                    new_key = _row_key_value(row["data"], pk_names)
                     if new_key in seen:
                         raise ArtifactError("primary_key_conflict")
                     seen.add(new_key)
@@ -780,7 +810,11 @@ class ArtifactDB:
         async with self._pool.connection() as conn:
             for start in range(0, len(flat_rows), _ROW_INSERT_BATCH):
                 chunk = flat_rows[start:start + _ROW_INSERT_BATCH]
-                values_sql = ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(chunk))
+                # 8 占位符 = 8 列（artifact_id..updated_by）；与 flat.extend 一一对应
+                # （对抗审查修复①：曾漏 2 个占位符，真库必炸——静态测试钉死）。
+                values_sql = ", ".join(
+                    ["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk),
+                )
                 flat: list[Any] = []
                 for item in chunk:
                     flat.extend([
@@ -965,13 +999,22 @@ class ArtifactDB:
         双侧 CTE + FULL JOIN，过滤全在 CTE 内——WHERE 过滤会丢 removed 行。
         列级 changed 在 Python 对比 jsonb。从未发布（current=0）时 current
         侧取 -1（空集）→ 全部计为新增。
+
+        干净态投影（对抗审查修复③）：draft_open=FALSE 且 current>0 = 与已发布
+        一致（list_rows 同口径），直接返回零差异，不进 CTE。样例截断（修复⑦）：
+        added/removed/changed 各只回前 100 条，counts 恒全量——防 10 万行
+        GB 级响应。
         """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                """SELECT current_revision FROM kb_artifacts WHERE artifact_id = %s""",
+                """SELECT current_revision, draft_open FROM kb_artifacts
+                   WHERE artifact_id = %s""",
                 (artifact_id,),
             )
             art = await cur.fetchone()
+            if art is not None and not art["draft_open"] \
+                    and int(art["current_revision"]) > 0:
+                return self._empty_diff()
             current_rev = int(art["current_revision"]) if art else 0
             cur = await conn.execute(
                 """WITH d AS (SELECT row_key, data FROM kb_table_rows
@@ -1008,9 +1051,17 @@ class ArtifactDB:
                          "old": old.get(col), "new": new.get(col)},
                     )
         return {
-            "added": added, "removed": removed, "changed": changed,
+            "added": added[:_DIFF_SAMPLE_LIMIT], "removed": removed[:_DIFF_SAMPLE_LIMIT],
+            "changed": changed[:_DIFF_SAMPLE_LIMIT],
             "added_count": len(added), "removed_count": len(removed),
             "changed_count": len(changed),
+        }
+
+    @staticmethod
+    def _empty_diff() -> dict[str, Any]:
+        return {
+            "added": [], "removed": [], "changed": [],
+            "added_count": 0, "removed_count": 0, "changed_count": 0,
         }
 
     # ---------------------------------------------------- 表达式索引（§4.5）

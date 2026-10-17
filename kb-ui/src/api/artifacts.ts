@@ -262,6 +262,16 @@ export function useArtifactsApi() {
       return data
     },
 
+    /** 手工行增（61号 §7.2）：返回新行（含 row_key/ordinal/provenance）。 */
+    async insertRow(
+      artifactId: string,
+      payload: { data: Record<string, unknown>; expected_updated_at?: string },
+    ): Promise<ArtifactRowLike & { ordinal: number; provenance: unknown }> {
+      const { data } = await client.post(
+        `/api/artifacts/${artifactId}/table/rows`, payload)
+      return data
+    },
+
     async batchAssign(
       artifactId: string, payload: BatchAssignRequest,
     ): Promise<{ updated: number }> {

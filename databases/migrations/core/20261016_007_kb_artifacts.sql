@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS kb_table_columns (
     ordinal        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (artifact_id, column_id)
 );
+-- active 列名唯一（对抗审查修复⑳，61号）：data 键=列名，重名会让 jsonb
+-- 数据折叠到同一键；dropped 列释放名字（部分唯一索引）。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_kb_table_columns_name
+    ON kb_table_columns(artifact_id, column_name) WHERE status='active';
 
 CREATE TABLE IF NOT EXISTS kb_table_rows (
     artifact_id TEXT NOT NULL,

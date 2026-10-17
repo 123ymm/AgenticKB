@@ -6,6 +6,7 @@ dependency_overrides 注入真实 ArtifactService(FakeArtifactDB) 与真实导�
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,12 +24,25 @@ from knowledge_mining.mining.kb.deps import (
 )
 from knowledge_mining.mining.kb.routes.artifacts import router as artifacts_router
 from knowledge_mining.mining.kb.services.artifact_import_service import (
+    _PREVIEW_TOKENS,
     ArtifactImportService,
 )
 from knowledge_mining.mining.kb.services.artifact_service import ArtifactService
 from knowledge_mining.tests.kb.test_artifacts_service import FakeArtifactDB, _user
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _clear_previews():
+    """预览登记是模块级全局——逐测试清场（防 uploader 计数跨测试串扰）。"""
+    yield
+    for record in _PREVIEW_TOKENS.values():
+        try:
+            os.unlink(record["path"])
+        except OSError:
+            pass
+    _PREVIEW_TOKENS.clear()
 
 DOMAIN = "cloud_core_network"
 A_HEADER = ["MOP", "L1分类", "L2分类"]
@@ -206,6 +220,8 @@ async def test_list_revisions_runtime_readable(env):
     await env.client.patch(f"/api/artifacts/{aid}", json={"usage_note": "查责任域"})
     r = await env.client.post(f"/api/artifacts/{aid}/publish", json={"change_summary": "首版"})
     assert r.status_code == 200, r.text
+    # 二次发布前检出 draft（对抗审查修复③：干净态发布 → 409 no_pending_changes）
+    await env.db.ensure_draft(aid)
     env.db.rev0_rows[aid] = [{"row_key": "r2", "data": {"MOP": "NC-2"}}]
     r = await env.client.post(f"/api/artifacts/{aid}/publish", json={"change_summary": "补充行"})
     assert r.status_code == 200 and r.json()["revision"] == 2
@@ -265,6 +281,106 @@ async def test_preview_unknown_token_maps_410(env):
     aid = await _create_artifact(env)
     r = await env.client.get(f"/api/artifacts/{aid}/table/preview/deadbeef")
     assert r.status_code == 410
+
+
+async def test_publish_clean_state_maps_409_no_pending_changes(env):
+    """对抗审查修复③路由级：干净态（draft 关闭且 current>0）再发布 →
+    409 no_pending_changes；开草稿编辑后恢复。"""
+    aid = await _create_artifact(env)
+    env.db.rev0_rows[aid] = [{"row_key": "r1", "data": {"MOP": "NC-1"}}]
+    await env.client.patch(f"/api/artifacts/{aid}", json={"usage_note": "查责任域"})
+    r = await env.client.post(f"/api/artifacts/{aid}/publish", json={"change_summary": "首版"})
+    assert r.status_code == 200, r.text
+    r = await env.client.post(f"/api/artifacts/{aid}/publish", json={"change_summary": "再发"})
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "no_pending_changes"
+    # 检出草稿后（编辑动作亦会自动开）发布恢复 200
+    await env.db.ensure_draft(aid)
+    r = await env.client.post(f"/api/artifacts/{aid}/publish", json={"change_summary": "r2"})
+    assert r.status_code == 200 and r.json()["revision"] == 2
+
+
+async def test_row_write_defenses_map_400(env):
+    """对抗审查修复⑩路由级：公式注入 400 / 未知列 400（update_cell 与
+    batch-assign 双入口）。"""
+    aid = await _create_artifact(env)
+    token = await _upload_a(env, aid)
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/import",
+        json={"preview_token": token, "plan": {"column_ops": [
+            {"source": "MOP", "action": "new", "target_name": "MOP",
+             "column_type": "text", "is_primary_key": True},
+            {"source": "L1分类", "action": "new", "target_name": "L1分类",
+             "column_type": "text"},
+        ]}},
+    )
+    assert r.status_code == 200, r.text
+
+    r = await env.client.patch(
+        f"/api/artifacts/{aid}/table/rows/NC20260601000295",
+        json={"column": "L1分类", "value": "=SUM(A1)"})
+    assert r.status_code == 400 and "formula_not_allowed" in r.text
+    r = await env.client.patch(
+        f"/api/artifacts/{aid}/table/rows/NC20260601000295",
+        json={"column": "不存在列", "value": "x"})
+    assert r.status_code == 400 and "unknown_column" in r.text
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/rows/batch-assign",
+        json={"column": "不存在列", "value": "x", "where": []})
+    assert r.status_code == 400 and "unknown_column" in r.text
+    # 行增：公式 / 未知键同样 400
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/rows", json={"data": {"MOP": "+1"}})
+    assert r.status_code == 400 and "formula_not_allowed" in r.text
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/rows", json={"data": {"幽灵列": "x"}})
+    assert r.status_code == 400 and "unknown_column" in r.text
+
+
+async def test_preview_token_bound_to_artifact_and_uploader(env):
+    """对抗审查修复⑬路由级：上传登记绑定 artifact_id+uploader——token 跨
+    制品/跨用户使用 → 404（不暴露登记内容）。"""
+    aid = await _create_artifact(env)
+    other = await _create_artifact(env)
+    token = await _upload_a(env, aid)   # 绑定 (aid, u-alice)
+
+    r = await env.client.get(f"/api/artifacts/{other}/table/preview/{token}")
+    assert r.status_code == 404
+    r = await env.client.post(
+        f"/api/artifacts/{other}/table/import",
+        json={"preview_token": token, "plan": {"column_ops": [
+            {"source": "MOP", "action": "new", "target_name": "MOP",
+             "column_type": "text", "is_primary_key": True}]}},
+    )
+    assert r.status_code == 404
+    # 同制品其他编辑者用他人 token → 404
+    env.db.members[aid]["u-bob"] = "editor"
+    env.holder["user"] = _user("u-bob")
+    r = await env.client.get(f"/api/artifacts/{aid}/table/preview/{token}")
+    assert r.status_code == 404
+    env.holder["user"] = _user("u-alice")
+    # 本人本制品 → 200
+    r = await env.client.get(f"/api/artifacts/{aid}/table/preview/{token}")
+    assert r.status_code == 200
+
+
+async def test_preview_limit_maps_429(env):
+    """对抗审查修复⑭路由级：同一 uploader 第 6 个活跃预览 → 429（最旧被清，
+    立即重试成功）。"""
+    aid = await _create_artifact(env)
+    for _ in range(5):
+        await _upload_a(env, aid)
+    data = _xlsx_bytes(env.tmp_path / "A6.xlsx", A_HEADER, A_ROWS)
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/upload",
+        files={"file": ("A6.xlsx", data, "application/octet-stream")},
+    )
+    assert r.status_code == 429
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/upload",
+        files={"file": ("A6.xlsx", data, "application/octet-stream")},
+    )
+    assert r.status_code == 202
 
 
 async def test_upload_too_large_maps_413(env, monkeypatch):
@@ -399,8 +515,13 @@ async def test_insert_row_manual_add(env):
     r = await env.client.get(f"/api/artifacts/{aid}/table/rows?draft=1")
     assert r.json()["total"] == 9
 
-    # 无主键制品 → row_key=uuid
+    # 无主键制品 → row_key=uuid（先建列——行增防线要求 data 键都是 active 列）
     aid2 = await _create_artifact(env)
+    r = await env.client.post(
+        f"/api/artifacts/{aid2}/table/columns",
+        json={"column_name": "备注", "column_type": "text"},
+    )
+    assert r.status_code == 201, r.text
     r = await env.client.post(
         f"/api/artifacts/{aid2}/table/rows",
         json={"data": {"备注": "手工行"}},

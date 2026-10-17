@@ -473,3 +473,86 @@ async def test_execute_import_validates_conflict_policy(tmp_path):
             conflict_policy={"type_error": "whatever"},
         )
     assert "invalid_conflict_policy" in str(excinfo.value)
+
+
+# ------------------------------------------------- 对抗审查修复回归（61号）
+
+async def test_execute_append_ordinal_continues_after_existing(tmp_path):
+    """修复⑧回归：追加导入 prepared 行 ordinal 起始 = 现有 rev0 行数 + 1
+    （新行接在存量之后，不再与已有行挤 1..N）。"""
+    db, svc, imp = _make_service()
+    aid, _token = await _import_a(db, svc, imp, tmp_path)   # 8 行，ordinal 1..8
+    column_ids = {c["column_name"]: c["column_id"] for c in db.columns[aid]}
+    out_b = imp.parse_upload(
+        _write_xlsx(tmp_path / "B.xlsx", B_HEADER, B_ROWS), "B.xlsx")
+    ops = [
+        {"source": "MOP编号", "action": "map_to", "target": column_ids["MOP"]},
+        {"source": "L1分类", "action": "map_to", "target": column_ids["L1分类"]},
+        {"source": "L2分类", "action": "drop"},
+    ]
+    plan = imp.build_mapping(
+        out_b["preview_token"], column_ops=ops,
+        target_columns=await svc.list_columns(user=OWNER, artifact_id=aid),
+    )
+    await imp.execute_import(
+        svc, user=OWNER, artifact_id=aid,
+        preview_token=out_b["preview_token"], plan=plan,
+    )
+    rows = {r["row_key"]: r for r in db.rev0_rows[aid]}
+    # B.xlsx 新 MOP 两行（文件内第 4/5 数据行）→ ordinal 12/13（8 存量 + 前 3 行）
+    assert rows["NC20260601000401"]["ordinal"] == 12
+    assert rows["NC20260601000402"]["ordinal"] == 13
+
+
+async def test_preview_token_binding_mismatch_404(tmp_path):
+    """修复⑬服务级：绑定登记（artifact_id+uploader）的 token 用于他制品/
+    他用户 → ArtifactNotFound；正确绑定放行；未绑定登记（直调形态）不设卡。"""
+    from knowledge_mining.mining.kb.services.artifact_service import ArtifactNotFound
+
+    _, svc, imp = _make_service()
+    art = await svc.create_artifact(user=OWNER, domain_id="plant-a", title="绑定")
+    data = _write_xlsx(tmp_path / "A.xlsx", A_HEADER, A_ROWS)
+    out = imp.parse_upload(
+        data, "A.xlsx", artifact_id=art["artifact_id"], uploader="u-owner")
+    token = out["preview_token"]
+
+    # 正确绑定 → 放行
+    preview = imp.get_preview(
+        token, artifact_id=art["artifact_id"], uploader="u-owner")
+    assert preview["preview"]["file_name"] == "A.xlsx"
+    # 他制品 / 他用户 → 404
+    with pytest.raises(ArtifactNotFound):
+        imp.get_preview(token, artifact_id="art_other", uploader="u-owner")
+    with pytest.raises(ArtifactNotFound):
+        imp.get_preview(
+            token, artifact_id=art["artifact_id"], uploader="u-owner2")
+    with pytest.raises(ArtifactNotFound):
+        imp.build_mapping(
+            token, column_ops=A_CREATE_OPS,
+            artifact_id="art_other", uploader="u-owner")
+    # 未绑定登记（不传 kwargs）不设卡——服务层直调形态
+    unbound = imp.parse_upload(data, "A2.xlsx")
+    assert imp.get_preview(unbound["preview_token"])["preview"]["file_name"] == "A2.xlsx"
+
+
+async def test_preview_cap_per_uploader(tmp_path):
+    """修复⑭服务级：每 uploader 活跃登记 ≤5——第 6 个清最旧 + preview_limit
+    （重试即可成功）；另一 uploader 不受影响。"""
+    data = _write_xlsx(tmp_path / "A.xlsx", A_HEADER, A_ROWS)
+    _, _, imp = _make_service()
+    tokens = [
+        imp.parse_upload(
+            data, f"{i}.xlsx", artifact_id="art_x", uploader="u1",
+        )["preview_token"]
+        for i in range(5)
+    ]
+    oldest_path = _PREVIEW_TOKENS[tokens[0]]["path"]
+    with pytest.raises(ArtifactImportError) as excinfo:
+        imp.parse_upload(data, "5.xlsx", artifact_id="art_x", uploader="u1")
+    assert excinfo.value.code == "preview_limit"
+    assert tokens[0] not in _PREVIEW_TOKENS        # 最旧被清
+    assert not os.path.exists(oldest_path)          # 临时文件一并清理
+    again = imp.parse_upload(data, "5b.xlsx", artifact_id="art_x", uploader="u1")
+    assert again["preview_token"] in _PREVIEW_TOKENS   # 立即重试成功
+    other = imp.parse_upload(data, "x.xlsx", artifact_id="art_x", uploader="u2")
+    assert other["preview_token"] in _PREVIEW_TOKENS   # 他 uploader 独立计数

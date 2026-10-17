@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
     updateCell: vi.fn(),
     batchAssign: vi.fn(),
     deleteRow: vi.fn(),
+    insertRow: vi.fn(),
   },
   ui: { confirm: vi.fn(), success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
@@ -29,6 +30,8 @@ interface RowsVm {
   total: number
   draft: boolean
   editableColumns: ArtifactColumn[]
+  pkColumns: ArtifactColumn[]
+  addForm: Record<string, unknown>
   editForm: { rowKey: string; values: Record<string, unknown> }
   assignForm: { column: string; value: string; conditions: Array<{ column: string; op: string; value: string }> }
   loadRows: () => Promise<void>
@@ -37,6 +40,8 @@ interface RowsVm {
   submitEdit: () => Promise<void>
   openAssign: () => void
   submitAssign: () => Promise<void>
+  openAdd: () => void
+  submitAdd: () => Promise<void>
   buildAssignPayload: () => {
     column: string
     value: unknown
@@ -93,6 +98,10 @@ beforeEach(() => {
   state.api.updateCell.mockReset().mockResolvedValue({ row_key: 'NC001', data: {} })
   state.api.batchAssign.mockReset().mockResolvedValue({ updated: 1 })
   state.api.deleteRow.mockReset().mockResolvedValue(undefined)
+  state.api.insertRow.mockReset().mockResolvedValue({
+    row_key: 'NC999', data: { MOP: 'NC999', L1分类: '数据业务' },
+    provenance: [{ channel: 'manual' }], ordinal: 2,
+  })
   state.ui.confirm.mockReset().mockResolvedValue('confirm')
   state.ui.success.mockReset()
   state.ui.error.mockReset()
@@ -249,5 +258,39 @@ describe('ArtifactRowsPanel', () => {
 
     expect(state.ui.error).toHaveBeenCalledWith(expect.stringContaining('刷新'))
     expect(wrapper.emitted('changed')).toBeTruthy()
+  })
+
+  it('inserts a manual row via POST /table/rows with typed values and the lock token', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as RowsVm
+
+    vm.openAdd()
+    expect(vm.pkColumns.map(c => c.column_name)).toEqual(['MOP'])
+    vm.addForm.MOP = 'NC999'
+    vm.addForm['L1分类'] = '数据业务'
+    await vm.submitAdd()
+    await flushPromises()
+
+    expect(state.api.insertRow).toHaveBeenCalledWith('art-1', {
+      data: { MOP: 'NC999', L1分类: '数据业务' },
+      expected_updated_at: '2026-10-16T08:00:00+00:00',
+    })
+    expect(state.ui.success).toHaveBeenCalled()
+    expect(wrapper.emitted('changed')).toBeTruthy()
+  })
+
+  it('blocks manual insert when a primary key column is empty', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as RowsVm
+
+    vm.openAdd()
+    vm.addForm['L1分类'] = '数据业务'   // 主键 MOP 留空
+    await vm.submitAdd()
+    await flushPromises()
+
+    expect(state.ui.warning).toHaveBeenCalledWith(expect.stringContaining('主键列必须填写'))
+    expect(state.api.insertRow).not.toHaveBeenCalled()
   })
 })

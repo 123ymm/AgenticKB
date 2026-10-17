@@ -12,11 +12,13 @@ from datetime import datetime, timezone
 import pytest
 
 from knowledge_mining.mining.kb.db_artifacts import ArtifactError as ArtifactRepoError
+from knowledge_mining.mining.kb.db_artifacts import _row_key_value
 from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactForbidden,
     ArtifactNotFound,
     ArtifactService,
     InvalidOperation,
+    NoPendingChanges,
     PrimaryKeyConflict,
     StaleArtifact,
     UsageNoteRequired,
@@ -44,6 +46,8 @@ class FakeArtifactDB:
         self.batches: dict[str, list[dict]] = {}
         self.domain_bindings: set[tuple[str, str]] = set()  # (user_id, domain)
         self.site_admins: set[str] = set()
+        # 对抗审查修复⑪对齐：kb_users 镜像（user_id -> status；未登记=None）
+        self.users: dict[str, str] = {}
 
     def _touch(self, artifact_id: str) -> None:
         art = self.artifacts[artifact_id]
@@ -163,6 +167,10 @@ class FakeArtifactDB:
     async def artifact_role(self, artifact_id: str, user_id: str) -> str | None:
         return self.members.get(artifact_id, {}).get(user_id)
 
+    async def get_user_status(self, user_id: str) -> str | None:
+        """对齐真库：未登记（kb_users 无行/软删）→ None。"""
+        return self.users.get(user_id)
+
     async def is_domain_admin(self, user_id: str, domain_id: str) -> bool:
         return (user_id, domain_id) in self.domain_admins
 
@@ -175,7 +183,12 @@ class FakeArtifactDB:
         art = self.artifacts[artifact_id]
         if not (art.get("usage_note") or "").strip():
             raise ArtifactRepoError("usage_note_required")
-        new_rev = art["current_revision"] + 1
+        # 对齐真库（对抗审查修复③）：干净态发布门禁
+        if not art.get("draft_open") and int(art["current_revision"]) > 0:
+            raise ArtifactRepoError("no_pending_changes")
+        history = [r["revision"] for r in self.revisions.get(artifact_id, [])]
+        row_revs = list(self.revision_rows.get(artifact_id, {}).keys())
+        new_rev = max([int(art["current_revision"]), *history, *row_revs], default=0) + 1
         rows = self.rev0_rows.get(artifact_id, [])
         self.revision_rows.setdefault(artifact_id, {})[new_rev] = [dict(r) for r in rows]
         self.revisions.setdefault(artifact_id, []).append({
@@ -204,8 +217,14 @@ class FakeArtifactDB:
         }
 
     async def rollback_to(self, artifact_id: str, revision: int) -> dict:
+        """对齐真库（对抗审查修复④）：仅校验 revision 存在于版本历史——
+        「数据不动」语义下拨任何历史版（含 > current）都安全。"""
         self.calls.append("rollback_to")
         art = self.artifacts[artifact_id]
+        known = {r["revision"] for r in self.revisions.get(artifact_id, [])} \
+            | set(self.revision_rows.get(artifact_id, {}).keys())
+        if revision < 1 or revision not in known:
+            raise ArtifactRepoError("invalid_revision")
         art["current_revision"] = revision
         art["status"] = "published"
         self._touch(artifact_id)
@@ -286,13 +305,33 @@ class FakeArtifactDB:
     async def set_primary_key(
         self, artifact_id: str, column_ids: list[str],
     ) -> dict:
+        """对齐真库（对抗审查修复②）：按 column_name 重算 rev0 全部
+        row_key；两行折到同键 → primary_key_conflict。"""
         self.calls.append("set_primary_key")
-        if getattr(self, "pk_conflict", False):
-            raise ArtifactRepoError("primary_key_conflict")
+        if artifact_id not in self.artifacts:
+            raise ArtifactRepoError("artifact_not_found")
+        active = [
+            c for c in self.columns.get(artifact_id, [])
+            if c.get("status") != "dropped"
+        ]
+        by_id = {str(c["column_id"]): c for c in active}
+        if any(cid not in by_id for cid in column_ids):
+            raise ArtifactRepoError("unknown_column")
+        pk_names = [str(by_id[cid]["column_name"]) for cid in column_ids]
+        rekeyed = 0
+        seen: set[str] = set()
+        for row in self.rev0_rows.get(artifact_id, []):
+            new_key = _row_key_value(row["data"], pk_names)
+            if new_key in seen:
+                raise ArtifactRepoError("primary_key_conflict")
+            seen.add(new_key)
+            if new_key != row["row_key"]:
+                row["row_key"] = new_key
+                rekeyed += 1
         for col in self.columns.get(artifact_id, []):
             col["is_primary_key"] = col["column_id"] in column_ids
         return {"artifact_id": artifact_id, "primary_key": list(column_ids),
-                "rekeyed_rows": 0}
+                "rekeyed_rows": rekeyed}
 
     async def replace_columns_for_artifact(
         self, artifact_id: str, columns: list[dict],
@@ -406,9 +445,16 @@ class FakeArtifactDB:
         return len(self.revision_rows.get(artifact_id, {}).get(revision, []))
 
     async def diff_draft_vs_current(self, artifact_id: str) -> dict:
+        """对齐真库（对抗审查修复③）：draft_open=FALSE 且 current>0 = 干净态
+        → 零差异投影（与 list_rows 缺省 draft 视图同口径）。"""
         self.calls.append("diff_draft_vs_current")
         art = self.artifacts[artifact_id]
         cur = art["current_revision"]
+        if not art.get("draft_open") and cur > 0:
+            return {
+                "added": [], "removed": [], "changed": [],
+                "added_count": 0, "removed_count": 0, "changed_count": 0,
+            }
         current_rows = self.revision_rows.get(artifact_id, {}).get(cur, []) \
             if cur > 0 else []
         draft = {r["row_key"]: r["data"] for r in self.rev0_rows.get(artifact_id, [])}
@@ -465,6 +511,13 @@ async def _seeded_db() -> FakeArtifactDB:
          "status": "active"},
     ]
     db.domain_admins.add(("u-domadmin", "plant-a"))
+    # 成员治理（修复⑪）预检底料：常见 fixture 用户均 active
+    db.users.update({
+        uid: "active" for uid in (
+            "u-owner", "u-editor", "u-viewer", "u-new", "u-domadmin",
+            "u-siteadmin", "u-owner2",
+        )
+    })
     return db
 
 
@@ -503,7 +556,9 @@ async def test_domain_admin_manages_own_domain_but_404_cross_domain() -> None:
     db.rev0_rows["art_other"] = []
     svc = ArtifactService(db)
     domadmin = _user("u-domadmin")
-    # 本域：全权（发布/成员/删除路径都放行到 db）
+    # 本域：全权（发布/成员/删除路径都放行到 db）——发布前先检出 draft
+    # （对抗审查修复③：干净态 current>0 发布 → no_pending_changes）
+    await db.ensure_draft(AID)
     await svc.publish(user=domadmin, artifact_id=AID, change_summary="域管理员发布")
     await svc.upsert_member(
         user=domadmin, artifact_id=AID, member_user_id="u-new", role="editor",
@@ -834,12 +889,29 @@ async def test_create_artifact_makes_creator_owner() -> None:
 
 @pytest.mark.asyncio
 async def test_set_primary_key_maps_repo_conflict_error() -> None:
+    """对抗审查修复②回归：改主键按 column_name 重算键——两行折到同键 →
+    409 PrimaryKeyConflict；组合主键重算键值来自列名而非 column_id。"""
     db = await _seeded_db()
-    db.pk_conflict = True
+    await db.ensure_draft(AID)   # current(rev1) → rev0，行编辑才有效
+    # 制造折叠：两行 L1 同值，主键换成 c002（L1）
+    db.rev0_rows[AID][0]["data"]["L1"] = "部署"
+    db.rev0_rows[AID][1]["data"]["L1"] = "部署"
     svc = ArtifactService(db)
     with pytest.raises(PrimaryKeyConflict):
         await svc.set_primary_key(
-            user=_user("u-owner"), artifact_id=AID, column_ids=["c001"],
+            user=_user("u-owner"), artifact_id=AID, column_ids=["c002"],
+        )
+    # 组合主键 c001+c002：键=MOP值/L1值（列名取数），不折叠
+    db.rev0_rows[AID][1]["data"]["L1"] = "扩容"
+    result = await svc.set_primary_key(
+        user=_user("u-owner"), artifact_id=AID, column_ids=["c001", "c002"],
+    )
+    assert result["rekeyed_rows"] == 2
+    assert {r["row_key"] for r in db.rev0_rows[AID]} == {"MOP-1/部署", "MOP-2/扩容"}
+    # 未知列 → 400 InvalidOperation
+    with pytest.raises(InvalidOperation):
+        await svc.set_primary_key(
+            user=_user("u-owner"), artifact_id=AID, column_ids=["c999"],
         )
 
 
@@ -895,12 +967,278 @@ async def test_update_cell_int_float_cast_marks_conflict() -> None:
         user=owner, artifact_id=AID, row_key="MOP-1", column="单价", value="3.5x")
     assert row["data"]["单价"] is None
     assert row["conflicts"]["单价"] == "type_error:3.5x"
-    # text 列与未登记列不校验
+    # text 列不设卡（登记列直通）；未登记列 → 400 unknown_column（修复⑩）
     row = await svc.update_cell(
-        user=owner, artifact_id=AID, row_key="MOP-1", column="自由列", value="x")
-    assert row["data"]["自由列"] == "x"
+        user=owner, artifact_id=AID, row_key="MOP-1", column="MOP", value="x")
+    assert row["data"]["MOP"] == "x"
+    with pytest.raises(InvalidOperation, match="unknown_column"):
+        await svc.update_cell(
+            user=owner, artifact_id=AID, row_key="MOP-1", column="自由列", value="x")
     # 行不存在仍 row_not_found（400），类型校验不掩盖
     with pytest.raises(InvalidOperation):
         await svc.update_cell(
             user=owner, artifact_id=AID, row_key="MOP-404",
             column="数量", value="abc")
+
+
+# --------------------------------------------- 对抗审查修复回归（61号 21项）
+
+@pytest.mark.asyncio
+async def test_row_write_defenses_formula_and_unknown_column() -> None:
+    """修复⑩回归：三个行写入口（update_cell/batch_assign/insert_single_row）
+    统一防线——公式注入（=+-@ 前缀）400 / 未知列 400。"""
+    db = await _seeded_db()
+    await db.upsert_column(AID, "c003", {"column_name": "数量", "column_type": "int"})
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+
+    # update_cell：公式 400（= + - @ 四前缀）
+    for formula in ("=SUM(A1)", "+1", " -1+1 ", "@x"):
+        with pytest.raises(InvalidOperation, match="formula_not_allowed"):
+            await svc.update_cell(
+                user=owner, artifact_id=AID, row_key="MOP-1",
+                column="L1", value=formula)
+    # update_cell：未知列 400（不再照写影子键）
+    with pytest.raises(InvalidOperation, match="unknown_column"):
+        await svc.update_cell(
+            user=owner, artifact_id=AID, row_key="MOP-1", column="不存在列", value="x")
+    # batch_assign：公式 400 / 未知列 400 / int 列 cast 失败 strict 400
+    with pytest.raises(InvalidOperation, match="formula_not_allowed"):
+        await svc.batch_assign(
+            user=owner, artifact_id=AID, column="L1", value="@cmd", where_clauses=[])
+    with pytest.raises(InvalidOperation, match="unknown_column"):
+        await svc.batch_assign(
+            user=owner, artifact_id=AID, column="不存在列", value="x", where_clauses=[])
+    with pytest.raises(InvalidOperation, match="type_error"):
+        await svc.batch_assign(
+            user=owner, artifact_id=AID, column="数量", value="abc", where_clauses=[])
+    # insert_single_row：公式 400 / 未知键 400
+    with pytest.raises(InvalidOperation, match="formula_not_allowed"):
+        await svc.insert_single_row(
+            user=owner, artifact_id=AID, data={"MOP": "=1+1"})
+    with pytest.raises(InvalidOperation, match="unknown_column"):
+        await svc.insert_single_row(
+            user=owner, artifact_id=AID, data={"幽灵列": "x"})
+
+
+@pytest.mark.asyncio
+async def test_insert_single_row_alias_canonical_and_tolerant_cast() -> None:
+    """修复⑨⑩回归：alias 旧名归一到规范列名落库（不写影子键，row_key 用
+    主键列名拼接）；int cast 失败置 null+conflicts（与 update_cell 同口径）。"""
+    db = await _seeded_db()
+    # 改名 c001 MOP→MOP单号，alias 留旧名（§7.1）
+    await db.upsert_column(AID, "c001", {"column_name": "MOP单号", "alias": ["MOP"]})
+    await db.upsert_column(AID, "c003", {"column_name": "数量", "column_type": "int"})
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+
+    row = await svc.insert_single_row(
+        user=owner, artifact_id=AID,
+        data={"MOP": "NC-NEW", "L1": "部署", "数量": "abc"},
+    )
+    assert "MOP" not in row["data"]          # 旧名不落影子键
+    assert row["data"]["MOP单号"] == "NC-NEW"  # 归一到规范名
+    assert row["row_key"] == "NC-NEW"         # 主键拼接用列名取数
+    assert row["data"]["数量"] is None         # tolerant：置 null + 标记
+    assert row["conflicts"]["数量"] == "type_error:abc"
+
+
+@pytest.mark.asyncio
+async def test_update_cell_date_bool_cast_marks_conflict() -> None:
+    """修复⑫回归：_cast_cell 扩展 date/bool 分支（与导入 _cast_value 同源）——
+    可解归一存储，失败置 null+conflicts。"""
+    db = await _seeded_db()
+    await db.upsert_column(AID, "c005", {"column_name": "日期", "column_type": "date"})
+    await db.upsert_column(AID, "c006", {"column_name": "开关", "column_type": "bool"})
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="日期", value="2026-06-01")
+    assert row["data"]["日期"] == "2026-06-01"
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="日期", value="not-a-date")
+    assert row["data"]["日期"] is None
+    assert row["conflicts"]["日期"] == "type_error:not-a-date"
+
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="开关", value="true")
+    assert row["data"]["开关"] is True
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="开关", value=1)
+    assert row["data"]["开关"] is True
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="开关", value="maybe")
+    assert row["data"]["开关"] is None
+    assert row["conflicts"]["开关"] == "type_error:maybe"
+
+
+@pytest.mark.asyncio
+async def test_publish_clean_state_raises_no_pending_changes() -> None:
+    """修复③回归：draft_open=FALSE 且 current>0（干净态）→ NoPendingChanges；
+    干净态 diff 零差异投影；检出草稿后放行；从未发布（current=0）不受门禁。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+
+    with pytest.raises(NoPendingChanges):
+        await svc.publish(user=owner, artifact_id=AID, change_summary="x")
+    diff = await svc.diff_draft_vs_current(user=owner, artifact_id=AID)
+    assert diff == {"added": [], "removed": [], "changed": [],
+                    "added_count": 0, "removed_count": 0, "changed_count": 0}
+
+    await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="L1", value="演练")
+    result = await svc.publish(user=owner, artifact_id=AID, change_summary="r2")
+    assert result["revision"] == 2
+
+    # 从未发布制品首次发布不受门禁（rev0 即首发工作区）
+    await db.create_artifact(
+        domain_id="plant-a", title="新制品", owner_user_id="u-owner",
+        artifact_id="art_new", usage_note="u",
+    )
+    result = await svc.publish(user=owner, artifact_id="art_new", change_summary="首版")
+    assert result["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rollback_beyond_current_allowed_when_revision_exists() -> None:
+    """修复④回归：拨回 > current 的历史版本放行（「数据不动」语义下拨任何
+    历史版都安全）；不存在的 revision 仍 400。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+
+    await db.ensure_draft(AID)
+    await svc.publish(user=owner, artifact_id=AID, change_summary="r2")   # → rev2
+    rolled = await svc.rollback_to(user=owner, artifact_id=AID, revision=1)
+    assert rolled["current_revision"] == 1
+    rolled = await svc.rollback_to(user=owner, artifact_id=AID, revision=2)  # >current
+    assert rolled["current_revision"] == 2
+    with pytest.raises(InvalidOperation, match="invalid_revision"):
+        await svc.rollback_to(user=owner, artifact_id=AID, revision=99)
+
+
+@pytest.mark.asyncio
+async def test_upsert_member_user_status_and_last_owner_governance() -> None:
+    """修复⑪回归：不存在/非 active 用户 400；last-owner 降级 403；
+    第二个 owner 存在时降级放行。"""
+    db = await _seeded_db()
+    db.users["u-disabled"] = "disabled"
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+
+    with pytest.raises(InvalidOperation, match="invalid_member_user"):
+        await svc.upsert_member(
+            user=owner, artifact_id=AID, member_user_id="u-ghost", role="viewer")
+    with pytest.raises(InvalidOperation, match="invalid_member_user"):
+        await svc.upsert_member(
+            user=owner, artifact_id=AID, member_user_id="u-disabled", role="viewer")
+    # last-owner 降级 → 403
+    with pytest.raises(ArtifactForbidden):
+        await svc.upsert_member(
+            user=owner, artifact_id=AID, member_user_id="u-owner", role="editor")
+    # 加第二个 owner 后降级放行
+    db.users["u-owner2"] = "active"
+    await svc.upsert_member(
+        user=owner, artifact_id=AID, member_user_id="u-owner2", role="owner")
+    await svc.upsert_member(
+        user=owner, artifact_id=AID, member_user_id="u-owner2", role="editor")
+    assert db.members[AID]["u-owner2"] == "editor"
+
+
+@pytest.mark.asyncio
+async def test_upsert_column_rejects_duplicate_active_name() -> None:
+    """修复⑳回归：新建/改名撞既有 active 列名 → 400（DB 部分唯一索引兜底）；
+    自身保持原名（幂等 PATCH）放行。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+
+    with pytest.raises(InvalidOperation, match="duplicate_column_name"):
+        await svc.upsert_column(
+            user=owner, artifact_id=AID, column_id="c009",
+            fields={"column_name": "MOP"})
+    with pytest.raises(InvalidOperation, match="duplicate_column_name"):
+        await svc.upsert_column(
+            user=owner, artifact_id=AID, column_id="c002",
+            fields={"column_name": "MOP"})
+    col = await svc.upsert_column(
+        user=owner, artifact_id=AID, column_id="c002", fields={"column_name": "L1"})
+    assert col["column_name"] == "L1"
+
+
+@pytest.mark.asyncio
+async def test_replace_columns_rejects_in_plan_duplicate_names() -> None:
+    """修复⑳回归：replace_columns（首次导入建列）计划内列名重复 → 400。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    with pytest.raises(InvalidOperation, match="duplicate_column_name"):
+        await svc.replace_columns(
+            user=_user("u-owner"), artifact_id=AID, columns=[
+                {"column_id": "c001", "column_name": "同名列", "column_type": "text"},
+                {"column_id": "c002", "column_name": "同名列", "column_type": "text"},
+            ])
+
+
+# ------------------------------------------- 仓储 SQL 静态守卫（非门控）
+
+class _RecordingCursor:
+    def __init__(self) -> None:
+        self._rows = [{"_inserted": True}]
+
+    async def fetchall(self):
+        return self._rows
+
+    @property
+    def rowcount(self) -> int:
+        return len(self._rows)
+
+
+class _RecordingConnection:
+    def __init__(self, log: list) -> None:
+        self._log = log
+
+    async def execute(self, query, params=()):
+        self._log.append((str(query), params))
+        return _RecordingCursor()
+
+
+class _PoolContext:
+    def __init__(self, conn: _RecordingConnection) -> None:
+        self._conn = conn
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _RecordingPool:
+    """最小 psycopg AsyncConnectionPool 形态——只够 insert_rows_upsert 走通。"""
+
+    def __init__(self) -> None:
+        self.log: list = []
+
+    def connection(self) -> _PoolContext:
+        return _PoolContext(_RecordingConnection(self.log))
+
+
+@pytest.mark.asyncio
+async def test_insert_rows_upsert_placeholder_count_matches_params() -> None:
+    """对抗审查修复①回归（★非门控静态测试）：解析发往真库的 SQL——VALUES
+    占位符数必须等于参数数（曾 6≠8，真库必炸）。"""
+    from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
+
+    pool = _RecordingPool()
+    db = ArtifactDB(pool)
+    result = await db.insert_rows_upsert(
+        "art_x", 0,
+        [{"row_key": "k1", "data": {"a": 1}, "provenance": [], "conflicts": {}}],
+        updated_by="u1",
+    )
+    assert result == {"inserted": 1, "updated": 0}
+    sql, params = pool.log[0]
+    assert sql.count("%s") == len(params)
+    assert len(params) == 8   # 8 列 × 1 行（artifact_id..updated_by）

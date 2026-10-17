@@ -11,7 +11,9 @@
   upsert_column → insert_rows 主键 UPSERT。
 
 预览登记为进程内 dict：mining API 单进程单 worker 部署成立；多副本部署需
-换共享存储（61号 MVP 边界，见 §13 演进预留）。
+换共享存储（61号 MVP 边界，见 §13 演进预留）。登记绑定 artifact_id+uploader
+（对抗审查修复⑬——token 跨制品/跨用户不可用，失配 404）；每 uploader 活跃
+登记 ≤5（修复⑭，超限清最旧 + 429）；启动无清扫要求（MVP，TTL 惰性清理足够）。
 
 公式注入防御与 55号 user_import_service 同口径：以 ``= + - @`` 开头的文本
 格一律拒绝（data_only=False 下公式格本身就是 "=..." 字符串）。
@@ -32,9 +34,11 @@ from openpyxl import load_workbook
 
 from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactError,
+    ArtifactNotFound,
     ArtifactService,
     InvalidOperation,
     PrimaryKeyConflict,
+    _is_formula,
     _try_float,
     _try_int,
 )
@@ -49,6 +53,8 @@ SAMPLE_ROWS = 50                             # 预览样例行 ≤ 50
 ENUM_MAX_DISTINCT = 50                       # distinct ≤ 50 且非全数值 → enum
 PREVIEW_TTL_SECONDS = 3600.0                 # 预览 token 1h
 CONFLICTS_SAMPLE_LIMIT = 20
+#: 单 uploader 活跃预览登记上限（对抗审查修复⑭；超限清最旧+429）。
+MAX_ACTIVE_PREVIEWS_PER_UPLOADER = 5
 
 _VALID_COLUMN_TYPES = {"text", "int", "float", "date", "enum", "bool"}
 
@@ -80,9 +86,7 @@ def _remove_file(path: str) -> None:
 def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
-
-def _is_formula(value: Any) -> bool:
-    return isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@"))
+# _is_formula 定义在 artifact_service（行写三入口共用），此处 import 复用。
 
 
 def _is_date_like(value: Any) -> bool:
@@ -211,6 +215,40 @@ def _consume_preview(preview_token: str) -> None:
         _remove_file(record["path"])
 
 
+def _assert_preview_binding(
+    record: dict[str, Any],
+    artifact_id: str | None, uploader: str | None,
+) -> None:
+    """token 绑定校验（对抗审查修复⑬）：已绑定登记（routes 上传必带
+    artifact_id+uploader）的 artifact_id/uploader 与请求上下文不符 →
+    ArtifactNotFound（route 翻 404——token 属于他人/他制品，不暴露登记
+    内容）。未绑定登记（服务层直调测试形态）不设卡。"""
+    if record.get("artifact_id") is not None and (
+        record.get("artifact_id") != artifact_id
+        or record.get("uploader") != uploader
+    ):
+        raise ArtifactNotFound("preview_token_mismatch")
+
+
+def _enforce_preview_cap(uploader: str | None) -> None:
+    """每 uploader 活跃登记 ≤ MAX_ACTIVE_PREVIEWS_PER_UPLOADER（修复⑭）：
+    超限先清最旧（下次重试即可成功）再报 preview_limit（route 翻 429）。
+    未绑定 uploader 的登记（直调测试形态）不计。"""
+    if uploader is None:
+        return
+    active = [
+        (token, record) for token, record in _PREVIEW_TOKENS.items()
+        if record.get("uploader") == uploader
+    ]
+    if len(active) < MAX_ACTIVE_PREVIEWS_PER_UPLOADER:
+        return
+    oldest_token, _ = min(active, key=lambda item: item[1]["parsed_at"])
+    evicted = _PREVIEW_TOKENS.pop(oldest_token, None)
+    if evicted is not None:
+        _remove_file(evicted["path"])
+    raise ArtifactImportError("preview_limit")
+
+
 def _normalize_policy(raw: Any) -> dict[str, str]:
     """conflict_policy 归一：{type_error: strict|tolerant, key_conflict:
     block|keep_first}；缺省 strict/block。"""
@@ -253,9 +291,15 @@ class ArtifactImportService:
 
     # ------------------------------------------------------------ 第一步
 
-    def parse_upload(self, file_bytes: bytes, file_name: str) -> dict[str, Any]:
-        """护栏 → 临时文件 → 默认 sheet 扫描（类型推断+样例）→ 预览登记。"""
+    def parse_upload(
+        self, file_bytes: bytes, file_name: str, *,
+        artifact_id: str | None = None, uploader: str | None = None,
+    ) -> dict[str, Any]:
+        """护栏 → 临时文件 → 默认 sheet 扫描（类型推断+样例）→ 预览登记
+        （绑定 artifact_id+uploader，修复⑬）。routes 侧经 anyio.to_thread
+        调用（修复⑮：openpyxl 扫描不占事件循环）。"""
         _cleanup_expired_previews()
+        _enforce_preview_cap(uploader)
         if len(file_bytes) > MAX_UPLOAD_BYTES:
             raise ArtifactImportError("file_too_large")
         if Path(file_name).suffix.lower() != ".xlsx":
@@ -277,14 +321,22 @@ class ArtifactImportService:
             "columns": scan["columns"],
             "sample_rows": scan["sample_rows"],
             "parsed_at": time.monotonic(),
+            "artifact_id": artifact_id,
+            "uploader": uploader,
         }
         return {"preview_token": token, "preview": self._preview_payload(token)}
 
-    def get_preview(self, preview_token: str) -> dict[str, Any]:
-        """与 parse_upload 同信封：{preview_token, preview}。"""
+    def get_preview(
+        self, preview_token: str, *,
+        artifact_id: str | None = None, uploader: str | None = None,
+    ) -> dict[str, Any]:
+        """与 parse_upload 同信封：{preview_token, preview}（绑定校验同
+        _require_preview——失配 404）。"""
         _cleanup_expired_previews()
-        if preview_token not in _PREVIEW_TOKENS:
+        record = _PREVIEW_TOKENS.get(preview_token)
+        if record is None:
             raise ArtifactImportError("preview_expired")
+        _assert_preview_binding(record, artifact_id, uploader)
         return {
             "preview_token": preview_token,
             "preview": self._preview_payload(preview_token),
@@ -301,11 +353,15 @@ class ArtifactImportService:
             "sample_rows": record["sample_rows"],
         }
 
-    def _require_preview(self, preview_token: str) -> dict[str, Any]:
+    def _require_preview(
+        self, preview_token: str, *,
+        artifact_id: str | None = None, uploader: str | None = None,
+    ) -> dict[str, Any]:
         _cleanup_expired_previews()
         record = _PREVIEW_TOKENS.get(preview_token)
         if record is None:
             raise ArtifactImportError("preview_expired")
+        _assert_preview_binding(record, artifact_id, uploader)
         return record
 
     @staticmethod
@@ -408,12 +464,16 @@ class ArtifactImportService:
         header_row: int = 1,
         column_ops: list[dict[str, Any]] | None = None,
         target_columns: list[dict[str, Any]] | None = None,
+        artifact_id: str | None = None,
+        uploader: str | None = None,
     ) -> dict[str, Any]:
         """纯计算不落库。建表模式 ops 全 action='new'；追加模式 action∈
         {map_to: target 列 id | new | drop}。target_columns=制品现有 active 列
         （调用方经 service.list_columns 取，权限已查）——追加模式用于目标列
-        校验与 missing_columns 提示。"""
-        record = self._require_preview(preview_token)
+        校验与 missing_columns 提示。绑定校验（修复⑬）：失配 404。"""
+        record = self._require_preview(
+            preview_token, artifact_id=artifact_id, uploader=uploader,
+        )
         sheet = sheet or record["sheets"][0]
         if sheet not in record["sheets"]:
             raise ArtifactImportError("unknown_sheet")
@@ -514,8 +574,11 @@ class ArtifactImportService:
         conflict_policy: dict[str, Any] | str | None = None,
     ) -> dict[str, Any]:
         """确认导入。全量校验（类型 + 文件内主键重复）先行——strict/block
-        策略下报错即零写入；通过后 create_batch → 建列 → insert_rows UPSERT。"""
-        record = self._require_preview(preview_token)
+        策略下报错即零写入；通过后 create_batch → 建列 → insert_rows UPSERT。
+        token 绑定校验（修复⑬）：登记制品/uploader 与路径上下文失配 → 404。"""
+        record = self._require_preview(
+            preview_token, artifact_id=artifact_id, uploader=str(user["id"]),
+        )
         policy = _normalize_policy(conflict_policy)
         plan_columns = list(plan.get("columns") or [])
         if not plan_columns:
@@ -543,6 +606,10 @@ class ArtifactImportService:
             plan_columns, active, effective_mode)
         headers = self._read_headers(record["path"], sheet, header_row)
         pk_names = self._primary_key_names(plan_columns, active, effective_mode)
+        # 追加导入 ordinal 起点 = 现有 rev0 行数 + 1（对抗审查修复⑧：追加批
+        # 的行号接在存量之后，不再与已有行挤 1..N）。ensure_draft 已检出，
+        # 此处计数即检出席。
+        ordinal_base = await self._db.count_rows(artifact_id, 0)
 
         prepared: list[dict[str, Any]] = []
         seen_keys: dict[str, int] = {}
@@ -611,7 +678,7 @@ class ArtifactImportService:
                 "data": data,
                 "provenance": [],
                 "conflicts": conflicts,
-                "ordinal": len(prepared) + 1,
+                "ordinal": ordinal_base + len(prepared) + 1,
                 "_row_index": row_index,
             })
         # strict / block：全量校验失败 → 聚合样例报错，不落任何行

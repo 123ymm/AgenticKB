@@ -113,14 +113,14 @@
                   @keyup.enter="addEnumValue(m)"
                 />
               </template>
-              <!-- 主键仅在建表模式有意义（追加模式沿用 schema 既有主键，plan 标记被后端忽略） -->
+              <!-- 主键多选（组合主键，后端本就支持多列）；仅建表模式有意义（追加
+                   模式沿用 schema 既有主键，plan 标记被后端忽略） -->
               <label v-if="!hasExisting" class="import-wizard__check">
                 <input
                   type="checkbox"
-                  :checked="m.isPrimaryKey"
+                  v-model="m.isPrimaryKey"
                   data-test="map-pk"
-                  @change="togglePrimaryKey(m)"
-                />主键
+                />主键（可多选）
               </label>
               <label class="import-wizard__check">
                 <input type="checkbox" v-model="m.isIndexed" />索引
@@ -388,13 +388,6 @@ function onActionChange(m: ColumnMapping): void {
   if (m.action !== 'new') m.isPrimaryKey = false
 }
 
-/** 主键跨行互斥：选中即取消其余行的主键标记。 */
-function togglePrimaryKey(m: ColumnMapping): void {
-  const next = !m.isPrimaryKey
-  mappings.value.forEach(row => { row.isPrimaryKey = false })
-  m.isPrimaryKey = next
-}
-
 function addEnumValue(m: ColumnMapping): void {
   const value = m.enumInput.trim()
   if (!value) return
@@ -502,7 +495,7 @@ function typeTagType(value: string): 'primary' | 'success' | 'warning' | 'info' 
 }
 
 defineExpose({
-  doUpload, runImport, confirmMapping, togglePrimaryKey,
+  doUpload, runImport, confirmMapping,
   buildColumnOps, resetWizard, initMappings,
 })
 </script>

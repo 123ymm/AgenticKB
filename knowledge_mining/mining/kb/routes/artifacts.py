@@ -1,12 +1,14 @@
 """知识制品 REST 路由 —— /api/artifacts（61号 §十）。
 
 薄 handler + _map_error 错误翻译（NotFound→404 反探测 / Forbidden→403 /
-UsageNoteRequired→422 / PrimaryKeyConflict·StaleArtifact→409（带 code）/
-InvalidOperation→400 / ArtifactImportError→413·410·422）。业务与权限全部
+UsageNoteRequired→422 / PrimaryKeyConflict·StaleArtifact·NoPendingChanges
+→409（带 code）/ InvalidOperation→400（unknown_column·formula 等）/
+ArtifactImportError→413·410·429·422）。业务与权限全部
 在 ArtifactService（见 services/artifact_service.py 权限矩阵注释）。
 
-Excel 三步向导（§六）：upload（multipart→202 预览 token）→ preview/{token}
-（TTL 失效 410）→ import（plan 支持两种形态：build_mapping 产物，或
+Excel 三步向导（§六）：upload（multipart→202 预览 token，登记绑定
+artifact_id+uploader）→ preview/{token}（TTL 失效 410 / 绑定失配 404）→
+import（plan 支持两种形态：build_mapping 产物，或
 {sheet, header_row, column_ops} 原始 ops——后者由本层补跑 build_mapping，
 返回前含 missing_columns 校验）。
 """
@@ -15,6 +17,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import anyio
 from fastapi import (
     APIRouter,
     Depends,
@@ -45,6 +48,7 @@ from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactNotFound,
     ArtifactService,
     InvalidOperation,
+    NoPendingChanges,
     PrimaryKeyConflict,
     StaleArtifact,
     UsageNoteRequired,
@@ -151,6 +155,10 @@ def _map_error(exc: ArtifactError) -> HTTPException:
             return HTTPException(413, "file_too_large")
         if exc.code == "preview_expired":
             return HTTPException(410, "preview_expired")
+        if exc.code == "preview_limit":
+            return HTTPException(
+                429, "preview_limit: 预览登记过多（每用户 ≤5），已清最旧，请重试",
+            )
         return HTTPException(422, exc.code)
     if isinstance(exc, ArtifactNotFound):
         return HTTPException(404, str(exc) or "not_found")
@@ -158,6 +166,9 @@ def _map_error(exc: ArtifactError) -> HTTPException:
         return HTTPException(403, str(exc) or "forbidden")
     if isinstance(exc, UsageNoteRequired):
         return HTTPException(422, "usage_note_required: 发布前必须填写使用说明")
+    if isinstance(exc, NoPendingChanges):
+        return HTTPException(409, {"code": "no_pending_changes",
+                                   "message": "无待发布变更（草稿已关闭，请先编辑检出草稿）"})
     if isinstance(exc, PrimaryKeyConflict):
         return HTTPException(409, {"code": "primary_key_conflict",
                                    "message": str(exc)})
@@ -479,6 +490,8 @@ async def upload_table(
     svc: ArtifactService = Depends(get_artifact_service),
     imp: ArtifactImportService = Depends(get_artifact_import_service),
 ):
+    """上传解析登记绑定 artifact_id+uploader（修复⑬）；openpyxl 全量扫描经
+    anyio.to_thread 移出事件循环（修复⑮）。"""
     await _require_editor(svc, user, artifact_id)
     _check_upload_size(request, file)
     filename = file.filename or ""
@@ -486,7 +499,12 @@ async def upload_table(
         raise HTTPException(422, "unsupported_file_type: 仅支持 .xlsx")
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     try:
-        return imp.parse_upload(content, filename)
+        return await anyio.to_thread.run_sync(
+            lambda: imp.parse_upload(
+                content, filename,
+                artifact_id=artifact_id, uploader=str(user["id"]),
+            ),
+        )
     except ArtifactError as exc:
         raise _map_error(exc) from None
 
@@ -501,7 +519,10 @@ async def get_table_preview(
 ):
     await _require_editor(svc, user, artifact_id)
     try:
-        return imp.get_preview(preview_token)
+        return imp.get_preview(
+            preview_token,
+            artifact_id=artifact_id, uploader=str(user["id"]),
+        )
     except ArtifactError as exc:
         raise _map_error(exc) from None
 
@@ -516,18 +537,22 @@ async def import_table(
 ):
     """plan 两种形态：build_mapping 产物（含 mode/columns），或原始
     {sheet, header_row, column_ops}——后者本层补跑 build_mapping（含
-    missing_columns 与映射校验），再进 execute_import。"""
+    missing_columns 与映射校验，openpyxl 表头重读经 anyio.to_thread 移出
+    事件循环），再进 execute_import（token 绑定在服务内校验，失配 404）。"""
     try:
         plan = dict(body.plan)
         if "column_ops" in plan:
             target_columns = await svc.list_columns(
                 user=user, artifact_id=artifact_id)
-            plan = imp.build_mapping(
-                body.preview_token,
-                sheet=plan.get("sheet"),
-                header_row=int(plan.get("header_row") or 1),
-                column_ops=plan["column_ops"],
-                target_columns=target_columns,
+            plan = await anyio.to_thread.run_sync(
+                lambda: imp.build_mapping(
+                    body.preview_token,
+                    sheet=plan.get("sheet"),
+                    header_row=int(plan.get("header_row") or 1),
+                    column_ops=plan["column_ops"],
+                    target_columns=target_columns,
+                    artifact_id=artifact_id, uploader=str(user["id"]),
+                ),
             )
         return await imp.execute_import(
             svc, user=user, artifact_id=artifact_id,

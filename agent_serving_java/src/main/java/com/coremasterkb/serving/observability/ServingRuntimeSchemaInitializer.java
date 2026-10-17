@@ -31,7 +31,7 @@ public class ServingRuntimeSchemaInitializer implements DomainSchemaEnsurer {
     private static final String LEDGER_TABLE = "cmkb_schema_migrations";
     private static final String EXPECTED_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1";
     private static final String EXPECTED_SCHEMA_CHECKSUM =
-            "517a3b7d2dae25e227c82a315387a0c74a8773c9abfbb7bea2770a6f039bec33";
+            "a385b7d10a0604fb8485561e18dc127314dd32a4f71756359a5fc8947b018d92";
     private static final String EXPECTED_SCHEMA_MARKER =
             "schema/" + EXPECTED_SCHEMA_VERSION;
 

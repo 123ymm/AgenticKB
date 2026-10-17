@@ -145,6 +145,10 @@ async def env(tmp_path):
     service，用例6/7/9 打真实 REST 路由（状态码口径）。"""
     db = AcceptanceFakeArtifactDB()
     db.domain_bindings.add(("u-owner", DOMAIN))
+    # 成员治理（修复⑪）预检底料：验收用例涉及的协作用户均 active
+    db.users.update({
+        uid: "active" for uid in ("u-owner", "u-editor", "u-viewer", "u-stranger")
+    })
     svc = ArtifactService(db)
     imp = ArtifactImportService(db)
     app = FastAPI()

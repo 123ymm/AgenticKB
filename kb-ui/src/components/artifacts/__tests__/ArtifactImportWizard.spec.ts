@@ -39,7 +39,6 @@ interface WizardVm {
   missingColumns: string[]
   doUpload: (file: File) => Promise<void>
   confirmMapping: () => void
-  togglePrimaryKey: (m: WizardVm['mappings'][number]) => void
   buildColumnOps: () => Array<Record<string, unknown>>
   runImport: () => Promise<void>
   resetWizard: () => void
@@ -152,20 +151,26 @@ describe('ArtifactImportWizard', () => {
     expect(wrapper.text()).toContain('以下列本批将为空：L2分类')
   })
 
-  it('keeps primary key exclusive across mapping rows', async () => {
+  it('supports composite primary key selection (multi-select, not exclusive)', async () => {
     const wrapper = mountWizard()
     await flushPromises()
     const vm = wrapper.vm as unknown as WizardVm
     await vm.doUpload(new File(['x'], 'A.xlsx'))
     await flushPromises()
 
-    vm.togglePrimaryKey(vm.mappings[0])
+    // 多选：两列同时标记主键（组合主键）互不排斥
+    vm.mappings[0].isPrimaryKey = true
+    vm.mappings[1].isPrimaryKey = true
     expect(vm.mappings[0].isPrimaryKey).toBe(true)
-    vm.togglePrimaryKey(vm.mappings[1])
     expect(vm.mappings[1].isPrimaryKey).toBe(true)
-    expect(vm.mappings[0].isPrimaryKey).toBe(false)
-    vm.togglePrimaryKey(vm.mappings[1])
-    expect(vm.mappings.every(m => !m.isPrimaryKey)).toBe(true)
+    vm.confirmMapping()
+    expect(vm.mappingConfirmed).toBe(true)
+
+    const ops = vm.buildColumnOps().filter(op => op.action === 'new')
+    expect(ops.filter(op => op.is_primary_key)).toHaveLength(2)
+    // 取消一列不影响另一列
+    vm.mappings[1].isPrimaryKey = false
+    expect(vm.buildColumnOps().filter(op => op.is_primary_key)).toHaveLength(1)
   })
 
   it('blocks append confirmation when no column maps to an existing one', async () => {

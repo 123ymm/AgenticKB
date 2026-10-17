@@ -30,16 +30,22 @@ interface DialogVm {
   usageNote: string
   changeSummary: string
   canPublish: boolean
+  noPendingChanges: boolean
   confirmPublish: () => Promise<void>
 }
 
-function mountDialog(usageNote: string): VueWrapper {
+function mountDialog(
+  usageNote: string,
+  extra: { draftOpen?: boolean; currentRevision?: number } = {},
+): VueWrapper {
   return shallowMount(ArtifactPublishDialog, {
     props: {
       artifactId: 'art-1',
       modelValue: true,
       expectedUpdatedAt: '2026-10-16T08:00:00+00:00',
       usageNote,
+      draftOpen: extra.draftOpen,
+      currentRevision: extra.currentRevision,
     },
     global: {
       // 折叠面板渲染 title 插槽——三段计数文本断言需要
@@ -49,6 +55,7 @@ function mountDialog(usageNote: string): VueWrapper {
           template: '<div class="collapse-item"><slot name="title" /><slot /></div>',
         },
         ElEmpty: true,
+        ElAlert: { props: ['title'], template: '<div class="el-alert">{{ title }}</div>' },
       },
     },
   })
@@ -165,5 +172,27 @@ describe('ArtifactPublishDialog', () => {
 
     expect(state.ui.error).toHaveBeenCalledWith(expect.stringContaining('刷新'))
     expect(wrapper.emitted('published')).toBeUndefined()
+  })
+
+  it('blocks publishing when no pending changes (draft closed, revision > 0)', async () => {
+    const wrapper = mountDialog('查责任域', { draftOpen: false, currentRevision: 2 })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as DialogVm
+
+    expect(vm.noPendingChanges).toBe(true)
+    expect(vm.canPublish).toBe(false)
+    expect(wrapper.text()).toContain('无待发布变更')
+    await vm.confirmPublish()
+    expect(state.api.publish).not.toHaveBeenCalled()
+    expect(wrapper.emitted('published')).toBeUndefined()
+  })
+
+  it('allows first publish even with draft closed when revision is 0', async () => {
+    const wrapper = mountDialog('查责任域', { draftOpen: false, currentRevision: 0 })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as DialogVm
+
+    expect(vm.noPendingChanges).toBe(false)
+    expect(vm.canPublish).toBe(true)
   })
 })
