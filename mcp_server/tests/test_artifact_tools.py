@@ -247,6 +247,35 @@ def test_artifact_401_infra_error_not_typed(monkeypatch, calls):
     assert not isinstance(exc_info.value, backend.ServingToolError)
 
 
+@pytest.mark.parametrize("status", [500, 502])
+def test_artifact_5xx_string_error_not_typed(monkeypatch, calls, status):
+    """M1 回归：≥500 + 字符串错误体（internal_error 等真基础设施故障）不进
+    typed invalid 口径——修复前会被误归 ServingToolError("internal_error")
+    （ledger invalid），现走 upstream failed 兜底。"""
+    def responder(request):
+        return httpx.Response(status, json={
+            "error": "internal_error", "message": "Internal server error"})
+
+    install(monkeypatch, handler_for(calls, responder), calls)
+    with pytest.raises(backend.ToolBackendError) as exc_info:
+        backend.query_artifact("art_ab12", None, "cloud_core_network", IDENT)
+    assert not isinstance(exc_info.value, backend.ServingToolError)
+    assert f"HTTP {status}" in str(exc_info.value)
+
+
+def test_artifact_404_string_error_still_typed(monkeypatch, calls):
+    """对照：4xx 字符串码（artifact_not_found 反探测 404）仍进 typed 口径——
+    M1 只把 ≥500/401/503 摘出去，稳定业务码不受影响。"""
+    def responder(request):
+        return httpx.Response(404, json={
+            "error": "artifact_not_found", "message": "Artifact not found"})
+
+    install(monkeypatch, handler_for(calls, responder), calls)
+    with pytest.raises(backend.ServingToolError) as exc_info:
+        backend.query_artifact("art_ab12", None, "cloud_core_network", IDENT)
+    assert exc_info.value.code == "artifact_not_found"
+
+
 # ── server 层：_browse_top artifacts 发现段 ──────────────────────────────
 
 

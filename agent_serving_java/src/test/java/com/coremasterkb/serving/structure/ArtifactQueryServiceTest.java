@@ -134,6 +134,29 @@ class ArtifactQueryServiceTest {
         verify(mapper).selectVisibleArtifact(ID, "other", "bob", false);
     }
 
+    @Test
+    @DisplayName("C1 回归：username≠user_id（uuid hex）——登录名原样下发，身份解析只发生在 SQL JOIN")
+    void usernameForwardedVerbatimNeverUsedAsUserId() {
+        // 登录名恰好形同他人的 user_id（uuid 形态）——旧口径 m.user_id=#{username} /
+        // a.owner_user_id=#{username} 直比会被碰撞串误放行；新口径（XML 契约已钉）
+        // 先 JOIN kb_users 再对 u.id 判定，service 侧只保证登录名逐字下沉。
+        String uuidShaped = "3f2a1b8c-1111-4222-8333-444455556666";
+        when(mapper.selectVisibleArtifact(ID, DOMAIN, uuidShaped, false))
+                .thenReturn(visible(3));
+
+        service.query(REF, null, DOMAIN, uuidShaped, false);
+
+        // 不翻译、不猜测、不拆解——mapper 收到的就是登录名本身
+        verify(mapper).selectVisibleArtifact(ID, DOMAIN, uuidShaped, false);
+
+        // 发现通道同口径：同一登录名原样进入 selectArtifactSummaries
+        when(mapper.selectArtifactSummaries(eq(DOMAIN), eq(uuidShaped), eq(false),
+                any(), any(), anyInt())).thenReturn(List.of());
+        service.list(DOMAIN, uuidShaped, false, null, null);
+        verify(mapper).selectArtifactSummaries(eq(DOMAIN), eq(uuidShaped), eq(false),
+                any(), any(), anyInt());
+    }
+
     // ---- 三视图形态 ------------------------------------------------------------
 
     @Test
@@ -428,6 +451,37 @@ class ArtifactQueryServiceTest {
             assertThat(dec.rowKey()).isEqualTo("OLT-1");
             assertThat(dec.ordered()).isFalse();
         }
+
+        @Test
+        @DisplayName("C4：伪造 cursor 的 sort_value 不可 cast numeric → typed 400，零 SQL 下沉")
+        void forgedNumericCursorSortValueRejected() {
+            // 非法文法 / 千分位 / 超值域指数——合法 cursor 恒为 BigDecimal 平文，全是伪造形态
+            for (String forged : List.of("1,2abc", "1,200", "1e999999", "")) {
+                String cursor = ArtifactQueryService.encodeRowCursor(0, "k", forged, true);
+                assertThatThrownBy(() -> service.query(REF,
+                        query("{\"order_by\":[{\"field\":\"最大功耗\",\"direction\":\"desc\"}],"
+                                + "\"cursor\":\"" + cursor + "\"}"),
+                        DOMAIN, "alice", false))
+                        .as("sort_value=%s 须 typed 拒绝", forged)
+                        .isInstanceOf(StructureToolException.class)
+                        .extracting(e -> ((StructureToolException) e).code())
+                        .isEqualTo("unsupported_operation");
+            }
+            verify(mapper, never()).selectArtifactRows(any(), anyInt(), anyList(), any(), any(),
+                    anyBoolean(), anyInt(), any(), any(), anyInt());
+
+            // 对照：合法数字串（本服务签发形态）原样通过，keyset 参数逐值下沉
+            String valid = ArtifactQueryService.encodeRowCursor(3, "OLT-3", "65.5", true);
+            when(mapper.selectArtifactRows(eq(ID), eq(3), anyList(), eq("最大功耗"),
+                    eq("desc"), eq(true), eq(3), eq("OLT-3"), eq("65.5"), anyInt()))
+                    .thenReturn(List.of());
+            service.query(REF,
+                    query("{\"order_by\":[{\"field\":\"最大功耗\",\"direction\":\"desc\"}],"
+                            + "\"cursor\":\"" + valid + "\"}"),
+                    DOMAIN, "alice", false);
+            verify(mapper).selectArtifactRows(eq(ID), eq(3), anyList(), eq("最大功耗"),
+                    eq("desc"), eq(true), eq(3), eq("OLT-3"), eq("65.5"), anyInt());
+        }
     }
 
     // ---- 发现通道 ------------------------------------------------------------
@@ -526,14 +580,22 @@ class ArtifactQueryServiceTest {
             String xml = mapperXml();
             assertThat(xml).contains("t.data ->> #{c.field}");
             assertThat(xml).contains("r.data ->> #{orderField}");
-            assertThat(xml).contains("r.data ->> #{aggField}");
+            assertThat(xml).contains("t.data ->> #{aggField}");
             assertThat(xml).doesNotContain("->> '");
             assertThat(xml).doesNotContain("->> \"");
             assertThat(xml).contains("a.status = 'published'");
             assertThat(xml).contains("a.domain_id = #{domain}");
             assertThat(xml).contains("#{isAdmin}");
             assertThat(xml).contains("m.role IS NOT NULL");
-            assertThat(xml).contains("a.owner_user_id = #{username}");
+            // C1：username 先解析成 kb_users.id（active+未清退），成员/owner 全对 u.id
+            // 判定——不再拿登录名直比 user_id 列（uuid hex；防恒空手与 username 碰撞提权）
+            assertThat(xml).contains("u.username = #{username}");
+            assertThat(xml).contains("u.status = 'active'");
+            assertThat(xml).contains("u.deleted_at IS NULL");
+            assertThat(xml).contains("m.user_id = u.id");
+            assertThat(xml).contains("a.owner_user_id = u.id");
+            assertThat(xml).doesNotContain("m.user_id = #{username}");
+            assertThat(xml).doesNotContain("a.owner_user_id = #{username}");
         }
 
         @Test
@@ -546,11 +608,37 @@ class ArtifactQueryServiceTest {
             assertThat(xml).contains("test=\"aggOp == 'count'");
             assertThat(xml).doesNotContain("test=\"aggOp == 'avg'\""); // otherwise 兜底
             assertThat(xml).contains(
-                    "NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric");
+                    "NULLIF(REPLACE(t.data ->> #{aggField}, ',', ''), '')::numeric");
             // keyset：行翻页 (ordinal,row_key) 组合；发现翻页 updated_at+id
             assertThat(xml).contains("(t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey})");
             assertThat(xml).contains("a.updated_at &lt; CAST(#{afterUpdatedAt} AS timestamptz)");
             assertThat(xml).contains("LIMIT #{limit}");
+        }
+
+        @Test
+        @DisplayName("C2：聚合查询包同形子查询（别名 t）——aggField/criterion 引用统一走 t.data")
+        void aggregateWrappedInSubqueryAliasedT() throws Exception {
+            String xml = mapperXml();
+            // 行查询 + 聚合子查询两处直查 kb_table_rows r；聚合外层只见别名 t
+            assertThat(xml.split("FROM kb_table_rows r", -1)).hasSize(3);
+            assertThat(xml).contains("t.data ->> #{aggField}");
+            // 聚合直查 r 时 criterion 片段的 t.data 引用不存在的别名 → 42P01（修复前形态）
+            assertThat(xml).doesNotContain("r.data ->> #{aggField}");
+            // artifact/revision 收窄移入子查询（聚合过滤命中面不变）
+            assertThat(xml).contains(
+                    "SELECT r.data\n            FROM kb_table_rows r\n"
+                            + "            WHERE r.artifact_id = #{artifactId}"
+                            + " AND r.revision = #{revision}\n        ) t");
+        }
+
+        @Test
+        @DisplayName("C3：DESC null 游标分支放行非 NULL 块（NULLS FIRST 头块耗尽不丢页）")
+        void descNullCursorBranchExitsToNonNullBlock() throws Exception {
+            String xml = mapperXml();
+            // DESC 分支出路：块内 (ordinal,row_key) 推进 OR 放行非 NULL 块
+            assertThat(xml).contains("t.sort_value IS NOT NULL");
+            // ASC 分支保持原语义：NULL 块即终点（NULLS LAST）
+            assertThat(xml).contains("AND t.sort_value IS NULL");
         }
     }
 }

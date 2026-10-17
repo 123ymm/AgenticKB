@@ -238,6 +238,13 @@ public class ArtifactQueryService {
                     "cursor 与 order_by 不匹配——请原样保留签发该 cursor 时的 order_by"
                             + "（或不带 cursor 重新发起）", Map.of());
         }
+        if (numericOrder && after != null && after.sortValue() != null
+                && !isCastableNumeric(after.sortValue())) {
+            // 伪造 cursor 防线：sort_value 会被 mapper 包进 CAST(... AS numeric)——
+            // 非法/超值域串在 Java 侧提前 typed 400，不让 PG 报 500（61号 C4）。
+            // （sortValue==null 是合法 NULL 块游标，不走 CAST，放行。）
+            throw badCursor();
+        }
 
         List<ArtifactRowValue> fetched = mapper.selectArtifactRows(
                 table.artifactId(), table.revision(), criteria,
@@ -521,6 +528,26 @@ public class ArtifactQueryService {
     }
 
     // ------------------------------------------------------------------ cursor codec
+
+    /** PG numeric 整数部分位数上限（超出即 overflow，同样是 500 面）；cursor 预校验用。 */
+    private static final int MAX_NUMERIC_INTEGER_DIGITS = 131_072;
+
+    /**
+     * cursor 排序值可否安全进 mapper 的 {@code CAST(... AS numeric)}：合法 cursor 恒为
+     * 本服务签发的 BigDecimal 平文（无千分位/空白）；严格十进制文法 + 整数位数在
+     * PG numeric 值域内才放行——其余视为伪造，提前 typed 400（C4，防 PG 报 500）。
+     */
+    private static boolean isCastableNumeric(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        try {
+            BigDecimal v = new BigDecimal(value.trim());
+            return v.precision() - v.scale() <= MAX_NUMERIC_INTEGER_DIGITS;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
 
     static String encodeRowCursor(int ordinal, String rowKey, String sortValue, boolean ordered) {
         ObjectNode n = JsonUtils.mapper().createObjectNode();

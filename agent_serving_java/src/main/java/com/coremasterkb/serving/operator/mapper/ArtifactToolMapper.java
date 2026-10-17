@@ -52,7 +52,10 @@ public interface ArtifactToolMapper {
 
     /**
      * 权限谓词（单 SQL）：{@code status='published'} AND {@code domain_id=#{domain}}
-     * AND (isAdmin OR 成员 OR owner)。空手 = 不存在/无权/已停用/跨域（同响应）。
+     * AND (isAdmin OR u.id IS NOT NULL AND (成员 OR owner))。username 先经
+     * kb_users JOIN（active + 未清退，对齐 KnowledgeBaseMapper）解析成 u.id——
+     * 成员/owner 判定全部对 u.id，不拿登录名直比 user_id 列（存 uuid hex，C1）。
+     * 空手 = 不存在/无权/已停用/已清退/跨域（同响应）。
      */
     ArtifactVisibleRow selectVisibleArtifact(
             @Param("artifactId") String artifactId, @Param("domain") String domain,

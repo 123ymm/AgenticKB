@@ -8,8 +8,12 @@
       Java 侧（ArtifactQueryService，含 alias 旧名展开），SQL 层无字符串拼接插值；
     - 操作符/排序方向/聚合函数是 <choose> 枚举固定分支；
     - 权限谓词折叠进单 SQL：status='published' AND domain_id=#{domain}
-      AND (#{isAdmin} OR m.role IS NOT NULL OR a.owner_user_id=#{username})
-      ——不存在/无权/已停用/跨域同一空手（404 反探测，admin 仍受 status/domain 约束，
+      AND (#{isAdmin} OR u.id IS NOT NULL AND (m.role IS NOT NULL OR a.owner_user_id=u.id))
+      ——username 先经 kb_users JOIN（active + 未清退，对齐 KnowledgeBaseMapper 口径）
+      解析成 u.id，成员/owner 判定全部对 u.id（m.user_id/a.owner_user_id 列存
+      kb_users.id 即 uuid hex，而 MCP 传登录名——直比 username 恒空手，且存在
+      username 碰撞他人 user_id 的提权面，61号对抗审查 C1）；
+      不存在/无权/已停用/跨域同一空手（404 反探测，admin 仍受 status/domain 约束，
       对齐 KnowledgeBaseMapper 站点 admin 口径）；
     - keyset 翻页全部参数绑定，LIMIT 在 SQL 内收窄（service 传 limit+1 探测 has_more）。
 -->
@@ -71,19 +75,27 @@
 
     <!-- ======================= 制品可见性（权限谓词单 SQL） ======================= -->
 
+    <!-- 身份键口径（C1，对齐 KnowledgeBaseMapper.selectAccessibleKbIds）：
+         username 先 LEFT JOIN kb_users 解析成 u.id（active + 未清退）——
+         #{username} 未知/为 null 时 u.id 恒 NULL，成员与 owner 判定同趟落空，
+         匿名/停用/已清退同一空手（404 反探测）。 -->
     <select id="selectVisibleArtifact" resultMap="visibleMap">
         SELECT a.artifact_id, a.domain_id, a.kind, a.current_revision,
                a.title, a.description, a.usage_note
         FROM kb_artifacts a
+        LEFT JOIN kb_users u
+               ON u.username = #{username}
+              AND u.status = 'active'
+              AND u.deleted_at IS NULL
         LEFT JOIN kb_artifact_members m
-               ON m.artifact_id = a.artifact_id AND m.user_id = #{username}
+               ON m.artifact_id = a.artifact_id AND m.user_id = u.id
         WHERE a.artifact_id = #{artifactId}
           AND a.status = 'published'
           AND a.domain_id = #{domain}
           AND (
                 #{isAdmin}
-                OR m.role IS NOT NULL
-                OR a.owner_user_id = #{username}
+                OR (u.id IS NOT NULL
+                    AND (m.role IS NOT NULL OR a.owner_user_id = u.id))
           )
     </select>
 
@@ -150,6 +162,7 @@
     <!-- 行 keyset：默认序=(ordinal,row_key) 行值比较；
          自定义序=(sort_value, ordinal, row_key)——游标行落在 NULL 块
          （ASC 尾部 / DESC 头部）时块内按 (ordinal,row_key) 推进；
+         DESC 的 NULL 块耗尽后必须放行非 NULL 块（C3），ASC 的 NULL 块即终点；
          非空游标值按方向严格超越 + 并列 tie-break。 -->
     <sql id="rowKeyset">
         <if test="afterRowKey != null">
@@ -158,8 +171,23 @@
                     AND (t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey})
                 </when>
                 <when test="afterSortValue == null">
-                    AND t.sort_value IS NULL
-                    AND (t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey})
+                    <choose>
+                        <when test="orderDir == 'desc'">
+                            <!-- DESC→NULLS FIRST：NULL 块在头部；游标行在块内按
+                                 (ordinal,row_key) 推进，块耗尽后放行整个非 NULL 块——
+                                 若无此出口，NULL 行数恰为 limit 整数倍时末页探测空、
+                                 非 NULL 行整块永久丢失（61号对抗审查 C3）。 -->
+                            AND (
+                                t.sort_value IS NOT NULL
+                                OR (t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey})
+                            )
+                        </when>
+                        <otherwise>
+                            <!-- ASC→NULLS LAST：NULL 块在尾部，块内推进即终点。 -->
+                            AND t.sort_value IS NULL
+                            AND (t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey})
+                        </otherwise>
+                    </choose>
                 </when>
                 <when test="orderDir == 'desc'">
                     AND (
@@ -269,36 +297,41 @@
     <!-- ======================= DSL 聚合 ======================= -->
 
     <!-- 聚合函数是固定分支；aggField 白名单 + 参数绑定；数值聚合仅数值列（Java 判定）；
-         COUNT(*) 与聚合值同趟返回（row_count 供 Agent 核对过滤命中面） -->
+         COUNT(*) 与聚合值同趟返回（row_count 供 Agent 核对过滤命中面）。
+         C2：聚合与 selectArtifactRows 同形——FROM 子查询别名 t（携带 jsonb 原生列），
+         artifact/revision 收窄在子查询内；criterion 片段引用 t.data，外层直查
+         kb_table_rows r 会因别名不存在而 42P01。 -->
     <select id="aggregateArtifactRows" resultMap="aggregateValueMap">
         SELECT COUNT(*) AS row_count,
         <choose>
             <when test="aggOp == 'count'">COUNT(*)</when>
             <when test="aggOp == 'sum'">
-                SUM(NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric)
+                SUM(NULLIF(REPLACE(t.data ->> #{aggField}, ',', ''), '')::numeric)
             </when>
             <when test="aggOp == 'min'">
                 <choose>
                     <!-- date：ISO 文本字典序=时间序（规范值），不数值化 -->
-                    <when test="textualAggregate">MIN(r.data ->> #{aggField})</when>
-                    <otherwise>MIN(NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric)</otherwise>
+                    <when test="textualAggregate">MIN(t.data ->> #{aggField})</when>
+                    <otherwise>MIN(NULLIF(REPLACE(t.data ->> #{aggField}, ',', ''), '')::numeric)</otherwise>
                 </choose>
             </when>
             <when test="aggOp == 'max'">
                 <choose>
-                    <when test="textualAggregate">MAX(r.data ->> #{aggField})</when>
-                    <otherwise>MAX(NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric)</otherwise>
+                    <when test="textualAggregate">MAX(t.data ->> #{aggField})</when>
+                    <otherwise>MAX(NULLIF(REPLACE(t.data ->> #{aggField}, ',', ''), '')::numeric)</otherwise>
                 </choose>
             </when>
             <otherwise>
-                AVG(NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric)
+                AVG(NULLIF(REPLACE(t.data ->> #{aggField}, ',', ''), '')::numeric)
             </otherwise>
         </choose>
         AS value
-        FROM kb_table_rows r
+        FROM (
+            SELECT r.data
+            FROM kb_table_rows r
+            WHERE r.artifact_id = #{artifactId} AND r.revision = #{revision}
+        ) t
         <where>
-            r.artifact_id = #{artifactId}
-            AND r.revision = #{revision}
             <foreach collection="criteria" item="c" separator=" AND ">
                 <include refid="criterion"/>
             </foreach>
@@ -314,16 +347,20 @@
         SELECT a.artifact_id, a.title, a.description, a.usage_note,
                a.current_revision, a.kind, a.updated_at, rv.row_count
         FROM kb_artifacts a
+        LEFT JOIN kb_users u
+               ON u.username = #{username}
+              AND u.status = 'active'
+              AND u.deleted_at IS NULL
         LEFT JOIN kb_artifact_revisions rv
                ON rv.artifact_id = a.artifact_id AND rv.revision = a.current_revision
         LEFT JOIN kb_artifact_members m
-               ON m.artifact_id = a.artifact_id AND m.user_id = #{username}
+               ON m.artifact_id = a.artifact_id AND m.user_id = u.id
         WHERE a.status = 'published'
           AND a.domain_id = #{domain}
           AND (
                 #{isAdmin}
-                OR m.role IS NOT NULL
-                OR a.owner_user_id = #{username}
+                OR (u.id IS NOT NULL
+                    AND (m.role IS NOT NULL OR a.owner_user_id = u.id))
           )
         <if test="afterArtifactId != null">
             AND (a.updated_at &lt; CAST(#{afterUpdatedAt} AS timestamptz)

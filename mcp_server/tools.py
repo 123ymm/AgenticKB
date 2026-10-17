@@ -115,6 +115,9 @@ def _raise_serving_error(resp: httpx.Response) -> None:
     - GlobalExceptionHandler 字符串码：{"error": "artifact_not_found", "message": …}
       （kb_not_found / artifact_not_found 等反探测 404 同族——也是稳定 code，
       按同口径上抛，否则会以 dict repr 形态漏给 Agent）。
+      例外：401/503 与一切 ≥500（如 internal_error）是基础设施错误（内部密钥
+      失配/未配/服务端真故障，Agent 不可修正）——不进 typed invalid 口径，
+      留给兜底分支按 upstream failed 上抛（61号对抗审查 M1）。
     """
     try:
         body = resp.json()
@@ -125,10 +128,12 @@ def _raise_serving_error(resp: httpx.Response) -> None:
                 str(err.get("message") or err["code"]),
                 err.get("details") if isinstance(err.get("details"), dict) else {},
             )
-        if isinstance(err, str) and err.strip() and resp.status_code not in (401, 503):
-            # 401 unauthenticated / 503 internal_auth_not_configured 同体形但是
-            # 基础设施错误（内部密钥失配/未配，Agent 不可修正）——留给兜底分支
-            # 按 upstream failed 上抛，不进 typed invalid 口径。
+        if (
+            isinstance(err, str)
+            and err.strip()
+            and resp.status_code < 500
+            and resp.status_code not in (401, 503)
+        ):
             raise ServingToolError(err, str(body.get("message") or err))
         detail = str((body or {}).get("detail") or body)[:160]
     except ValueError:
