@@ -39,6 +39,13 @@ public class GlobalExceptionHandler {
                     .body(Map.of("error", "kb_not_found",
                             "message", "One or more knowledge bases were not found"));
         }
+        // 61号批次3：art_ 制品 404 反探测——不存在/无权/已停用/跨域同响应
+        //（ArtifactQueryService 权限谓词折叠进 mapper 单 SQL，与 kb_not_found 同口径）。
+        if ("artifact_not_found".equals(ex.getMessage())) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("error", "artifact_not_found",
+                            "message", "Artifact not found or not readable"));
+        }
         if ("kb_ids_required".equals(ex.getMessage())) {
             return ResponseEntity.badRequest()
                     .body(Map.of("error", "kb_ids_required", "message", "At least one knowledge base id is required"));

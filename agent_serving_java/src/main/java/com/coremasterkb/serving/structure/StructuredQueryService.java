@@ -43,10 +43,12 @@ public class StructuredQueryService {
     /** 无过滤聚合的行数护栏：超过即 result_too_large（提示加 filter）。 */
     static final int UNFILTERED_AGGREGATE_ROW_GUARD = 50_000;
 
-    private static final Set<String> FILTER_OPS = Set.of(
+    // 61号批次3：art_ 制品查询通道（ArtifactQueryService）按同一套操作符语义校验——
+    // 常量收窄为包内可见以供复用，避免第二份清单漂移。
+    static final Set<String> FILTER_OPS = Set.of(
             "eq", "ne", "lt", "lte", "gt", "gte", "in", "contains", "is_null");
-    private static final Set<String> AGG_OPS = Set.of("count", "sum", "min", "max", "avg");
-    private static final Set<String> NUMERIC_ONLY_OPS = Set.of("lt", "lte", "gt", "gte");
+    static final Set<String> AGG_OPS = Set.of("count", "sum", "min", "max", "avg");
+    static final Set<String> NUMERIC_ONLY_OPS = Set.of("lt", "lte", "gt", "gte");
 
     private final StructureRefService refService;
     private final StructureToolMapper toolMapper;

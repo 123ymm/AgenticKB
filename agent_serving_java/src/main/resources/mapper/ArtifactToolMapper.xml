@@ -1,0 +1,337 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    61号批次3（前半）art_ 制品消费面 SQL（kb_artifacts 六表，DDL=017_kb_artifacts.sql）。
+    安全契约（与 StructureToolMapper.xml 同源）：
+    - 字段名（列名）只以 #{field} 绑定出现在 data->>#{field}——白名单校验在
+      Java 侧（ArtifactQueryService，含 alias 旧名展开），SQL 层无字符串拼接插值；
+    - 操作符/排序方向/聚合函数是 <choose> 枚举固定分支；
+    - 权限谓词折叠进单 SQL：status='published' AND domain_id=#{domain}
+      AND (#{isAdmin} OR m.role IS NOT NULL OR a.owner_user_id=#{username})
+      ——不存在/无权/已停用/跨域同一空手（404 反探测，admin 仍受 status/domain 约束，
+      对齐 KnowledgeBaseMapper 站点 admin 口径）；
+    - keyset 翻页全部参数绑定，LIMIT 在 SQL 内收窄（service 传 limit+1 探测 has_more）。
+-->
+<mapper namespace="com.coremasterkb.serving.operator.mapper.ArtifactToolMapper">
+
+    <resultMap id="visibleMap"
+               type="com.coremasterkb.serving.operator.mapper.ArtifactToolMapper$ArtifactVisibleRow">
+        <constructor>
+            <arg column="artifact_id"     javaType="java.lang.String"/>
+            <arg column="domain_id"       javaType="java.lang.String"/>
+            <arg column="kind"            javaType="java.lang.String"/>
+            <arg column="current_revision" javaType="java.lang.Integer"/>
+            <arg column="title"           javaType="java.lang.String"/>
+            <arg column="description"     javaType="java.lang.String"/>
+            <arg column="usage_note"      javaType="java.lang.String"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="revisionMap"
+               type="com.coremasterkb.serving.operator.mapper.ArtifactToolMapper$RevisionRow">
+        <constructor>
+            <arg column="schema_json" javaType="java.lang.String"/>
+            <arg column="row_count"   javaType="java.lang.Integer"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="artifactRowMap"
+               type="com.coremasterkb.serving.operator.mapper.ArtifactToolMapper$ArtifactRowValue">
+        <constructor>
+            <arg column="row_key"        javaType="java.lang.String"/>
+            <arg column="data_json"      javaType="java.lang.String"/>
+            <arg column="provenance_json" javaType="java.lang.String"/>
+            <arg column="ordinal"        javaType="java.lang.Integer"/>
+            <arg column="sort_value"     javaType="java.lang.Object"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="aggregateValueMap"
+               type="com.coremasterkb.serving.operator.mapper.ArtifactToolMapper$AggregateValueRow">
+        <constructor>
+            <arg column="row_count" javaType="java.lang.Long"/>
+            <arg column="value"     javaType="java.lang.Object"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="summaryMap"
+               type="com.coremasterkb.serving.operator.mapper.ArtifactToolMapper$ArtifactSummaryRow">
+        <constructor>
+            <arg column="artifact_id"     javaType="java.lang.String"/>
+            <arg column="title"           javaType="java.lang.String"/>
+            <arg column="description"     javaType="java.lang.String"/>
+            <arg column="usage_note"      javaType="java.lang.String"/>
+            <arg column="current_revision" javaType="java.lang.Integer"/>
+            <arg column="kind"            javaType="java.lang.String"/>
+            <arg column="updated_at"      javaType="java.time.OffsetDateTime"/>
+            <arg column="row_count"       javaType="java.lang.Integer"/>
+        </constructor>
+    </resultMap>
+
+    <!-- ======================= 制品可见性（权限谓词单 SQL） ======================= -->
+
+    <select id="selectVisibleArtifact" resultMap="visibleMap">
+        SELECT a.artifact_id, a.domain_id, a.kind, a.current_revision,
+               a.title, a.description, a.usage_note
+        FROM kb_artifacts a
+        LEFT JOIN kb_artifact_members m
+               ON m.artifact_id = a.artifact_id AND m.user_id = #{username}
+        WHERE a.artifact_id = #{artifactId}
+          AND a.status = 'published'
+          AND a.domain_id = #{domain}
+          AND (
+                #{isAdmin}
+                OR m.role IS NOT NULL
+                OR a.owner_user_id = #{username}
+          )
+    </select>
+
+    <!-- ======================= revision 快照 ======================= -->
+
+    <select id="selectRevision" resultMap="revisionMap">
+        SELECT schema_json::text AS schema_json, row_count
+        FROM kb_artifact_revisions
+        WHERE artifact_id = #{artifactId} AND revision = #{revision}
+    </select>
+
+    <!-- ======================= DSL 行查询 =======================
+
+      子查询携带 jsonb 原生列（data/provenance 供外层 ->> 与 ::text 投影），
+      sort_value 仅自定义排序时计算（数值列去千分位后 ::numeric；缺值=NULL）。
+      ORDER BY 恒含 (ordinal, row_key) tie-break；PG 默认 ASC→NULLS LAST、
+      DESC→NULLS FIRST，rowKeyset 的 NULL 块分支与之对齐。 -->
+    <select id="selectArtifactRows" resultMap="artifactRowMap">
+        SELECT t.row_key, t.data::text AS data_json,
+               t.provenance::text AS provenance_json, t.ordinal, t.sort_value
+        FROM (
+            SELECT r.row_key, r.data, r.provenance, r.ordinal,
+            <choose>
+                <when test="orderField != null">
+                    <include refid="sortExpr"/> AS sort_value
+                </when>
+                <otherwise>NULL AS sort_value</otherwise>
+            </choose>
+            FROM kb_table_rows r
+            WHERE r.artifact_id = #{artifactId} AND r.revision = #{revision}
+        ) t
+        <where>
+            <foreach collection="criteria" item="c" separator=" AND ">
+                <include refid="criterion"/>
+            </foreach>
+            <include refid="rowKeyset"/>
+        </where>
+        ORDER BY
+        <choose>
+            <when test="orderField != null">
+                t.sort_value
+                <choose>
+                    <when test="orderDir == 'desc'">DESC</when>
+                    <otherwise>ASC</otherwise>
+                </choose>
+                , t.ordinal ASC, t.row_key ASC
+            </when>
+            <otherwise>t.ordinal ASC, t.row_key ASC</otherwise>
+        </choose>
+        LIMIT #{limit}
+    </select>
+
+    <!-- 自定义排序键：数值列与 Python 表达式索引同型（NULLIF 防空串 cast 崩，
+         serving 侧额外 REPLACE 去千分位——与 st_ 口径一致） -->
+    <sql id="sortExpr">
+        <choose>
+            <when test="numericOrder">
+                NULLIF(REPLACE(r.data ->> #{orderField}, ',', ''), '')::numeric
+            </when>
+            <otherwise>r.data ->> #{orderField}</otherwise>
+        </choose>
+    </sql>
+
+    <!-- 行 keyset：默认序=(ordinal,row_key) 行值比较；
+         自定义序=(sort_value, ordinal, row_key)——游标行落在 NULL 块
+         （ASC 尾部 / DESC 头部）时块内按 (ordinal,row_key) 推进；
+         非空游标值按方向严格超越 + 并列 tie-break。 -->
+    <sql id="rowKeyset">
+        <if test="afterRowKey != null">
+            <choose>
+                <when test="orderField == null">
+                    AND (t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey})
+                </when>
+                <when test="afterSortValue == null">
+                    AND t.sort_value IS NULL
+                    AND (t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey})
+                </when>
+                <when test="orderDir == 'desc'">
+                    AND (
+                        t.sort_value &lt; <include refid="afterSortBound"/>
+                        OR (t.sort_value = <include refid="afterSortBound"/>
+                            AND (t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey}))
+                    )
+                </when>
+                <otherwise>
+                    AND (
+                        t.sort_value &gt; <include refid="afterSortBound"/>
+                        OR t.sort_value IS NULL
+                        OR (t.sort_value = <include refid="afterSortBound"/>
+                            AND (t.ordinal, t.row_key) &gt; (#{afterOrdinal}, #{afterRowKey}))
+                    )
+                </otherwise>
+            </choose>
+        </if>
+    </sql>
+
+    <sql id="afterSortBound">
+        <choose>
+            <when test="numericOrder">CAST(#{afterSortValue} AS numeric)</when>
+            <otherwise>#{afterSortValue}</otherwise>
+        </choose>
+    </sql>
+
+    <!-- 单条过滤条件：op 枚举固定分支；field/value 全参数绑定（无字符串拼接） -->
+    <sql id="criterion">
+        <choose>
+            <when test="c.op == 'eq'">
+                <choose>
+                    <when test="c.numeric">
+                        NULLIF(REPLACE(t.data ->> #{c.field}, ',', ''), '')::numeric = #{c.value}
+                    </when>
+                    <otherwise>t.data ->> #{c.field} = #{c.value}</otherwise>
+                </choose>
+            </when>
+            <when test="c.op == 'ne'">
+                <choose>
+                    <when test="c.numeric">
+                        NULLIF(REPLACE(t.data ->> #{c.field}, ',', ''), '')::numeric != #{c.value}
+                    </when>
+                    <otherwise>t.data ->> #{c.field} != #{c.value}</otherwise>
+                </choose>
+            </when>
+            <when test="c.op == 'lt'">
+                <choose>
+                    <when test="c.numeric">
+                        NULLIF(REPLACE(t.data ->> #{c.field}, ',', ''), '')::numeric &lt; #{c.value}
+                    </when>
+                    <otherwise>
+                        <!-- date：ISO 文本字典序 = 时间序（规范值基准） -->
+                        t.data ->> #{c.field} &lt; #{c.value}
+                    </otherwise>
+                </choose>
+            </when>
+            <when test="c.op == 'lte'">
+                <choose>
+                    <when test="c.numeric">
+                        NULLIF(REPLACE(t.data ->> #{c.field}, ',', ''), '')::numeric &lt;= #{c.value}
+                    </when>
+                    <otherwise>t.data ->> #{c.field} &lt;= #{c.value}</otherwise>
+                </choose>
+            </when>
+            <when test="c.op == 'gt'">
+                <choose>
+                    <when test="c.numeric">
+                        NULLIF(REPLACE(t.data ->> #{c.field}, ',', ''), '')::numeric &gt; #{c.value}
+                    </when>
+                    <otherwise>t.data ->> #{c.field} &gt; #{c.value}</otherwise>
+                </choose>
+            </when>
+            <when test="c.op == 'gte'">
+                <choose>
+                    <when test="c.numeric">
+                        NULLIF(REPLACE(t.data ->> #{c.field}, ',', ''), '')::numeric &gt;= #{c.value}
+                    </when>
+                    <otherwise>t.data ->> #{c.field} &gt;= #{c.value}</otherwise>
+                </choose>
+            </when>
+            <when test="c.op == 'in'">
+                <choose>
+                    <when test="c.numeric">
+                        NULLIF(REPLACE(t.data ->> #{c.field}, ',', ''), '')::numeric IN
+                        <foreach collection="c.values" item="v" open="(" separator="," close=")">
+                            CAST(#{v} AS numeric)
+                        </foreach>
+                    </when>
+                    <otherwise>
+                        t.data ->> #{c.field} IN
+                        <foreach collection="c.values" item="v" open="(" separator="," close=")">
+                            #{v}
+                        </foreach>
+                    </otherwise>
+                </choose>
+            </when>
+            <when test="c.op == 'contains'">
+                t.data ->> #{c.field} LIKE ('%' || #{c.value} || '%')
+            </when>
+            <otherwise>
+                (t.data ->> #{c.field}) IS NULL
+            </otherwise>
+        </choose>
+    </sql>
+
+    <!-- ======================= DSL 聚合 ======================= -->
+
+    <!-- 聚合函数是固定分支；aggField 白名单 + 参数绑定；数值聚合仅数值列（Java 判定）；
+         COUNT(*) 与聚合值同趟返回（row_count 供 Agent 核对过滤命中面） -->
+    <select id="aggregateArtifactRows" resultMap="aggregateValueMap">
+        SELECT COUNT(*) AS row_count,
+        <choose>
+            <when test="aggOp == 'count'">COUNT(*)</when>
+            <when test="aggOp == 'sum'">
+                SUM(NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric)
+            </when>
+            <when test="aggOp == 'min'">
+                <choose>
+                    <!-- date：ISO 文本字典序=时间序（规范值），不数值化 -->
+                    <when test="textualAggregate">MIN(r.data ->> #{aggField})</when>
+                    <otherwise>MIN(NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric)</otherwise>
+                </choose>
+            </when>
+            <when test="aggOp == 'max'">
+                <choose>
+                    <when test="textualAggregate">MAX(r.data ->> #{aggField})</when>
+                    <otherwise>MAX(NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric)</otherwise>
+                </choose>
+            </when>
+            <otherwise>
+                AVG(NULLIF(REPLACE(r.data ->> #{aggField}, ',', ''), '')::numeric)
+            </otherwise>
+        </choose>
+        AS value
+        FROM kb_table_rows r
+        <where>
+            r.artifact_id = #{artifactId}
+            AND r.revision = #{revision}
+            <foreach collection="criteria" item="c" separator=" AND ">
+                <include refid="criterion"/>
+            </foreach>
+        </where>
+    </select>
+
+    <!-- ======================= 发现通道 ======================= -->
+
+    <!-- 域内已发布可见制品（谓词同 selectVisibleArtifact），row_count 取
+         current_revision 快照（未发布/wiki 无 revision 行 → NULL → Java 侧归 0）；
+         (updated_at DESC, artifact_id ASC) 稳定序 + 显式 keyset（混合方向不能用行值比较）。 -->
+    <select id="selectArtifactSummaries" resultMap="summaryMap">
+        SELECT a.artifact_id, a.title, a.description, a.usage_note,
+               a.current_revision, a.kind, a.updated_at, rv.row_count
+        FROM kb_artifacts a
+        LEFT JOIN kb_artifact_revisions rv
+               ON rv.artifact_id = a.artifact_id AND rv.revision = a.current_revision
+        LEFT JOIN kb_artifact_members m
+               ON m.artifact_id = a.artifact_id AND m.user_id = #{username}
+        WHERE a.status = 'published'
+          AND a.domain_id = #{domain}
+          AND (
+                #{isAdmin}
+                OR m.role IS NOT NULL
+                OR a.owner_user_id = #{username}
+          )
+        <if test="afterArtifactId != null">
+            AND (a.updated_at &lt; CAST(#{afterUpdatedAt} AS timestamptz)
+                 OR (a.updated_at = CAST(#{afterUpdatedAt} AS timestamptz)
+                     AND a.artifact_id &gt; #{afterArtifactId}))
+        </if>
+        ORDER BY a.updated_at DESC, a.artifact_id ASC
+        LIMIT #{limit}
+    </select>
+
+</mapper>
