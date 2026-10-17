@@ -344,3 +344,67 @@ async def test_cell_update_batch_assign_delete_row(env):
     assert r.status_code == 200
     r = await env.client.get(f"/api/artifacts/{aid}/table/rows?draft=1")
     assert r.json()["total"] == 7
+
+
+async def test_insert_row_manual_add(env):
+    """POST /table/rows 手工行增（61号 §7.2）：有主键→拼主键（冲突 409 /
+    缺失 400）；无主键→uuid；provenance 记 manual 来源。"""
+    aid = await _create_artifact(env)
+    token = await _upload_a(env, aid)
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/import",
+        json={
+            "preview_token": token,
+            "plan": {"column_ops": [
+                {"source": "MOP", "action": "new", "target_name": "MOP",
+                 "column_type": "text", "is_primary_key": True},
+                {"source": "L1分类", "action": "new", "target_name": "L1分类",
+                 "column_type": "text"},
+                {"source": "L2分类", "action": "new", "target_name": "L2分类",
+                 "column_type": "text"},
+            ]},
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    # 有主键：row_key = 主键值拼接
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/rows",
+        json={"data": {"MOP": "NC20260601000410", "L1分类": "数据业务",
+                       "L2分类": "演练前核查"}},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["row_key"] == "NC20260601000410"
+    assert body["data"]["L2分类"] == "演练前核查"
+    assert body["ordinal"] == 9
+    assert body["provenance"] == [{"channel": "manual", "created_by": "u-alice"}]
+
+    # 同主键再插 → 409
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/rows",
+        json={"data": {"MOP": "NC20260601000410", "L1分类": "网络维护"}},
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "primary_key_conflict"
+
+    # 主键值缺失 → 400
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/rows",
+        json={"data": {"L1分类": "数据业务"}},
+    )
+    assert r.status_code == 400
+
+    # 落进 draft：8 导入 + 1 手工
+    r = await env.client.get(f"/api/artifacts/{aid}/table/rows?draft=1")
+    assert r.json()["total"] == 9
+
+    # 无主键制品 → row_key=uuid
+    aid2 = await _create_artifact(env)
+    r = await env.client.post(
+        f"/api/artifacts/{aid2}/table/rows",
+        json={"data": {"备注": "手工行"}},
+    )
+    assert r.status_code == 201, r.text
+    key = r.json()["row_key"]
+    assert len(key) == 32 and all(c in "0123456789abcdef" for c in key)

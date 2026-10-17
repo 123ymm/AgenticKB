@@ -35,6 +35,8 @@ from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactService,
     InvalidOperation,
     PrimaryKeyConflict,
+    _try_float,
+    _try_int,
 )
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024          # 文件 ≤ 50MB
@@ -81,34 +83,6 @@ def _is_blank(value: Any) -> bool:
 
 def _is_formula(value: Any) -> bool:
     return isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@"))
-
-
-def _try_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value) if value.is_integer() else None
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return None
-    return None
-
-
-def _try_float(value: Any) -> float | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
-            return None
-    return None
 
 
 def _is_date_like(value: Any) -> bool:

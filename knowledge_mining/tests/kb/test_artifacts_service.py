@@ -56,7 +56,8 @@ class FakeArtifactDB:
         description: str = "", owner_user_id: str, artifact_id: str | None = None,
         usage_note: str = "",
     ) -> dict:
-        aid = artifact_id or "art_new"
+        # 默认 id 与真库同规则（art_+hex）——单测试内多次 create 不互踩
+        aid = artifact_id or f"art_{uuid.uuid4().hex[:12]}"
         row = {
             "artifact_id": aid, "domain_id": domain_id, "kind": kind,
             "title": title, "description": description, "usage_note": usage_note,
@@ -330,6 +331,31 @@ class FakeArtifactDB:
         for row in self.rev0_rows.get(artifact_id, []):
             if row["row_key"] == row_key:
                 row["data"] = {**row["data"], column: value}
+                return dict(row)
+        return None
+
+    async def get_row(
+        self, artifact_id: str, revision: int, row_key: str,
+    ) -> dict | None:
+        if revision == 0:
+            rows = self.rev0_rows.get(artifact_id, [])
+        else:
+            rows = self.revision_rows.get(artifact_id, {}).get(revision, [])
+        for row in rows:
+            if row["row_key"] == row_key:
+                return dict(row)
+        return None
+
+    async def update_cell_conflict(
+        self, artifact_id: str, row_key: str, column: str,
+        marker: str, updated_by: str,
+    ) -> dict | None:
+        """类型校验失败的单格更新：值置 null + conflicts[column]=marker。"""
+        self.calls.append("update_cell_conflict")
+        for row in self.rev0_rows.get(artifact_id, []):
+            if row["row_key"] == row_key:
+                row["data"] = {**row["data"], column: None}
+                row["conflicts"] = {**row.get("conflicts", {}), column: marker}
                 return dict(row)
         return None
 
@@ -831,3 +857,50 @@ async def test_update_meta_whitelist_and_role() -> None:
         await svc.update_meta(
             user=_user("u-viewer"), artifact_id=AID, fields={"title": "改名"},
         )
+
+
+# ------------------------------------------------------- update_cell 类型校验
+
+@pytest.mark.asyncio
+async def test_update_cell_int_float_cast_marks_conflict() -> None:
+    """int/float 列 cast 失败 → 值置 null + conflicts 标记 "type_error:值"
+    （与导入 tolerant 路径对称），不阻断；可 cast 字符串存 cast 值；
+    text / 无列定义的裸列不设卡；行不存在仍 400。"""
+    db = await _seeded_db()
+    await db.upsert_column(AID, "c003", {"column_name": "数量", "column_type": "int"})
+    await db.upsert_column(AID, "c004", {"column_name": "单价", "column_type": "float"})
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+
+    # 可 cast 字符串 → 数值落库
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="数量", value=" 3 ")
+    assert row["data"]["数量"] == 3
+    # 置空放行（无 conflicts 标记）；空白串与导入 _is_blank 同口径=合法置空
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="数量", value=None)
+    assert row["data"]["数量"] is None
+    assert "数量" not in row["conflicts"]
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="数量", value="  ")
+    assert row["data"]["数量"] is None
+    assert "数量" not in row["conflicts"]
+    # int cast 失败 → null + 标记，不抛错
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="数量", value="abc")
+    assert row["data"]["数量"] is None
+    assert row["conflicts"]["数量"] == "type_error:abc"
+    # float cast 失败同口径
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="单价", value="3.5x")
+    assert row["data"]["单价"] is None
+    assert row["conflicts"]["单价"] == "type_error:3.5x"
+    # text 列与未登记列不校验
+    row = await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="自由列", value="x")
+    assert row["data"]["自由列"] == "x"
+    # 行不存在仍 row_not_found（400），类型校验不掩盖
+    with pytest.raises(InvalidOperation):
+        await svc.update_cell(
+            user=owner, artifact_id=AID, row_key="MOP-404",
+            column="数量", value="abc")

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from knowledge_mining.mining.kb.db_artifacts import ArtifactError as ArtifactRepoError
+from knowledge_mining.mining.kb.db_artifacts import _row_key_value
 
 #: 运行态读（元信息/已发布行）：成员任一角色。
 ROLE_RUNTIME_READ = ("owner", "editor", "viewer")
@@ -112,6 +113,47 @@ def _check_freshness(
     current = _parse_ts(artifact.get("updated_at"))
     if expected.replace(microsecond=0) != current.replace(microsecond=0):
         raise StaleArtifact(str(artifact.get("artifact_id")))
+
+
+# 单格/单值数值 cast（导入向导与手工编辑共用口径——artifact_import_service
+# 从此处 import，保证 _cast_value 与 update_cell 校验语义同源）。
+
+def _try_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _try_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _cast_cell(value: Any, column_type: str) -> tuple[bool, Any]:
+    """单格写入的数值类型校验（§7.2）：仅 int/float 设卡，其余类型不校验。
+    空白串与导入 _cast_value 同口径=合法置空。返回 (ok, casted)；
+    ok=False 即类型错误（置 null + conflicts 标记）。"""
+    if isinstance(value, str) and not value.strip():
+        return True, None
+    casted = _try_int(value) if column_type == "int" else _try_float(value)
+    return casted is not None, casted
 
 
 # ----------------------------------------------------------------- service
@@ -468,10 +510,22 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str, row_key: str,
         column: str, value: Any, expected_updated_at: Any = None,
     ) -> dict[str, Any]:
+        """单格更新（§7.2）。int/float 列 cast 失败 → 值置 null +
+        conflicts[column]="type_error:值"（与导入 tolerant 路径对称），不阻断。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
-        row = await self._db.update_cell(
-            artifact_id, row_key, column, value, _uid(user),
-        )
+        ok, casted = True, value
+        column_def = await self._find_column(artifact_id, column)
+        if column_def is not None and value is not None \
+                and str(column_def.get("column_type")) in ("int", "float"):
+            ok, casted = _cast_cell(value, str(column_def["column_type"]))
+        if ok:
+            row = await self._db.update_cell(
+                artifact_id, row_key, column, casted, _uid(user),
+            )
+        else:
+            row = await self._db.update_cell_conflict(
+                artifact_id, row_key, column, f"type_error:{value}", _uid(user),
+            )
         if row is None:
             raise InvalidOperation("row_not_found")
         await self._db.touch_updated_at(artifact_id)
@@ -513,6 +567,55 @@ class ArtifactService:
         )
         await self._db.touch_updated_at(artifact_id)
         return result
+
+    async def insert_single_row(
+        self, *, user: dict[str, Any], artifact_id: str,
+        data: dict[str, Any], expected_updated_at: Any = None,
+    ) -> dict[str, Any]:
+        """手工行增（§7.2 行增）：无主键 → row_key=uuid；有主键 → 主键值拼接
+        （与导入同口径），rev0 已有同键 → PrimaryKeyConflict(409)，主键值缺失
+        → 400。复用 insert_rows_upsert 单行落库；provenance 记 manual 来源。"""
+        await self._require_design_session(user, artifact_id, expected_updated_at)
+        if not isinstance(data, dict):
+            raise InvalidOperation("invalid_row_data")
+        pk_names = [
+            str(c["column_name"])
+            for c in await self._db.list_columns(artifact_id)
+            if c.get("is_primary_key")
+        ]
+        if pk_names and all(data.get(name) in (None, "") for name in pk_names):
+            raise InvalidOperation("missing_primary_key")
+        row_key = _row_key_value(data, pk_names)
+        if pk_names and await self._db.get_row(artifact_id, 0, row_key) is not None:
+            raise PrimaryKeyConflict(f"duplicate_key:{row_key}")
+        ordinal = await self._db.count_rows(artifact_id, 0) + 1
+        await self._db.insert_rows_upsert(
+            artifact_id, 0,
+            [{
+                "row_key": row_key,
+                "data": dict(data),
+                "provenance": [{"channel": "manual", "created_by": _uid(user)}],
+                "conflicts": {},
+                "ordinal": ordinal,
+            }],
+            updated_by=_uid(user),
+        )
+        await self._db.touch_updated_at(artifact_id)
+        row = await self._db.get_row(artifact_id, 0, row_key)
+        if row is None:
+            raise InvalidOperation("row_not_found")
+        return row
+
+    async def _find_column(
+        self, artifact_id: str, column: str,
+    ) -> dict[str, Any] | None:
+        """按列名或 alias 找 active 列定义（§7.1 改名后旧名仍可寻址）。"""
+        for col in await self._db.list_columns(artifact_id):
+            if str(col.get("column_name")) == column or column in [
+                str(a) for a in (col.get("alias") or [])
+            ]:
+                return col
+        return None
 
     # ------------------------------------------------------------- 内部
 

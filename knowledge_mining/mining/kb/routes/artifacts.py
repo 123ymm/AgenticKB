@@ -134,6 +134,11 @@ class BatchAssignReq(BaseModel):
     expected_updated_at: str | None = None
 
 
+class RowInsertReq(BaseModel):
+    data: dict[str, Any] = Field(default_factory=dict)
+    expected_updated_at: str | None = None
+
+
 class RowDeleteReq(BaseModel):
     expected_updated_at: str | None = None
 
@@ -658,6 +663,24 @@ async def list_rows(
         return await svc.list_rows(
             user=user, artifact_id=artifact_id,
             draft=draft, page=page, size=size,
+        )
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/table/rows", status_code=201)
+async def insert_row(
+    artifact_id: str,
+    body: RowInsertReq,
+    user: dict[str, Any] = Depends(current_user),
+    svc: ArtifactService = Depends(get_artifact_service),
+):
+    """手工行增（§7.2 行增）：无主键→row_key=uuid；有主键→拼主键，rev0 内
+    冲突→409、主键值缺失→400。前端 dialog 引导走导入；此端点补齐后端能力面。"""
+    try:
+        return await svc.insert_single_row(
+            user=user, artifact_id=artifact_id, data=body.data,
+            expected_updated_at=body.expected_updated_at,
         )
     except ArtifactError as exc:
         raise _map_error(exc) from None

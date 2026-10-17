@@ -827,6 +827,39 @@ class ArtifactDB:
             row = await cur.fetchone()
             return dict(row) if row else None
 
+    async def update_cell_conflict(
+        self, artifact_id: str, row_key: str, column: str,
+        marker: str, updated_by: str,
+    ) -> dict[str, Any] | None:
+        """类型校验失败的单格更新（§7.2，与导入 tolerant 路径对称）：该格置
+        null + conflicts[column]=marker，不阻断。行不存在返回 None。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """UPDATE kb_table_rows
+                   SET data = jsonb_set(data, ARRAY[%s], 'null'::jsonb),
+                       conflicts = conflicts || jsonb_build_object(%s, %s),
+                       updated_at = now(), updated_by = %s
+                   WHERE artifact_id = %s AND revision = 0 AND row_key = %s
+                   RETURNING row_key, data, provenance, conflicts, ordinal""",
+                (column, column, marker, updated_by, artifact_id, row_key),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def get_row(
+        self, artifact_id: str, revision: int, row_key: str,
+    ) -> dict[str, Any] | None:
+        """单行读取（行增端点冲突预检与回读）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT row_key, data, provenance, conflicts, ordinal
+                   FROM kb_table_rows
+                   WHERE artifact_id = %s AND revision = %s AND row_key = %s""",
+                (artifact_id, revision, row_key),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
     async def batch_assign(
         self, artifact_id: str, column: str, value: Any,
         where_clauses: list[dict[str, Any]], updated_by: str,
