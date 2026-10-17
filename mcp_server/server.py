@@ -9,9 +9,10 @@
 
 工具族（用户拍板"功能类似只是维度/层级不同必须合并"——第二轮收敛到三件套）：
 - search_knowledge：唯一检索入口（domain 只是校验参数——不传即钥匙绑定域）
-- get_knowledge：一切读取行为（ref 分流 ev_/doc_/st_ + 层级浏览 + 能力报告默认），
-  合并了 get_content / browse_knowledge / inspect_knowledge / navigate_structure /
-  query_structured_asset 五件——Agent 只需知道"有了 ref 或库名就调它"
+- get_knowledge：一切读取行为（ref 分流 ev_/doc_/st_/art_ + 层级浏览 + 能力报告
+  默认 + 制品说明卡），合并了 get_content / browse_knowledge / inspect_knowledge /
+  navigate_structure / query_structured_asset 五件——Agent 只需知道"有了 ref 或
+  库名就调它"
 - manage_files：文件管理（上传到目录/替换任意本地文件；两步直传：工具发
   一次性 URL，Agent PUT 原始字节；不提供删除/移动/重命名——58号改名自 upload_document）
 """
@@ -158,7 +159,10 @@ source 里同时有 document_id 和 document_ref。之后一切深入都走 get_
   可过滤聚合字段）；要查表格传 query（DSL：select/where/order_by/limit/
   aggregate，字段名以能力报告的 columns 为准）；要沿结构走传 relation
   （parent/children/previous/next/ancestors/descendants/container/caption/
-  footnotes/references）。
+  footnotes/references）；
+- ref 是 art_（知识制品引用——顶层浏览 artifacts 段的 artifact_ref）：只传 ref
+  给说明卡（元信息+列能力+行数），要查表格传 query（DSL 同 st_，字段名以说明卡
+  columns 为准，limit/cursor 写在 query 里）。
 工具返回的错误带稳定 code（如 unknown_field / out_of_scope / expired_ref），
 按提示修正参数重试即可。
 
@@ -342,6 +346,16 @@ def _serving_call(call, *args, **kwargs):
     try:
         return call(*args, **kwargs)
     except backend.ServingToolError as exc:
+        if exc.code == "artifact_not_found":
+            # 61号批次3：404 反探测（不存在/无权/已停用/跨域同响应）——中文直述
+            # 可修正路径，不透传上游英文 message（同 out_of_scope 的 denied 口径）。
+            raise LedgerToolError(
+                "未找到或无权访问该知识制品（不存在、已停用或未对你的钥匙开放，"
+                "防探测不区分原因）。请从 get_knowledge 顶层浏览返回的 artifacts "
+                "段核对可用的 art_ 引用后重试。",
+                ledger_status="denied",
+                error_code="artifact_not_found",
+            ) from None
         hint = ""
         if exc.code == "unknown_field":
             allowed = exc.details.get("allowed_fields") or []
@@ -459,11 +473,19 @@ def get_knowledge(
     | ref=st_ + query                   | 表格精确查询（DSL）      | table_rows/     |
     |                                   |                          | aggregate       |
     | ref=st_ + relation                | 结构关系导航             | navigation      |
+    | ref=art_（只传它）                | 制品说明卡（元信息/      | artifact_card   |
+    |                                   | 列能力/行数/revision）   |                 |
+    | ref=art_ + query                  | 表格制品 DSL 查询        | artifact_rows/  |
+    |                                   |                          | artifact_aggregate |
 
     ev_/doc_ 是内容引用——只传 ref 就直接给内容（默认粒度/首页）；st_ 是结构
     引用——只传 ref 给能力报告，告诉你 relation/query 能传什么。ev_ 来自 search
     结果 evidence[].ref（truncated=true 时加 mode 取全）；doc_ 来自
-    source.document_ref；st_ 来自 structure_ref 或导航结果。
+    source.document_ref；st_ 来自 structure_ref 或导航结果。art_ 是知识制品引用
+    （域内发布的表格数据集）——来自顶层浏览的 artifacts 段，只传 ref 给说明卡
+    （columns[].name/operations 就是 query 的字段白名单），要查数据传 query
+    （DSL 与 st_ 表格同款；limit/cursor 写在 query 里，不吃顶层分页参数；
+    kb_names 不影响制品——按域开放）。
 
     browse_directory 与 directory_prefix 的分工（都用 / 分隔的目录路径，如
     "产品文档/手册"）：browse_directory=**打开文件夹看一眼**（只列本层直属
@@ -480,7 +502,8 @@ def get_knowledge(
 
     Args:
         ref: 上游返回的引用。ev_ → 可用 mode；doc_ → 可用 limit/cursor；
-            st_ → 可用 query 或 relation；只传它 = 能力报告。与 kb_name/file_query
+            st_ → 可用 query 或 relation；art_ → 可用 query（limit/cursor 在
+            query 内）；只传它 = 能力报告/说明卡。与 kb_name/file_query
             互斥。
         kb_name: 要看的目标知识库名（顶层浏览返回的 name）——传了列该库文件清单
             （可与 file_query 组合为库内搜索，或与 browse_directory 组合逐层看
@@ -579,7 +602,9 @@ def _get_by_ref(ident: Identity, ref: str, domain: str | None,
                 kb_names: list[str] | None, mode: str | None,
                 relation: str | None, query: dict | None,
                 depth: int | None, limit: int | None, cursor: str | None) -> dict:
-    """ref 分流：ev_ 内容 / doc_ 分页 / st_ 按 query|relation|能力报告。"""
+    """ref 分流：ev_ 内容 / doc_ 分页 / st_ 按 query|relation|能力报告 /
+    art_ 按 query|说明卡。kb_names 只被 ev_/doc_/st_ 消费——制品按域开放，
+    传了仅做开放库校验，不缩制品可见范围。"""
     kb_ids = _scope_kbs(ident, kb_names)
     resolved = _domain(ident, domain)
     username = ident.username
@@ -605,6 +630,24 @@ def _get_by_ref(ident: Identity, ref: str, domain: str | None,
         # 与 doc_（内容引用）并存；content_revision=替换暗号。（57号"剥内部 id"
         # 决定已推翻：id 非秘密，防探测靠权限检查不靠藏 id。）
         return {**out, "view": "document_content"}
+
+    if ref.startswith("art_"):
+        # 61号批次3：制品引用。query=None → artifact_card（元信息+列能力）；
+        # query 同 st_ 表格 DSL（limit/cursor 写在 query 里，不吃顶层分页参数）。
+        # relation/mode 是结构/证据语义——显式拒绝不静默。
+        if relation and str(relation).strip():
+            raise ToolError(
+                "art_ 是知识制品引用，不支持 relation 结构导航。要查表格传 query"
+                "（DSL：select/where/order_by/limit/cursor/aggregate，字段名以说明卡"
+                " columns 为准），或只传 ref 看说明卡。"
+            )
+        if mode:
+            raise ToolError(
+                "mode（展开粒度）只用于 ev_ 证据引用，与 art_ 制品引用互斥。"
+            )
+        out = _serving_call(backend.query_artifact, ref, query, resolved, ident)
+        # 上游三视图自带 view 自标识（artifact_card/artifact_rows/artifact_aggregate）
+        return {**out}
 
     # st_（或其他形状）：query > relation > 能力报告
     if query is not None:
@@ -718,15 +761,26 @@ def _browse_top(ident: Identity, domain: str | None) -> dict:
         if k.get("description"):
             entry["description"] = str(k["description"])
         kbs.append(entry)
-    return {
+    out = {
         "view": "kb_tree",
         "domains": [{"domain": resolved, "knowledge_bases": kbs}],
         "default_domain": resolved,
         "hint": (
             "检索内容用 search_knowledge；按文件名找文件用 get_knowledge 传 "
-            "file_query（跨库）；domain 可不传（自动使用本钥匙绑定的知识域）。"
+            "file_query（跨库）；知识制品（表格数据集）在 artifacts 段，用其 "
+            "artifact_ref（art_）配 get_knowledge 的 query 精确查询；domain 可不传"
+            "（自动使用本钥匙绑定的知识域）。"
         ),
     }
+    # 61号批次3：发现通道——顶层浏览附带域内可见制品说明卡（前 20 张，Agent
+    # 要深入就用卡里的 art_ ref 走 get_knowledge(ref=art_…[, query=…])）。
+    # 发现通道挂了不影响主浏览：静默降级为不带 artifacts 段。
+    try:
+        listing_artifacts = backend.list_artifacts(resolved, ident, limit=20)
+        out["artifacts"] = listing_artifacts.get("artifacts") or []
+    except Exception as exc:  # noqa: BLE001 —— 降级面必须兜住一切上游异常
+        logger.warning("artifact discovery degraded: %r", exc)
+    return out
 
 
 @mcp.tool()
