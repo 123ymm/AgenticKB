@@ -22,7 +22,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from knowledge_mining.mining.kb.auth import current_user
-from knowledge_mining.mining.kb.db_artifacts import ArtifactError as ArtifactRepoError
 from knowledge_mining.mining.kb.deps import (
     get_artifact_db,
     get_artifact_import_service,
@@ -72,29 +71,23 @@ class AcceptanceFakeArtifactDB(FakeArtifactDB):
 
     async def publish(
         self, artifact_id: str, change_summary: str, published_by: str,
+        expected_updated_at=None,
     ) -> dict:
-        self.calls.append("publish")
-        art = self.artifacts[artifact_id]
-        if not (art.get("usage_note") or "").strip():
-            raise ArtifactRepoError("usage_note_required")
-        history = [r["revision"] for r in self.revisions.get(artifact_id, [])]
-        row_revs = list(self.revision_rows.get(artifact_id, {}).keys())
-        new_rev = max([int(art["current_revision"]), *history, *row_revs], default=0) + 1
-        rows = self.rev0_rows.get(artifact_id, [])
-        self.revision_rows.setdefault(artifact_id, {})[new_rev] = [dict(r) for r in rows]
-        self.revisions.setdefault(artifact_id, []).append({
-            "revision": new_rev, "row_count": len(rows),
-            "schema_json": [dict(c) for c in self.columns.get(artifact_id, [])],
-            "change_summary": change_summary, "published_by": published_by,
-            "published_at": NOW,
-        })
-        self.rev0_rows[artifact_id] = []
-        art.update(current_revision=new_rev, status="published", draft_open=False)
-        self._touch(artifact_id)
+        """父类已对齐真库三审语义（expected_updated_at 原子校验 + alias 键
+        归一）；此处只补真库第②步的 schema_json 落 revisions 记录与索引重建。"""
+        result = await super().publish(
+            artifact_id, change_summary, published_by,
+            expected_updated_at=expected_updated_at,
+        )
+        new_rev = result["revision"]
+        for record in self.revisions.get(artifact_id, []):
+            if record["revision"] == new_rev:
+                record["schema_json"] = [
+                    dict(c) for c in self.columns.get(artifact_id, [])]
         await self.drop_draft_expression_indexes(artifact_id)
         indexed = [c for c in self.columns.get(artifact_id, []) if c.get("is_indexed")]
         await self.create_expression_indexes(artifact_id, new_rev, indexed)
-        return {"revision": new_rev, "row_count": len(rows)}
+        return result
 
     async def get_revision(self, artifact_id: str, revision: int) -> dict | None:
         for record in self.revisions.get(artifact_id, []):
@@ -296,13 +289,13 @@ class TestSixtyOneAcceptanceCases:
 
         rows = {r["row_key"]: r for r in env.db.rev0_rows[aid]}
         # 同 MOP 行：data 覆盖（UPSERT）+ provenance 双来源
-        shared = rows["16:NC20260601000295"]
+        shared = rows["4e433230323630363031303030323935"]
         assert shared["data"]["是否夜间执行"] == "是"
         assert len(shared["provenance"]) == 2
         assert {p["file_name"] for p in shared["provenance"]} == {"A.xlsx", "B.xlsx"}
         # 新行插入（drop 列不进 data）
-        assert rows["16:NC20260601000401"]["data"]["L1分类"] == "数据业务"
-        assert "L2分类" not in rows["16:NC20260601000401"]["data"]
+        assert rows["4e433230323630363031303030343031"]["data"]["L1分类"] == "数据业务"
+        assert "L2分类" not in rows["4e433230323630363031303030343031"]["data"]
         # schema 已含追加新列
         assert any(c["column_name"] == "是否夜间执行"
                    for c in await env.db.list_columns(aid))
@@ -312,7 +305,7 @@ class TestSixtyOneAcceptanceCases:
         assert diff["removed_count"] == 0
         # 3 条被覆盖行 × 2 列变更（L2分类 置空 + 是否夜间执行 赋值）= 6 条列级
         assert diff["changed_count"] == 6
-        assert {"row_key": "16:NC20260601000295", "column": "是否夜间执行",
+        assert {"row_key": "4e433230323630363031303030323935", "column": "是否夜间执行",
                 "old": None, "new": "是"} in diff["changed"]
 
     async def test_case4_rollback_roundtrip(self, env):
@@ -338,7 +331,7 @@ class TestSixtyOneAcceptanceCases:
         # 拨低后重发布：ensure_draft 从 rev1 检出 8 行 → 新版本取 max+1 = rev3
         await env.svc.rollback_to(user=OWNER, artifact_id=aid, revision=1)
         await env.svc.update_cell(
-            user=OWNER, artifact_id=aid, row_key="16:NC20260601000295",
+            user=OWNER, artifact_id=aid, row_key="4e433230323630363031303030323935",
             column="L2分类", value="演练前核查")
         result = await env.svc.publish(user=OWNER, artifact_id=aid,
                                        change_summary="回滚后重发")
@@ -358,10 +351,10 @@ class TestSixtyOneAcceptanceCases:
             user=OWNER, artifact_id=aid, revision=1))["rows"]
 
         await env.svc.update_cell(
-            user=OWNER, artifact_id=aid, row_key="16:NC20260601000295",
+            user=OWNER, artifact_id=aid, row_key="4e433230323630363031303030323935",
             column="L1分类", value="乱改")
         await env.svc.delete_row(
-            user=OWNER, artifact_id=aid, row_key="16:NC20260601000296")
+            user=OWNER, artifact_id=aid, row_key="4e433230323630363031303030323936")
         diff = await env.svc.diff_draft_vs_current(user=OWNER, artifact_id=aid)
         assert diff["changed_count"] == 1 and diff["removed_count"] == 1
 

@@ -368,11 +368,11 @@ async def test_row_write_defenses_map_400(env):
     assert r.status_code == 200, r.text
 
     r = await env.client.patch(
-        f"/api/artifacts/{aid}/table/rows/16:NC20260601000295",
+        f"/api/artifacts/{aid}/table/rows/4e433230323630363031303030323935",
         json={"column": "L1分类", "value": "=SUM(A1)"})
     assert r.status_code == 400 and "formula_not_allowed" in r.text
     r = await env.client.patch(
-        f"/api/artifacts/{aid}/table/rows/16:NC20260601000295",
+        f"/api/artifacts/{aid}/table/rows/4e433230323630363031303030323935",
         json={"column": "不存在列", "value": "x"})
     assert r.status_code == 400 and "unknown_column" in r.text
     r = await env.client.post(
@@ -494,7 +494,7 @@ async def test_cell_update_batch_assign_delete_row(env):
     assert r.status_code == 200, r.text
 
     r = await env.client.patch(
-        f"/api/artifacts/{aid}/table/rows/16:NC20260601000295",
+        f"/api/artifacts/{aid}/table/rows/4e433230323630363031303030323935",
         json={"column": "L2分类", "value": "演练前核查"})
     assert r.status_code == 200, r.text
     assert r.json()["data"]["L2分类"] == "演练前核查"
@@ -507,7 +507,7 @@ async def test_cell_update_batch_assign_delete_row(env):
     assert r.status_code == 200 and r.json()["updated"] == 3
 
     r = await env.client.request(
-        "DELETE", f"/api/artifacts/{aid}/table/rows/16:NC20260601000302")
+        "DELETE", f"/api/artifacts/{aid}/table/rows/4e433230323630363031303030333032")
     assert r.status_code == 200
     r = await env.client.get(f"/api/artifacts/{aid}/table/rows?draft=1")
     assert r.json()["total"] == 7
@@ -542,7 +542,7 @@ async def test_insert_row_manual_add(env):
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["row_key"] == "16:NC20260601000410"   # 长度前缀编码（批号④）
+    assert body["row_key"] == "4e433230323630363031303030343130"   # hex 编码（三审 P1-1）
     assert body["data"]["L2分类"] == "演练前核查"
     assert body["ordinal"] == 9
     assert body["provenance"] == [{"channel": "manual", "created_by": "u-alice"}]
@@ -582,10 +582,10 @@ async def test_insert_row_manual_add(env):
     assert len(key) == 32 and all(c in "0123456789abcdef" for c in key)
 
 
-async def test_row_key_with_slash_addressable_in_routes(env):
-    """codex二审批号④回归：长度前缀编码的 row_key 可含 '/'——行路由用
-    path converter 后 PATCH/DELETE 不再被段内斜杠截断（前端已
-    encodeURIComponent）。"""
+async def test_row_key_hex_gateway_safe_and_addressable_in_routes(env):
+    """codex三审 P1-1 回归：含 '/'、':'、'%'、中文的主键值 → row_key 纯
+    [0-9a-f.]（encodeURIComponent 不转义 → 网关不拒 % 编码字节），行路由
+    PATCH/DELETE 可寻址。"""
     from knowledge_mining.mining.kb.db_artifacts import _encode_key_parts
 
     aid = await _create_artifact(env)
@@ -594,8 +594,9 @@ async def test_row_key_with_slash_addressable_in_routes(env):
          "is_indexed": False, "is_primary_key": False, "ordinal": 1,
          "status": "active"},
     ]
-    key = _encode_key_parts(["a/b", "c"])   # "3:a/b1:c"——含 '/'
-    assert "/" in key
+    key = _encode_key_parts(["a/b:c%", "机房/一"])
+    assert all(c in "0123456789abcdef." for c in key)   # 网关字符集安全
+    assert "/" not in key and ":" not in key and "%" not in key
     env.db.rev0_rows[aid] = [
         {"row_key": key, "data": {"路径": "旧"}, "provenance": [],
          "conflicts": {}, "ordinal": 1},
@@ -609,3 +610,48 @@ async def test_row_key_with_slash_addressable_in_routes(env):
     r = await env.client.request("DELETE", f"/api/artifacts/{aid}/table/rows/{key}")
     assert r.status_code == 200
     assert env.db.rev0_rows[aid] == []
+
+
+async def test_cell_update_stale_token_maps_409(env):
+    """codex三审 P2-1 回归（路由级）：单格更新带旧 token → 409
+    code=stale_artifact；并发窗口（前置快检过后仓储层才判 stale）同样 409
+    而非 500。"""
+    aid = await _create_artifact(env)
+    token = await _upload_a(env, aid)
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/import",
+        json={"preview_token": token, "plan": {"column_ops": [
+            {"source": "MOP", "action": "new", "target_name": "MOP",
+             "column_type": "text", "is_primary_key": True},
+            {"source": "L1分类", "action": "new", "target_name": "L1分类",
+             "column_type": "text"},
+        ]}},
+    )
+    assert r.status_code == 200, r.text
+    key = "4e433230323630363031303030323935"
+
+    # 旧 token → 409 stale_artifact
+    r = await env.client.patch(
+        f"/api/artifacts/{aid}/table/rows/{key}",
+        json={"column": "L1分类", "value": "x",
+              "expected_updated_at": "2000-01-01T00:00:00Z"},
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "stale_artifact"
+
+    # 并发窗口模拟：token 当前（service 前置快检过）但仓储层抛 stale → 仍 409
+    from knowledge_mining.mining.kb.db_artifacts import (
+        ArtifactError as ArtifactRepoError,
+    )
+
+    async def raise_stale(*args, **kwargs):
+        raise ArtifactRepoError("stale_artifact")
+
+    env.db.update_cell = raise_stale
+    fresh = env.db.artifacts[aid]["updated_at"].isoformat()
+    r = await env.client.patch(
+        f"/api/artifacts/{aid}/table/rows/{key}",
+        json={"column": "L1分类", "value": "y", "expected_updated_at": fresh},
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "stale_artifact"

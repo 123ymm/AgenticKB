@@ -2,13 +2,14 @@
 
 三入口（本服务不直接写业务表——落库动作一律经 ArtifactService 的权限门禁）：
 - parse_upload(file_bytes, file_name)：护栏（50MB 文件/解压 200MB/200 列/
-  10 万行/公式注入拒绝）→ 临时文件 + 进程内预览登记（TTL 1h 惰性清理）。
+  10 万行）→ 临时文件 + 进程内预览登记（TTL 1h 惰性清理）。
 - build_mapping(...)：纯计算不落库——列映射校验（source 在表头/目标列存在/
   列类型合法）+ missing_columns 提示（追加模式 schema 有文件无）。
-- execute_import(service, ...)：权限与 ensure_draft 前置 → 全量校验（类型
-  cast + 文件内主键重复；strict/block 策略下先报错、零写入）→ create_batch
-  （provenance 需要 batch_id，先于行写入）→ 建表 replace_columns / 追加新列
-  upsert_column → insert_rows 主键 UPSERT。
+- execute_import(service, ...)：权限与 ensure_draft 前置 → 全量校验（公式
+  注入（codex三审 P2-3：只查所选 sheet 的表头+数据值）+ 类型 cast + 文件内
+  主键重复；strict/block 策略下先报错、零写入）→ create_batch（provenance
+  需要 batch_id，先于行写入）→ 建表 replace_columns / 追加新列 upsert_column
+  → insert_rows 主键 UPSERT。
 
 预览登记为进程内 dict：mining API 单进程单 worker 部署成立；多副本部署需
 换共享存储（61号 MVP 边界，见 §13 演进预留）。登记绑定 artifact_id+uploader
@@ -16,7 +17,10 @@
 登记 ≤5（修复⑭，超限清最旧 + 429）；启动无清扫要求（MVP，TTL 惰性清理足够）。
 
 公式注入防御与 55号 user_import_service 同口径：以 ``= + - @`` 开头的文本
-格一律拒绝（data_only=False 下公式格本身就是 "=..." 字符串）。
+格一律拒绝（data_only=False 下公式格本身就是 "=..." 字符串）。codex三审
+P2-3：拒绝只在 execute_import 重读**所选 sheet** 时执行——parse 预览只读
+展示合法（汇总 sheet 带公式不影响数据 sheet 的导入）；文件级护栏（zip 炸弹/
+行列上限）仍在 parse 层（安全护栏不放松）。
 """
 from __future__ import annotations
 
@@ -269,7 +273,7 @@ def _normalize_policy(raw: Any) -> dict[str, str]:
 
 
 def _row_key(data: dict[str, Any], pk_names: list[str]) -> tuple[str, bool]:
-    """主键值长度前缀编码（多列组合，61号 §6.3 + codex二审批号④：与
+    """主键值 hex 编码（多列组合，61号 §6.3 + codex三审 P1-1：与
     db_artifacts._row_key_value 同构——追加 UPSERT 与 set_primary_key 重算/
     手工行增对同一主键值必须得到同一 row_key，否则同键行判重失效）；无主键
     或主键值全空 → uuid。返回 (row_key, missing_pk)——missing_pk=True 时
@@ -411,15 +415,15 @@ class ArtifactImportService:
     def _scan_one_sheet(
         sheet: Any, sample_budget: int, *, require_header: bool,
     ) -> dict[str, Any]:
+        """codex三审 P2-3：parse 层不做公式拒绝（预览只读展示合法——汇总
+        sheet 带公式不应阻断数据 sheet 的上传预览）；公式格以 "=..." 字符串
+        参与 infer（通常落 text）。文件级护栏（列数/行数）照旧。"""
         iterator = sheet.iter_rows(values_only=True)
         header_row = next(iterator, None)
         if header_row is None:
             if require_header:
                 raise ArtifactImportError("empty_sheet")
             return {"name": str(sheet.title), "columns": [], "sample_rows": []}
-        for cell in header_row:
-            if _is_formula(cell):
-                raise ArtifactImportError("formula_not_allowed")
         headers = _dedupe_headers(header_row)
         if len(headers) > MAX_COLUMNS:
             raise ArtifactImportError("too_many_columns")
@@ -429,9 +433,6 @@ class ArtifactImportService:
             data_rows += 1
             if data_rows > MAX_ROWS:
                 raise ArtifactImportError("too_many_rows")
-            for cell in row:
-                if _is_formula(cell):
-                    raise ArtifactImportError("formula_not_allowed")
             if len(sample) < sample_budget:
                 sample.append({name: value for name, value in zip(headers, row)})
         columns = []
@@ -450,8 +451,13 @@ class ArtifactImportService:
         }
 
     @staticmethod
-    def _read_headers(path: str, sheet: str, header_row: int) -> list[str]:
-        """指定 sheet / 表头行 → 清洗后的表头（build_mapping 与 execute 共用）。"""
+    def _read_headers(
+        path: str, sheet: str, header_row: int, *,
+        check_formula: bool = False,
+    ) -> list[str]:
+        """指定 sheet / 表头行 → 清洗后的表头（build_mapping 与 execute 共用）。
+        check_formula=True（execute_import 重读所选 sheet 时，codex三审 P2-3）：
+        表头公式格拒绝 formula_not_allowed；build_mapping 预计算不查。"""
         workbook = _open_workbook(path)
         try:
             if sheet not in workbook.sheetnames:
@@ -461,9 +467,10 @@ class ArtifactImportService:
                 workbook[sheet].iter_rows(values_only=True), start=1,
             ):
                 if index == header_row:
-                    for cell in row:
-                        if _is_formula(cell):
-                            raise ArtifactImportError("formula_not_allowed")
+                    if check_formula:
+                        for cell in row:
+                            if _is_formula(cell):
+                                raise ArtifactImportError("formula_not_allowed")
                     headers = _dedupe_headers(row)
                     break
                 if index > header_row:
@@ -644,7 +651,10 @@ class ArtifactImportService:
 
         mapped, create_specs, append_specs = self._build_column_specs(
             plan_columns, active, effective_mode)
-        headers = self._read_headers(record["path"], sheet, header_row)
+        # codex三审 P2-3：公式拒绝限定所选 sheet——表头在此查，数据值在下方
+        # 行流内逐格查（行为不变：拒绝 → formula_not_allowed，零写入）。
+        headers = self._read_headers(
+            record["path"], sheet, header_row, check_formula=True)
         pk_names = self._primary_key_names(plan_columns, active, effective_mode)
         # 追加导入 ordinal 起点 = 现有 rev0 行数 + 1（对抗审查修复⑧：追加批
         # 的行号接在存量之后，不再与已有行挤 1..N）。ensure_draft 已检出，

@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import binascii
 import json
 import logging
 import uuid
@@ -51,17 +52,23 @@ def _json(obj: Any) -> str:
 
 
 def _encode_key_parts(parts: list[str]) -> str:
-    """主键值段 → 长度前缀编码（无歧义可逆）：单列 ``3:ABC``，多列直接拼接
-    ``5:MOP-11:A``。codex二审批号：'/' 直拼下 (A/B,C) 与 (A,B/C) 同键（碰撞），
-    且含 '/' 的键值会破坏 REST 行地址路由——长度前缀两者都消除。导入向导
+    """主键值段 → UTF-8 hex 编码、'.' 连接（无歧义可逆）：单列 ``414243``
+    （"ABC"），多列 ``4d4f502d31.41``。codex三审批号：网关
+    （main_control_service/auth.py _has_unsafe_proxy_path）对代理路径拒绝一切
+    % 编码字节——旧长度前缀 ``3:ABC`` 经前端 encodeURIComponent 变 ``3%3AABC``
+    即被网关 400，中文主键值同理必炸；hex 输出恒匹配 ``[0-9a-f.]``，是
+    encodeURIComponent 不转义的 URL 安全 ASCII 字符集（'.' 同安全），任何
+    Unicode/``/``/``:``/``%`` 主键值都不会触发编码。导入向导
     artifact_import_service._row_key 复用同一编码，保证追加 UPSERT 与
-    set_primary_key 重算的键同构。"""
-    return "".join(f"{len(s)}:{s}" for s in parts)
+    set_primary_key 重算的键同构。展示不受影响（data 里主键原值可见）。"""
+    return ".".join(
+        binascii.hexlify(str(s).encode("utf-8")).decode("ascii") for s in parts
+    )
 
 
 def _row_key_value(data: dict[str, Any], column_ids: list[str]) -> str:
-    """主键值拼接：None→空串；多列长度前缀编码（见 _encode_key_parts）；
-    无主键由调用方生成 uuid。"""
+    """主键值拼接：None→空串（hex 空串）；多列 hex 编码 '.' 连接（见
+    _encode_key_parts）；无主键由调用方生成 uuid。"""
     if not column_ids:
         return uuid.uuid4().hex
     return _encode_key_parts(
@@ -213,7 +220,11 @@ class ArtifactDB:
 
     async def list_artifacts_for_user(self, user_id: str) -> list[dict[str, Any]]:
         """成员视角列表（含 owner 不落 members 行的兜底）；site/domain admin 全量
-        走 list_all_artifacts（service 层分派）。"""
+        走 list_all_artifacts（service 层分派，不过滤）。
+
+        codex三审批号 P2-2：加当前域绑定过滤——被撤域的用户即使残留成员行/
+        owner 身份，制品也不再出现在列表（与详情 404 反探测口径对齐；
+        admin 路径在 service 层已分流到 list_all_artifacts，不受影响）。"""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT a.artifact_id, a.domain_id, a.kind, a.title, a.description,
@@ -224,7 +235,10 @@ class ArtifactDB:
                    FROM kb_artifacts a
                    LEFT JOIN kb_artifact_members m
                           ON m.artifact_id = a.artifact_id AND m.user_id = %(u)s
-                   WHERE a.owner_user_id = %(u)s OR m.user_id IS NOT NULL
+                   WHERE (a.owner_user_id = %(u)s OR m.user_id IS NOT NULL)
+                     AND EXISTS (SELECT 1 FROM user_domains ud
+                                 WHERE ud.user_id = %(u)s
+                                   AND ud.domain = a.domain_id)
                    ORDER BY a.created_at""",
                 {"u": user_id},
             )
@@ -368,6 +382,7 @@ class ArtifactDB:
 
     async def publish(
         self, artifact_id: str, change_summary: str, published_by: str,
+        expected_updated_at: Any = None,
     ) -> dict[str, Any]:
         """发布事务（61号 §4.2）：①rev0→revN 复制定格 ②schema 快照+版本记录
         ③清 draft+拨指针+状态。usage_note 非空由 service 先拦、此处兜底（竞态安全）。
@@ -375,6 +390,16 @@ class ArtifactDB:
         draft 门禁（对抗审查修复③）：draft_open=FALSE 且 current>0 = 干净态，
         无待发布变更 → no_pending_changes（service 翻 409）。首次发布
         （current=0）不受此门禁——rev0 即首发工作区。
+
+        键归一（codex三审 P1-2b）：复制 rev0→N+1 之前，对每个 active 列的每个
+        alias 旧名迁键到当前列名（行同时含新旧键时保留新键值、仅清旧键，见
+        _RENAME_DATA_KEYS_SQL 的 COALESCE 口径）。发布=键与 schema 对齐的定格
+        点：discard 后 checkout 回来的 rev0 行可能仍是旧键（上一版快照键名），
+        不归一会产生 schema=新名、数据键=旧名的断裂版本。
+
+        expected_updated_at（codex三审 P1-4）：本方法开头即 FOR UPDATE 取行，
+        取行后立即全精度比对 updated_at（失配 stale_artifact）——并发权威校验，
+        service 层 _check_freshness 只是前置快检。
 
         new_rev 取 max(current, 历史最大 revision)+1——回滚拨低指针后重发布
         不得与既有版本行撞主键（「数据不动」语义下历史版本仍留在表里）。
@@ -389,6 +414,9 @@ class ArtifactDB:
                 art = await cur.fetchone()
                 if art is None:
                     raise ArtifactError("artifact_not_found")
+                if expected_updated_at is not None \
+                        and art["updated_at"] != expected_updated_at:
+                    raise ArtifactError("stale_artifact")
                 if art["status"] not in ("draft", "published", "deprecated"):
                     raise ArtifactError("invalid_status")
                 if not (art["usage_note"] or "").strip():
@@ -415,6 +443,14 @@ class ArtifactDB:
                     (artifact_id,),
                 )
                 columns = [dict(r) for r in await cur.fetchall()]
+                for col in columns:
+                    current_name = str(col["column_name"])
+                    for alias_name in (col.get("alias") or []):
+                        alias_name = str(alias_name)
+                        if alias_name and alias_name != current_name:
+                            await self._rename_data_keys(
+                                conn, artifact_id, alias_name, current_name,
+                            )
                 cur = await conn.execute(
                     """INSERT INTO kb_table_rows
                        (artifact_id, revision, row_key, data, provenance, conflicts,
@@ -477,11 +513,14 @@ class ArtifactDB:
             )
             return [dict(r) for r in await cur.fetchall()]
 
-    async def rollback_to(self, artifact_id: str, revision: int) -> dict[str, Any]:
+    async def rollback_to(
+        self, artifact_id: str, revision: int, expected_updated_at: Any = None,
+    ) -> dict[str, Any]:
         """拨指针（数据不动）。仅校验目标版本存在于 kb_artifact_revisions——
         「数据不动」语义下拨任何历史版（含 > current，回滚往返）都安全；
         历史版本行留在 kb_table_rows / kb_artifact_revisions，之后重发布会
-        接到 max+1（对抗审查修复④：删去 revision > current 拒绝判据）。"""
+        接到 max+1（对抗审查修复④：删去 revision > current 拒绝判据）。
+        expected_updated_at：FOR UPDATE 取行后立即比对（codex三审 P1-4）。"""
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 cur = await conn.execute(
@@ -491,6 +530,9 @@ class ArtifactDB:
                 art = await cur.fetchone()
                 if art is None:
                     raise ArtifactError("artifact_not_found")
+                if expected_updated_at is not None \
+                        and art["updated_at"] != expected_updated_at:
+                    raise ArtifactError("stale_artifact")
                 revision = int(revision)
                 if revision < 1:
                     raise ArtifactError("invalid_revision")
@@ -512,33 +554,55 @@ class ArtifactDB:
                 )
                 return dict(await cur.fetchone())  # type: ignore[arg-type]
 
-    async def deprecate(self, artifact_id: str) -> dict[str, Any]:
-        return await self._set_status(artifact_id, "deprecated")
+    async def deprecate(
+        self, artifact_id: str, expected_updated_at: Any = None,
+    ) -> dict[str, Any]:
+        return await self._set_status(
+            artifact_id, "deprecated", expected_updated_at,
+        )
 
-    async def republish(self, artifact_id: str) -> dict[str, Any]:
+    async def republish(
+        self, artifact_id: str, expected_updated_at: Any = None,
+    ) -> dict[str, Any]:
         """deprecated → published（保持 current_revision，不产生新版本）。"""
-        return await self._set_status(artifact_id, "published")
+        return await self._set_status(
+            artifact_id, "published", expected_updated_at,
+        )
 
-    async def _set_status(self, artifact_id: str, target: str) -> dict[str, Any]:
+    async def _set_status(
+        self, artifact_id: str, target: str, expected_updated_at: Any = None,
+    ) -> dict[str, Any]:
+        """codex三审 P1-4：事务内 FOR UPDATE 取行 + updated_at 比对后再生效——
+        旧实现裸 UPDATE 无锁内校验（service 前置快检与写之间存在竞态窗口）。"""
         source = "published" if target == "deprecated" else "deprecated"
         async with self._pool.connection() as conn:
-            cur = await conn.execute(
-                """UPDATE kb_artifacts SET status = %s, updated_at = now()
-                   WHERE artifact_id = %s AND status = %s
-                   RETURNING artifact_id, domain_id, kind, title, description,
-                             usage_note, owner_user_id, status, current_revision,
-                             draft_open, created_at, updated_at""",
-                (target, artifact_id, source),
-            )
-            row = await cur.fetchone()
-            if row is None:
-                raise ArtifactError("invalid_status")
-            return dict(row)
+            async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at,
+                )
+                cur = await conn.execute(
+                    """UPDATE kb_artifacts SET status = %s, updated_at = now()
+                       WHERE artifact_id = %s AND status = %s
+                       RETURNING artifact_id, domain_id, kind, title, description,
+                                 usage_note, owner_user_id, status, current_revision,
+                                 draft_open, created_at, updated_at""",
+                    (target, artifact_id, source),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    raise ArtifactError("invalid_status")
+                return dict(row)
 
-    async def discard_draft(self, artifact_id: str) -> dict[str, Any]:
-        """丢弃 draft：DELETE rev0 全部行 + draft_open=FALSE（乱改后的逃生门）。"""
+    async def discard_draft(
+        self, artifact_id: str, expected_updated_at: Any = None,
+    ) -> dict[str, Any]:
+        """丢弃 draft：DELETE rev0 全部行 + draft_open=FALSE（乱改后的逃生门）。
+        expected_updated_at：事务内 FOR UPDATE 取行后比对（codex三审 P1-4）。"""
         async with self._pool.connection() as conn:
             async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at,
+                )
                 await conn.execute(
                     "DELETE FROM kb_table_rows WHERE artifact_id = %s AND revision = 0",
                     (artifact_id,),
@@ -621,6 +685,7 @@ class ArtifactDB:
     async def upsert_column(
         self, artifact_id: str, column_id: str, fields: dict[str, Any],
         *, rename_from: str | None = None,
+        expected_updated_at: Any = None,
     ) -> dict[str, Any]:
         """PATCH 式列变更。主键变更必须走 set_primary_key（要重算 row_key），
         is_primary_key 不在白名单。
@@ -631,7 +696,10 @@ class ArtifactDB:
         data 键（用例⑨闭环：Java/前端按新 schema 键名读数，旧键残留=读空；
         已发布快照不回改——旧版快照旧键+旧 schema 自洽，读取侧经 alias 映射
         闭环，Java 无需改）。本方法恒推进 kb_artifacts.updated_at（乐观锁
-        令牌随 schema 变更前进）。"""
+        令牌随 schema 变更前进）。
+
+        expected_updated_at（codex三审 P1-4）：事务内原子校验（FOR UPDATE +
+        改名迁键 + touch 同事务）。"""
         allowed = {"column_name", "column_type", "enum_values", "is_indexed",
                    "ordinal", "alias"}
         sets: list[str] = []
@@ -652,6 +720,9 @@ class ArtifactDB:
             raise ArtifactError("invalid_column_field")
         async with self._pool.connection() as conn:
             async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at,
+                )
                 cur = await conn.execute(
                     """INSERT INTO kb_table_columns
                        (artifact_id, column_id, column_name, column_type,
@@ -702,27 +773,39 @@ class ArtifactDB:
         """列改名后独立迁移 rev0 行 data 键（旧键值原样搬到新键）。常态路径
         经 upsert_column(rename_from=...) 在同一事务内完成；本方法留给补账/
         测试直调。只迁 rev0——已发布快照永不回改（见 upsert_column 注释）。
-        返回迁移行数。"""
+        返回迁移行数。
+
+        codex三审 P1-2a：参数显式 ``::text``——psycopg3 参数默认 unknown
+        类型，``-``/``->``/``?`` 运算符有 text/int 重载、jsonb_build_object 的
+        key 类型推断不出，真库必炸/歧义。"""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
-                """UPDATE kb_table_rows
-                   SET data = data - %(old)s
-                       || jsonb_build_object(%(new)s, data->%(old)s)
-                   WHERE artifact_id = %(a)s AND revision = 0 AND data ? %(old)s""",
+                self._RENAME_DATA_KEYS_SQL,
                 {"old": old_name, "new": new_name, "a": artifact_id},
             )
             return int(cur.rowcount or 0)
+
+    #: 迁键 SQL（rename_column_data_keys / _rename_data_keys / publish 归一共用）。
+    #: COALESCE 口径（codex三审 P1-2b）：行 data 同时含新旧键（discard 后
+    #: checkout 旧快照、用户又按新 schema 编辑过该列）时保留**新键值**、
+    #: 仅清除旧键——不让旧键值倒灌覆盖新编辑值，也不残留旧键。
+    _RENAME_DATA_KEYS_SQL = """UPDATE kb_table_rows
+                   SET data = (data - %(old)s::text)
+                       || jsonb_build_object(
+                            %(new)s::text,
+                            COALESCE(data->%(new)s::text, data->%(old)s::text))
+                   WHERE artifact_id = %(a)s AND revision = 0
+                     AND data ? %(old)s::text"""
 
     @staticmethod
     async def _rename_data_keys(
         conn: Any, artifact_id: str, old_name: str, new_name: str,
     ) -> None:
-        """upsert_column 事务内共用的迁键 SQL（与 rename_column_data_keys 同句）。"""
+        """upsert_column / publish 事务内共用的迁键 SQL（与
+        rename_column_data_keys 同句；::text cast 与 COALESCE 口径见其注释）。
+        只迁 rev0——已发布快照永不回改。"""
         await conn.execute(
-            """UPDATE kb_table_rows
-               SET data = data - %(old)s
-                   || jsonb_build_object(%(new)s, data->%(old)s)
-               WHERE artifact_id = %(a)s AND revision = 0 AND data ? %(old)s""",
+            ArtifactDB._RENAME_DATA_KEYS_SQL,
             {"old": old_name, "new": new_name, "a": artifact_id},
         )
 
@@ -738,10 +821,12 @@ class ArtifactDB:
 
     async def set_primary_key(
         self, artifact_id: str, column_ids: list[str],
+        expected_updated_at: Any = None,
     ) -> dict[str, Any]:
         """改主键 = 重算 rev0 全部 row_key（61号 §6.3：有数据时独立确认流程）。
         新键冲突（两行折到同键）→ ArtifactError("primary_key_conflict") 整体回滚。
         column_ids 为空 = 无主键：每行换新 uuid（Excel 一次性数据语义）。
+        expected_updated_at：FOR UPDATE 取行后立即比对（codex三审 P1-4）。
         """
         async with self._pool.connection() as conn:
             async with conn.transaction():
@@ -749,8 +834,12 @@ class ArtifactDB:
                     "SELECT * FROM kb_artifacts WHERE artifact_id = %s FOR UPDATE",
                     (artifact_id,),
                 )
-                if await cur.fetchone() is None:
+                art = await cur.fetchone()
+                if art is None:
                     raise ArtifactError("artifact_not_found")
+                if expected_updated_at is not None \
+                        and art["updated_at"] != expected_updated_at:
+                    raise ArtifactError("stale_artifact")
                 cur = await conn.execute(
                     """SELECT column_id, column_name FROM kb_table_columns
                        WHERE artifact_id = %s AND status = 'active'""",
@@ -846,15 +935,19 @@ class ArtifactDB:
 
     async def replace_columns_for_artifact(
         self, artifact_id: str, columns: list[dict[str, Any]],
+        expected_updated_at: Any = None,
     ) -> None:
         """首次导入建列（删旧插新；draft 态，无历史列则等价全建）。
         codex二审批号⑥c：schema 变更路径必须推进 updated_at——否则旧乐观锁
-        令牌永远有效。"""
+        令牌永远有效。expected_updated_at：事务内原子校验（codex三审 P1-4）。"""
         for col in columns:
             if col.get("column_type") not in _VALID_COLUMN_TYPES:
                 raise ArtifactError("invalid_column_type")
         async with self._pool.connection() as conn:
             async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at,
+                )
                 await conn.execute(
                     "DELETE FROM kb_table_columns WHERE artifact_id = %s",
                     (artifact_id,),
@@ -877,11 +970,13 @@ class ArtifactDB:
 
     async def insert_rows_upsert(
         self, artifact_id: str, revision: int, rows: list[dict[str, Any]],
-        updated_by: str = "",
+        updated_by: str = "", expected_updated_at: Any = None,
     ) -> dict[str, int]:
         """按 row_key UPSERT（61号 §6 追加导入）：命中→data 覆盖+provenance
         数组拼接+conflicts 覆盖；未命中插入。多行 VALUES 分批 1000/批，
         RETURNING (xmax=0) 区分 inserted/updated。
+        expected_updated_at（codex三审 P1-4，手工行增路径）：事务内 FOR UPDATE
+        取行+比对后再写——整批原子（校验+写入同事务，多批同进一事务）。
         """
         inserted = updated = 0
         flat_rows = [
@@ -895,40 +990,44 @@ class ArtifactDB:
             for r in rows
         ]
         async with self._pool.connection() as conn:
-            for start in range(0, len(flat_rows), _ROW_INSERT_BATCH):
-                chunk = flat_rows[start:start + _ROW_INSERT_BATCH]
-                # 8 占位符 = 8 列（artifact_id..updated_by）；与 flat.extend 一一对应
-                # （对抗审查修复①：曾漏 2 个占位符，真库必炸——静态测试钉死）。
-                values_sql = ", ".join(
-                    ["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk),
+            async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at,
                 )
-                flat: list[Any] = []
-                for item in chunk:
-                    flat.extend([
-                        artifact_id, revision, item["row_key"], item["data"],
-                        item["provenance"], item["conflicts"], item["ordinal"],
-                        updated_by,
-                    ])
-                cur = await conn.execute(
-                    """INSERT INTO kb_table_rows
-                       (artifact_id, revision, row_key, data, provenance, conflicts,
-                        ordinal, updated_by)
-                       VALUES """ + values_sql + """
-                       ON CONFLICT (artifact_id, revision, row_key) DO UPDATE SET
-                           data = EXCLUDED.data,
-                           provenance = kb_table_rows.provenance || EXCLUDED.provenance,
-                           conflicts = EXCLUDED.conflicts,
-                           ordinal = EXCLUDED.ordinal,
-                           updated_at = now(),
-                           updated_by = EXCLUDED.updated_by
-                       RETURNING (xmax = 0) AS _inserted""",
-                    flat,
-                )
-                for hit in await cur.fetchall():
-                    if hit["_inserted"]:
-                        inserted += 1
-                    else:
-                        updated += 1
+                for start in range(0, len(flat_rows), _ROW_INSERT_BATCH):
+                    chunk = flat_rows[start:start + _ROW_INSERT_BATCH]
+                    # 8 占位符 = 8 列（artifact_id..updated_by）；与 flat.extend 一一对应
+                    # （对抗审查修复①：曾漏 2 个占位符，真库必炸——静态测试钉死）。
+                    values_sql = ", ".join(
+                        ["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk),
+                    )
+                    flat: list[Any] = []
+                    for item in chunk:
+                        flat.extend([
+                            artifact_id, revision, item["row_key"], item["data"],
+                            item["provenance"], item["conflicts"], item["ordinal"],
+                            updated_by,
+                        ])
+                    cur = await conn.execute(
+                        """INSERT INTO kb_table_rows
+                           (artifact_id, revision, row_key, data, provenance, conflicts,
+                            ordinal, updated_by)
+                           VALUES """ + values_sql + """
+                           ON CONFLICT (artifact_id, revision, row_key) DO UPDATE SET
+                               data = EXCLUDED.data,
+                               provenance = kb_table_rows.provenance || EXCLUDED.provenance,
+                               conflicts = EXCLUDED.conflicts,
+                               ordinal = EXCLUDED.ordinal,
+                               updated_at = now(),
+                               updated_by = EXCLUDED.updated_by
+                           RETURNING (xmax = 0) AS _inserted""",
+                        flat,
+                    )
+                    for hit in await cur.fetchall():
+                        if hit["_inserted"]:
+                            inserted += 1
+                        else:
+                            updated += 1
         return {"inserted": inserted, "updated": updated}
 
     async def _assert_expected_updated_at(
@@ -1103,6 +1202,12 @@ class ArtifactDB:
         self, artifact_id: str, revision: int, page: int = 1, size: int = 50,
         sort_ordinal: bool = True,
     ) -> dict[str, Any]:
+        """codex三审 P1-2b（读取投影兜底）：返回前对每行 data 做 alias 旧名→
+        当前列名投影（当前名键缺失且旧名键存在时，仅在返回视图改名，不改
+        存储）——discard 后 checkout 回来的行仍是旧键，draft 期编辑面板按
+        当前 schema 显示才有值。对任意 revision 统一投影：编辑面板读
+        current/历史版时同样需要对齐当前 schema（Java/serving 运行态读不走
+        本方法，不受影响）。"""
         page = max(1, int(page))
         size = max(1, min(_MAX_PAGE_SIZE, int(size)))
         order = "ordinal, row_key" if sort_ordinal else "row_key"
@@ -1122,6 +1227,30 @@ class ArtifactDB:
                 (artifact_id, revision),
             )
             total = int((await cur.fetchone())["n"])  # type: ignore[index]
+            cur = await conn.execute(
+                """SELECT column_name, alias FROM kb_table_columns
+                   WHERE artifact_id = %s AND status = 'active'""",
+                (artifact_id,),
+            )
+            alias_map = {
+                str(old): str(col["column_name"])
+                for col in await cur.fetchall()
+                for old in (col.get("alias") or [])
+                if str(old) and str(old) != str(col["column_name"])
+            }
+        if alias_map:
+            for row in rows:
+                data = row.get("data")
+                if not isinstance(data, dict) or not data:
+                    continue
+                projected = data
+                for old_name, current_name in alias_map.items():
+                    if old_name in projected and current_name not in projected:
+                        if projected is data:
+                            projected = dict(data)
+                        projected[current_name] = projected.pop(old_name)
+                if projected is not data:
+                    row["data"] = projected
         return {"rows": rows, "total": total, "page": page, "size": size}
 
     async def count_rows(self, artifact_id: str, revision: int) -> int:
@@ -1213,13 +1342,16 @@ class ArtifactDB:
     ) -> list[str]:
         """按 is_indexed 列生成类型化表达式索引：int/float 加 ::numeric cast
         （空串先 NULLIF，防 cast 崩）；其余按文本。命名 idx_kbtr_{art}_{col}。
-        revision 仅为调用方语义（61号：发布后建）；索引列含 revision，本制品
-        任意版本查询共用同一索引。返回创建的索引名列表。
+        61号：发布后按发布版建。返回创建的索引名列表。
 
         codex二审批号⑤：表达式必须限定 ``WHERE artifact_id = <本制品>``——
         否则 CREATE INDEX 对 kb_table_rows 全表行求 cast，其他制品同名列的
         脏值（如 text 列里的非数文本）会当场炸掉索引创建（进而炸发布）。
-        部分索引不影响跨版本共用语义（过滤列恒为同一 artifact_id 字面量）。
+
+        codex三审 P1-3：WHERE 再限定 ``AND revision = <发布版>``——历史版本行
+        可能含旧类型文本（列类型改过），不让它们参与 cast 求值；rev0 草稿
+        写入也不维护索引（脏文本写入不炸）。代价：历史版本读无表达式索引
+        （低频全扫，接受）。发布时 drop 全部 + 按新版重建的流程不变。
         """
         created: list[str] = []
         if not indexed_columns:
@@ -1234,9 +1366,10 @@ class ArtifactDB:
                     expr = sql.SQL("(data->{})").format(col_ref)
                 stmt = sql.SQL(
                     "CREATE INDEX IF NOT EXISTS {} ON kb_table_rows"
-                    " (revision, {}) WHERE artifact_id = {}"
+                    " (revision, {}) WHERE artifact_id = {} AND revision = {}"
                 ).format(
-                    sql.Identifier(name), expr, sql.Literal(artifact_id),
+                    sql.Identifier(name), expr,
+                    sql.Literal(artifact_id), sql.Literal(int(revision)),
                 )
                 await conn.execute(stmt)
                 created.append(name)

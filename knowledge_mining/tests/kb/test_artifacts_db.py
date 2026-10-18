@@ -92,6 +92,9 @@ async def test_create_get_update_and_membership(async_pool) -> None:
     members = {m["user_id"]: m["role"] for m in await db.list_members(aid)}
     assert members == {owner["id"]: "owner", member["id"]: "editor"}
 
+    # codex三审 P2-2：列表要求当前域绑定——未绑定时列表不含（详情已 404）
+    assert await db.list_artifacts_for_user(member["id"]) == []
+    await kbdb.bind_domain(user_id=member["id"], domain="plant-a")
     mine = await db.list_artifacts_for_user(member["id"])
     assert [a["artifact_id"] for a in mine] == [aid]
     assert mine[0]["my_role"] == "editor"
@@ -404,12 +407,12 @@ async def test_set_primary_key_rekeys_rows_and_detects_conflicts(async_pool) -> 
     assert {r["row_key"] for r in (await db.list_rows(aid, 0))["rows"]} \
         == {"MOP-1", "MOP-2"}
 
-    # 组合主键 MOP+机房：无冲突，键重算（长度前缀编码——codex二审批号④：
-    # '/' 直拼 (A/B,C) 与 (A,B/C) 同键，长度前缀消除碰撞）
+    # 组合主键 MOP+机房：无冲突，键重算（hex 编码 '.' 连接——codex三审 P1-1：
+    # 网关拒代理路径一切 % 编码字节，row_key 必须纯 URL 安全 ASCII）
     result = await db.set_primary_key(aid, ["c001", "c002"])
     assert result["rekeyed_rows"] == 2
     keys = {r["row_key"] for r in (await db.list_rows(aid, 0))["rows"]}
-    assert keys == {"5:MOP-11:A", "5:MOP-21:A"}
+    assert keys == {"4d4f502d31.41", "4d4f502d32.41"}
     cols = {c["column_id"]: c for c in await db.list_columns(aid)}
     assert cols["c001"]["is_primary_key"] is True
     assert cols["c002"]["is_primary_key"] is True
@@ -442,11 +445,11 @@ async def test_set_primary_key_preserves_row_metadata(async_pool) -> None:
     ], updated_by=owner["id"])
     await db.set_primary_key(aid, ["c001", "c002"])
     row = (await db.list_rows(aid, 0))["rows"][0]
-    assert row["row_key"] == "4:NC-11:A"
+    assert row["row_key"] == "4e432d31.41"
     assert row["provenance"] == [{"batch_id": "bat_x", "file_name": "a.xlsx"}]
     assert row["conflicts"] == {"机房": "type_error:脏值"}
     assert row["ordinal"] == 7
-    raw = await db.get_row(aid, 0, "4:NC-11:A")
+    raw = await db.get_row(aid, 0, "4e432d31.41")
     assert raw is not None and raw["data"] == {"MOP": "NC-1", "机房": "A"}
 
 
@@ -467,7 +470,7 @@ async def test_rename_column_migrates_rev0_data_keys(async_pool) -> None:
          "is_primary_key": True, "ordinal": 1},
     ])
     await db.insert_rows_upsert(aid, 0, [
-        _row("16:NC20260601000295", {"MOP": "NC20260601000295"}, 1),
+        _row("4e433230323630363031303030323935", {"MOP": "NC20260601000295"}, 1),
     ], updated_by=owner["id"])
     await db.publish(aid, "rev1", owner["id"])   # rev1 快照定格旧键
 
@@ -484,6 +487,50 @@ async def test_rename_column_migrates_rev0_data_keys(async_pool) -> None:
     assert frozen["data"] == {"MOP": "NC20260601000295"}    # 已发布快照不动
     # schema 变更推进乐观锁令牌（批号⑥c）
     assert (await db.get_artifact(aid))["updated_at"] is not None
+
+
+async def test_publish_normalizes_stale_alias_keys_and_checks_token(async_pool):
+    """codex三审 P1-2b/P1-4 回归（真库）：发布事务内 alias 键归一——discard 后
+    checkout 的 rev0 行是旧键，编辑后发布 → 新版本键=当前列名（旧键清除、
+    新键值不被倒灌）；发布带旧 token → stale_artifact 整体回滚。"""
+    db = ArtifactDB(async_pool)
+    kbdb = KbDB(async_pool)
+    owner = await kbdb.create_user(username="art-owner-16")
+    aid = (await db.create_artifact(
+        domain_id="plant-a", title="发布归一", owner_user_id=owner["id"],
+    ))["artifact_id"]
+    await db.update_artifact_meta(aid, usage_note="u")
+    await db.ensure_draft(aid)
+    await db.replace_columns_for_artifact(aid, [
+        {"column_id": "c001", "column_name": "MOP", "column_type": "text",
+         "is_primary_key": True, "ordinal": 1},
+        {"column_id": "c002", "column_name": "L1", "column_type": "text",
+         "ordinal": 2},
+    ])
+    await db.insert_rows_upsert(aid, 0, [
+        _row("k1", {"MOP": "k1", "L1": "部署"}, 1),
+    ], updated_by=owner["id"])
+    await db.publish(aid, "rev1", owner["id"])
+
+    # 改名 L1→一级分类（rev0 迁键）→ discard（schema 保留改名，rev0 清空）
+    await db.upsert_column(aid, "c002", {"column_name": "一级分类"},
+                           rename_from="L1")
+    await db.discard_draft(aid)
+    # 再检出（rev1 旧行=旧键 L1）+ 按新名编辑该列 → 混合键行
+    await db.ensure_draft(aid)
+    token_before = (await db.get_artifact(aid))["updated_at"]
+    await db.update_cell(aid, "k1", "一级分类", "演练", owner["id"])
+    # 旧 token（编辑前快照）发布 → stale_artifact（FOR UPDATE 比对），版本不动
+    with pytest.raises(ArtifactError, match="stale_artifact"):
+        await db.publish(
+            aid, "bad", owner["id"], expected_updated_at=token_before)
+    assert (await db.get_artifact(aid))["current_revision"] == 1
+    fresh = (await db.get_artifact(aid))["updated_at"]
+    result = await db.publish(
+        aid, "rev2", owner["id"], expected_updated_at=fresh)
+    assert result == {"revision": 2, "row_count": 1}
+    rev2 = (await db.list_rows(aid, 2))["rows"][0]
+    assert rev2["data"] == {"MOP": "k1", "一级分类": "演练"}   # 旧键清除、新值保留
 
 
 async def test_row_writes_check_expected_updated_at_atomically(async_pool) -> None:

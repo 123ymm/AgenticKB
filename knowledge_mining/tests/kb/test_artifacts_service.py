@@ -152,10 +152,14 @@ class FakeArtifactDB:
         return [dict(b) for b in self.batches.get(artifact_id, [])]
 
     async def list_artifacts_for_user(self, user_id: str) -> list[dict]:
+        """codex三审 P2-2 对齐真库：成员行在但当前域绑定已撤 → 不出现在列表。"""
         out = []
         for aid, roles in self.members.items():
             if user_id in roles and aid in self.artifacts:
-                out.append({**self.artifacts[aid], "my_role": roles[user_id]})
+                art = self.artifacts[aid]
+                if (user_id, art["domain_id"]) not in self.domain_bindings:
+                    continue
+                out.append({**art, "my_role": roles[user_id]})
         return out
 
     async def list_all_artifacts(self, domain_id: str | None = None) -> list[dict]:
@@ -195,16 +199,37 @@ class FakeArtifactDB:
 
     # ---- 生命周期 ---------------------------------------------------------
 
+    def _normalize_alias_keys(self, artifact_id: str) -> None:
+        """codex三审 P1-2b 对齐真库（COALESCE 口径）：发布定格前对 rev0 行做
+        alias 旧名→当前名归一——行同时含新旧键时保留新键值、仅清旧键。"""
+        for col in self.columns.get(artifact_id, []):
+            current_name = str(col.get("column_name"))
+            for alias_name in (col.get("alias") or []):
+                alias_name = str(alias_name)
+                if not alias_name or alias_name == current_name:
+                    continue
+                for row in self.rev0_rows.get(artifact_id, []):
+                    data = row["data"]
+                    if alias_name in data:
+                        value = data.get(current_name, data[alias_name])
+                        row["data"] = {
+                            **{k: v for k, v in data.items() if k != alias_name},
+                            current_name: value,
+                        }
+
     async def publish(
         self, artifact_id: str, change_summary: str, published_by: str,
+        expected_updated_at=None,
     ) -> dict:
         self.calls.append("publish")
         art = self.artifacts[artifact_id]
+        self._assert_expected(artifact_id, expected_updated_at)
         if not (art.get("usage_note") or "").strip():
             raise ArtifactRepoError("usage_note_required")
         # 对齐真库（对抗审查修复③）：干净态发布门禁
         if not art.get("draft_open") and int(art["current_revision"]) > 0:
             raise ArtifactRepoError("no_pending_changes")
+        self._normalize_alias_keys(artifact_id)
         history = [r["revision"] for r in self.revisions.get(artifact_id, [])]
         row_revs = list(self.revision_rows.get(artifact_id, {}).keys())
         new_rev = max([int(art["current_revision"]), *history, *row_revs], default=0) + 1
@@ -242,11 +267,14 @@ class FakeArtifactDB:
             "row_count": len(self.revision_rows[artifact_id][revision]),
         }
 
-    async def rollback_to(self, artifact_id: str, revision: int) -> dict:
+    async def rollback_to(
+        self, artifact_id: str, revision: int, expected_updated_at=None,
+    ) -> dict:
         """对齐真库（对抗审查修复④）：仅校验 revision 存在于版本历史——
         「数据不动」语义下拨任何历史版（含 > current）都安全。"""
         self.calls.append("rollback_to")
         art = self.artifacts[artifact_id]
+        self._assert_expected(artifact_id, expected_updated_at)
         known = {r["revision"] for r in self.revisions.get(artifact_id, [])} \
             | set(self.revision_rows.get(artifact_id, {}).keys())
         if revision < 1 or revision not in known:
@@ -256,25 +284,28 @@ class FakeArtifactDB:
         self._touch(artifact_id)
         return dict(art)
 
-    async def deprecate(self, artifact_id: str) -> dict:
+    async def deprecate(self, artifact_id: str, expected_updated_at=None) -> dict:
         art = self.artifacts[artifact_id]
+        self._assert_expected(artifact_id, expected_updated_at)
         if art["status"] != "published":
             raise ArtifactRepoError("invalid_status")
         art["status"] = "deprecated"
         self._touch(artifact_id)
         return dict(art)
 
-    async def republish(self, artifact_id: str) -> dict:
+    async def republish(self, artifact_id: str, expected_updated_at=None) -> dict:
         art = self.artifacts[artifact_id]
+        self._assert_expected(artifact_id, expected_updated_at)
         if art["status"] != "deprecated":
             raise ArtifactRepoError("invalid_status")
         art["status"] = "published"
         self._touch(artifact_id)
         return dict(art)
 
-    async def discard_draft(self, artifact_id: str) -> dict:
+    async def discard_draft(self, artifact_id: str, expected_updated_at=None) -> dict:
         self.calls.append("discard_draft")
         art = self.artifacts[artifact_id]
+        self._assert_expected(artifact_id, expected_updated_at)
         self.rev0_rows[artifact_id] = []
         art["draft_open"] = False
         self._touch(artifact_id)
@@ -306,10 +337,12 @@ class FakeArtifactDB:
 
     async def upsert_column(
         self, artifact_id: str, column_id: str, fields: dict,
-        *, rename_from: str | None = None,
+        *, rename_from: str | None = None, expected_updated_at=None,
     ) -> dict:
         """对齐真库（codex二审批号①②）：改名时同"事务"迁移 rev0 data 键 +
-        恒推进 updated_at（乐观锁令牌随 schema 变更前进）。"""
+        恒推进 updated_at（乐观锁令牌随 schema 变更前进）；codex三审 P1-4：
+        expected_updated_at 原子校验。"""
+        self._assert_expected(artifact_id, expected_updated_at)
         cols = self.columns.setdefault(artifact_id, [])
         for col in cols:
             if col["column_id"] == column_id:
@@ -340,13 +373,14 @@ class FakeArtifactDB:
                 col["is_primary_key"] = False
 
     async def set_primary_key(
-        self, artifact_id: str, column_ids: list[str],
+        self, artifact_id: str, column_ids: list[str], expected_updated_at=None,
     ) -> dict:
         """对齐真库（对抗审查修复②）：按 column_name 重算 rev0 全部
         row_key；两行折到同键 → primary_key_conflict。"""
         self.calls.append("set_primary_key")
         if artifact_id not in self.artifacts:
             raise ArtifactRepoError("artifact_not_found")
+        self._assert_expected(artifact_id, expected_updated_at)
         active = [
             c for c in self.columns.get(artifact_id, [])
             if c.get("status") != "dropped"
@@ -371,16 +405,19 @@ class FakeArtifactDB:
                 "rekeyed_rows": rekeyed}
 
     async def replace_columns_for_artifact(
-        self, artifact_id: str, columns: list[dict],
+        self, artifact_id: str, columns: list[dict], expected_updated_at=None,
     ) -> None:
         self.calls.append("replace_columns_for_artifact")
+        self._assert_expected(artifact_id, expected_updated_at)
         self.columns[artifact_id] = [dict(c) for c in columns]
         self._touch(artifact_id)   # 对齐真库：schema 变更推进乐观锁令牌
 
     async def insert_rows_upsert(
         self, artifact_id: str, revision: int, rows: list[dict], updated_by: str = "",
+        expected_updated_at=None,
     ) -> dict:
         self.calls.append("insert_rows_upsert")
+        self._assert_expected(artifact_id, expected_updated_at)
         bucket = self.rev0_rows.setdefault(artifact_id, []) if revision == 0 \
             else self.revision_rows.setdefault(artifact_id, {}).setdefault(revision, [])
         existing = {r["row_key"]: r for r in bucket}
@@ -484,11 +521,33 @@ class FakeArtifactDB:
         self, artifact_id: str, revision: int, page: int = 1, size: int = 50,
         sort_ordinal: bool = True,
     ) -> dict:
+        """codex三审 P1-2b 对齐真库：返回前做 alias 旧名→当前名读取投影
+        （当前名键缺失且旧名键存在——仅视图改名，不改存储）。"""
         if revision == 0:
             rows = self.rev0_rows.get(artifact_id, [])
         else:
             rows = self.revision_rows.get(artifact_id, {}).get(revision, [])
-        return {"rows": [dict(r) for r in rows], "total": len(rows)}
+        alias_map = {
+            str(old): str(col["column_name"])
+            for col in self.columns.get(artifact_id, [])
+            if col.get("status") != "dropped"
+            for old in (col.get("alias") or [])
+            if str(old) and str(old) != str(col["column_name"])
+        }
+        out: list[dict] = []
+        for r in rows:
+            row = dict(r)
+            data = row.get("data")
+            if isinstance(data, dict) and alias_map:
+                for old_name, current_name in alias_map.items():
+                    if old_name in data and current_name not in data:
+                        data = {
+                            **{k: v for k, v in data.items() if k != old_name},
+                            current_name: data[old_name],
+                        }
+                row["data"] = data
+            out.append(row)
+        return {"rows": out, "total": len(out)}
 
     async def count_rows(self, artifact_id: str, revision: int) -> int:
         if revision == 0:
@@ -992,14 +1051,14 @@ async def test_set_primary_key_maps_repo_conflict_error() -> None:
         await svc.set_primary_key(
             user=_user("u-owner"), artifact_id=AID, column_ids=["c002"],
         )
-    # 组合主键 c001+c002：键=MOP值+L1值 长度前缀编码（列名取数），不折叠
+    # 组合主键 c001+c002：键=MOP值+L1值 hex 编码 '.' 连接（列名取数），不折叠
     db.rev0_rows[AID][1]["data"]["L1"] = "扩容"
     result = await svc.set_primary_key(
         user=_user("u-owner"), artifact_id=AID, column_ids=["c001", "c002"],
     )
     assert result["rekeyed_rows"] == 2
     assert {r["row_key"] for r in db.rev0_rows[AID]} \
-        == {"5:MOP-12:部署", "5:MOP-22:扩容"}
+        == {"4d4f502d31.e983a8e7bdb2", "4d4f502d32.e689a9e5aeb9"}
     # 未知列 → 400 InvalidOperation
     with pytest.raises(InvalidOperation):
         await svc.set_primary_key(
@@ -1132,7 +1191,7 @@ async def test_insert_single_row_alias_canonical_and_tolerant_cast() -> None:
     )
     assert "MOP" not in row["data"]          # 旧名不落影子键
     assert row["data"]["MOP单号"] == "NC-NEW"  # 归一到规范名
-    assert row["row_key"] == "6:NC-NEW"       # 主键拼接用列名取数（长度前缀编码）
+    assert row["row_key"] == "4e432d4e4557"   # 主键拼接用列名取数（hex 编码）
     assert row["data"]["数量"] is None         # tolerant：置 null + 标记
     assert row["conflicts"]["数量"] == "type_error:abc"
 
@@ -1335,16 +1394,34 @@ async def test_member_without_domain_binding_gets_404() -> None:
             user=viewer, artifact_id=AID, row_key="MOP-1", column="L1", value="x")
 
 
-def test_row_key_value_length_prefix_encoding_no_collision() -> None:
-    """codex二审批号④回归：'/' 直拼下 (A/B,C) 与 (A,B/C) 同键——长度前缀
-    编码消除碰撞；单列同编码（3:ABC 形态）；None → 空段。"""
-    assert _row_key_value({"x": "A/B", "y": "C"}, ["x", "y"]) == "3:A/B1:C"
-    assert _row_key_value({"x": "A", "y": "B/C"}, ["x", "y"]) == "1:A3:B/C"
+def test_row_key_value_hex_encoding_gateway_safe() -> None:
+    """codex三审 P1-1 回归：row_key 改纯 URL 安全 ASCII（hex）——网关
+    （main_control_service/auth.py _has_unsafe_proxy_path）拒绝代理路径一切
+    % 编码字节，旧长度前缀 ``3:ABC`` 经 encodeURIComponent 即 ``3%3AABC`` 被
+    400，中文主键值同理必炸。hex 输出恒匹配 ``^[0-9a-f.]+$``（encodeURIComponent
+    不转义），且 '.' 连接无歧义（hex 字符集不含 '.'）。"""
+    import re
+
+    # 无歧义：'/'、':'、'%'、中文值的两两组合不同键；输出恒网关安全
+    safe = re.compile(r"^[0-9a-f.]*$")
+    samples = [
+        ({"x": "A/B", "y": "C"}, "412f42.43"),
+        ({"x": "A", "y": "B/C"}, "41.422f43"),
+        ({"x": "a:b%c", "y": "d"}, "613a622563.64"),
+        ({"x": "旧名"}, "e697a7e5908d"),            # 中文主键不再必炸
+        ({"x": "ABC"}, "414243"),                    # 单列同构
+        ({"x": None, "y": "C"}, ".43"),              # None → 空串 hex 段
+    ]
+    for data, expected in samples:
+        key = _row_key_value(data, list(data))
+        assert key == expected
+        assert safe.match(key), key
     assert _row_key_value({"x": "A/B", "y": "C"}, ["x", "y"]) \
         != _row_key_value({"x": "A", "y": "B/C"}, ["x", "y"])
-    assert _row_key_value({"x": "ABC"}, ["x"]) == "3:ABC"
-    assert _row_key_value({"x": None, "y": "C"}, ["x", "y"]) == "0:1:C"
-    assert _encode_key_parts(["旧名"]) == "2:旧名"   # len=字符数非字节数
+    # 分隔无歧义：hex 输出不含 '.'，'.' 连接可逆不碰撞
+    assert _encode_key_parts(["a.b", "c"]) == "612e62.63"
+    assert _encode_key_parts(["a", "b.c"]) == "61.622e63"
+    assert _encode_key_parts(["a.b", "c"]) != _encode_key_parts(["a", "b.c"])
 
 
 # ------------------------------------------- 仓储 SQL 静态守卫（非门控）
@@ -1450,31 +1527,36 @@ async def test_upsert_column_json_fields_passed_as_json_strings() -> None:
     )
     assert json.loads(json_values[0]) == ["a", "b"]
     assert json.loads(json_values[1]) == ["旧名"]
-    # 同事务迁键：rev0 data 键旧→新（jsonb_build_object 形态，只迁 rev0）
+    # 同事务迁键：rev0 data 键旧→新（jsonb_build_object 形态，只迁 rev0）；
+    # codex三审 P1-2a：三处参数显式 ::text（psycopg3 unknown 类型在
+    # ``-``/``->`` text-int 重载与 build_object key 推断下必炸/歧义）
     renames = [q for q, _ in pool.log if "jsonb_build_object" in q]
     assert renames
     assert "revision = 0" in renames[0]
-    assert "%(old)s" in renames[0] and "%(new)s" in renames[0]
+    assert "%(old)s::text" in renames[0] and "%(new)s::text" in renames[0]
+    assert "data ? %(old)s::text" in renames[0]
 
 
 @pytest.mark.asyncio
 async def test_expression_index_ddl_has_artifact_where_clause() -> None:
-    """codex二审批号⑤回归（静态）：CREATE INDEX 部分索引限定
-    WHERE artifact_id = <字面量>——无界表达式索引对 kb_table_rows 全表求
-    cast，其他制品同名列脏值会当场炸掉索引创建（连带炸发布）。"""
+    """codex二审批号⑤ + 三审 P1-3 回归（静态）：CREATE INDEX 部分索引限定
+    WHERE artifact_id = <字面量> AND revision = <发布版>——无界表达式索引对
+    kb_table_rows 全表求 cast，其他制品同名列脏值会当场炸掉索引创建（连带
+    炸发布）；限定 revision 后历史版本行（可能含旧类型文本）与 rev0 草稿
+    写入都不参与 cast 求值。"""
     from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
 
     pool = _RecordingPool()
     db = ArtifactDB(pool)
-    created = await db.create_expression_indexes("art_x", 1, [
+    created = await db.create_expression_indexes("art_x", 7, [
         {"column_id": "c1", "column_name": "端口", "column_type": "int"},
         {"column_id": "c2", "column_name": "名称", "column_type": "text"},
     ])
     assert created == ["idx_kbtr_art_x_c1", "idx_kbtr_art_x_c2"]
     int_ddl, text_ddl = pool.log[0][0], pool.log[1][0]
-    assert "WHERE artifact_id = 'art_x'" in int_ddl
+    assert "WHERE artifact_id = 'art_x' AND revision = 7" in int_ddl
     assert "(revision," in int_ddl and "::numeric" in int_ddl
-    assert "WHERE artifact_id = 'art_x'" in text_ddl
+    assert "WHERE artifact_id = 'art_x' AND revision = 7" in text_ddl
 
 
 @pytest.mark.asyncio
@@ -1491,3 +1573,180 @@ async def test_drop_index_cleanup_pattern_keeps_trailing_wildcard() -> None:
     pattern = params[0]
     assert pattern == "idx\\_kbtr\\_art\\_un\\_der\\_%"   # 前缀字面 + 通配尾
     assert pattern.endswith("%") and not pattern.endswith("\\%")
+
+
+# ------------------------------------------- codex 三审七项回归
+
+@pytest.mark.asyncio
+async def test_publish_normalizes_stale_alias_data_keys() -> None:
+    """codex三审 P1-2b 回归：发布→改名→discard→编辑另一列→再发布 → 新版本
+    数据键=当前列名（发布=键与 schema 对齐的定格点）；draft 期 list_rows 经
+    alias 投影显示新名列有值（读取投影兜底，不改存储）。
+
+    断裂场景：discard 只清 rev0 行不清 schema——改名保留、行键回到旧版快照
+    （旧键名）。编辑后行可能同时含新旧键（update_cell 按新规范名写）。
+    """
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+    # 改名 L1→一级分类（自动检出 draft、rev0 迁键），随后 discard——schema
+    # 仍改名，rev0 清空回到干净态
+    col = await svc.upsert_column(
+        user=owner, artifact_id=AID, column_id="c002",
+        fields={"column_name": "一级分类"},
+    )
+    assert col["alias"] == ["L1"]
+    await svc.discard_draft(user=owner, artifact_id=AID)
+
+    # draft 期（checkout 旧行=旧键 L1）：list_rows 投影到新名列有值
+    rows = (await svc.list_rows(user=owner, artifact_id=AID, draft=True))["rows"]
+    assert rows and all(r["data"].get("一级分类") for r in rows)
+    assert all("L1" not in r["data"] for r in rows)
+
+    # 编辑该列（规范名写入；存储侧旧行为会残留旧键）→ 再发布 → rev2 归一
+    await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="一级分类", value="演练")
+    result = await svc.publish(user=owner, artifact_id=AID, change_summary="归一")
+    assert result["revision"] == 2
+    rev2 = db.revision_rows[AID][2]
+    assert all("一级分类" in r["data"] for r in rev2)
+    assert all("L1" not in r["data"] for r in rev2)          # 旧键不残留
+    edited = next(r for r in rev2 if r["row_key"] == "MOP-1")
+    assert edited["data"]["一级分类"] == "演练"              # 新键值不被旧键倒灌
+
+
+@pytest.mark.asyncio
+async def test_stale_token_rejected_on_publish_and_schema_ops() -> None:
+    """codex三审 P1-4 回归（service 层）：并发编辑推进令牌后，旧 token 的
+    发布/改列/改主键/回滚/弃稿/停用全部被拒（StaleArtifact→409）；当前
+    token 发布放行（透传 db 层全精度比对）。"""
+    db = await _seeded_db()
+    await db.ensure_draft(AID)
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+    token_before = db.artifacts[AID]["updated_at"].isoformat()
+    await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="L1", value="他人编辑")
+    assert db.artifacts[AID]["updated_at"].isoformat() != token_before
+    with pytest.raises(StaleArtifact):
+        await svc.publish(
+            user=owner, artifact_id=AID, change_summary="x",
+            expected_updated_at=token_before)
+    with pytest.raises(StaleArtifact):
+        await svc.upsert_column(
+            user=owner, artifact_id=AID, column_id="c002",
+            fields={"is_indexed": True}, expected_updated_at=token_before)
+    with pytest.raises(StaleArtifact):
+        await svc.set_primary_key(
+            user=owner, artifact_id=AID, column_ids=["c001"],
+            expected_updated_at=token_before)
+    with pytest.raises(StaleArtifact):
+        await svc.rollback_to(
+            user=owner, artifact_id=AID, revision=1,
+            expected_updated_at=token_before)
+    with pytest.raises(StaleArtifact):
+        await svc.discard_draft(
+            user=owner, artifact_id=AID, expected_updated_at=token_before)
+    with pytest.raises(StaleArtifact):
+        await svc.deprecate(
+            user=owner, artifact_id=AID, expected_updated_at=token_before)
+    with pytest.raises(StaleArtifact):
+        await svc.republish(
+            user=owner, artifact_id=AID, expected_updated_at=token_before)
+    # 当前 token：发布放行（db 层全精度比对通过）
+    fresh = db.artifacts[AID]["updated_at"].isoformat()
+    result = await svc.publish(
+        user=owner, artifact_id=AID, change_summary="r2",
+        expected_updated_at=fresh)
+    assert result["revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_mutation_ops_check_expected_updated_at_atomically() -> None:
+    """codex三审 P1-4 回归（静态，db 层）：变更类操作全部在事务内 FOR UPDATE
+    比对 updated_at——失配 stale_artifact（service 前置快检与写之间的竞态
+    由这里封死）。"""
+    from knowledge_mining.mining.kb.db_artifacts import (
+        ArtifactDB,
+        ArtifactError as RepoError,
+    )
+
+    art_row = {"artifact_id": "art_x", "status": "draft", "usage_note": "u",
+               "draft_open": True, "current_revision": 0, "updated_at": NOW}
+    stale = datetime(2026, 10, 15, 10, 0, 0, 500000, tzinfo=timezone.utc)
+
+    async def expect_stale(call) -> None:
+        pool = _RecordingPool(rows=[dict(art_row)])
+        db = ArtifactDB(pool)
+        with pytest.raises(RepoError, match="stale_artifact"):
+            await call(db)
+
+    await expect_stale(lambda db: db.publish(
+        "art_x", "s", "u", expected_updated_at=stale))
+    await expect_stale(lambda db: db.rollback_to(
+        "art_x", 1, expected_updated_at=stale))
+    await expect_stale(lambda db: db.deprecate(
+        "art_x", expected_updated_at=stale))
+    await expect_stale(lambda db: db.republish(
+        "art_x", expected_updated_at=stale))
+    await expect_stale(lambda db: db.discard_draft(
+        "art_x", expected_updated_at=stale))
+    await expect_stale(lambda db: db.upsert_column(
+        "art_x", "c1", {"column_name": "n"}, expected_updated_at=stale))
+    await expect_stale(lambda db: db.replace_columns_for_artifact(
+        "art_x", [{"column_id": "c1", "column_name": "n",
+                   "column_type": "text"}],
+        expected_updated_at=stale))
+    await expect_stale(lambda db: db.set_primary_key(
+        "art_x", ["c1"], expected_updated_at=stale))
+    await expect_stale(lambda db: db.insert_rows_upsert(
+        "art_x", 0, [{"row_key": "k", "data": {}, "provenance": [],
+                      "conflicts": {}, "ordinal": 1}],
+        expected_updated_at=stale))
+
+
+@pytest.mark.asyncio
+async def test_update_cell_repo_stale_translated_not_500() -> None:
+    """codex三审 P2-1 回归（service 层）：service 前置快检通过（token 当前）
+    但仓储层抛 stale（并发窗口）→ 翻译成 StaleArtifact（409），不再以
+    ArtifactRepoError 裸抛（路由 500）。update_cell 与 conflict 分支双查。"""
+    db = await _seeded_db()
+    await db.ensure_draft(AID)
+    await db.upsert_column(AID, "c003", {"column_name": "数量", "column_type": "int"})
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+    fresh = db.artifacts[AID]["updated_at"].isoformat()
+
+    async def raise_stale(*args, **kwargs):
+        raise ArtifactRepoError("stale_artifact")
+
+    db.update_cell = raise_stale
+    with pytest.raises(StaleArtifact):
+        await svc.update_cell(
+            user=owner, artifact_id=AID, row_key="MOP-1", column="L1",
+            value="x", expected_updated_at=fresh)
+    db.update_cell_conflict = raise_stale
+    with pytest.raises(StaleArtifact):
+        await svc.update_cell(
+            user=owner, artifact_id=AID, row_key="MOP-1", column="数量",
+            value="abc", expected_updated_at=fresh)   # int cast 失败→conflict 分支
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_excludes_unbound_domain_members() -> None:
+    """codex三审 P2-2 回归：成员行在但当前域绑定已撤 → 列表不含该制品
+    （详情已是 404 反探测——列表口径对齐）；域绑定恢复后回归列表。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    viewer = _user("u-viewer")
+    assert [a["artifact_id"] for a in await svc.list_artifacts(user=viewer)] \
+        == [AID]
+    db.domain_bindings.discard(("u-viewer", "plant-a"))
+    assert await svc.list_artifacts(user=viewer) == []
+    with pytest.raises(ArtifactNotFound):   # 详情口径不变：404 反探测
+        await svc.get_artifact(user=viewer, artifact_id=AID)
+    # admin 全量不过滤
+    assert AID in {
+        a["artifact_id"]
+        for a in await svc.list_artifacts(user=_user("u-siteadmin", site_role="admin"))
+    }

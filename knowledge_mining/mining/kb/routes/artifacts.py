@@ -708,8 +708,8 @@ async def insert_row(
         raise _map_error(exc) from None
 
 
-# row_key 用 :path converter——长度前缀编码的键可含 '/'（codex二审批号④），
-# 前端已 encodeURIComponent，无需再动。
+# row_key 用 :path converter——hex 编码（codex三审 P1-1）后键恒为 [0-9a-f.]，
+# 不会含 '/'，converter 保留无害；前端已 encodeURIComponent（hex 不被转义）。
 @router.patch("/{artifact_id}/table/rows/{row_key:path}")
 async def update_row_cell(
     artifact_id: str,

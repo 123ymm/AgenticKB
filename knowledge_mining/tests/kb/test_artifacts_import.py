@@ -173,16 +173,76 @@ async def test_parse_upload_rejects_bad_files():
     assert excinfo.value.code == "invalid_xlsx"
 
 
-async def test_parse_upload_rejects_formula_injection(tmp_path):
-    _, _, imp = _make_service()
+async def test_parse_allows_formula_but_execute_rejects(tmp_path):
+    """codex三审 P2-3 回归：parse 预览不拒公式（只读展示合法）；execute 重读
+    所选 sheet 时拒绝（数据值与表头双查），零写入。"""
+    db, svc, imp = _make_service()
+    art = await svc.create_artifact(user=OWNER, domain_id="plant-a", title="公式表")
+    aid = art["artifact_id"]
+    # 数据值公式：parse 放行
     data = _write_xlsx(tmp_path / "F.xlsx", ["MOP"], [["=1+1"]])
+    out = imp.parse_upload(data, "F.xlsx")
+    assert out["preview"]["sample_rows"][0]["MOP"] == "=1+1"
+    plan = imp.build_mapping(
+        out["preview_token"],
+        column_ops=[{"source": "MOP", "action": "new", "target_name": "MOP",
+                     "column_type": "text", "is_primary_key": True}])
     with pytest.raises(ArtifactImportError) as excinfo:
-        imp.parse_upload(data, "F.xlsx")
+        await imp.execute_import(
+            svc, user=OWNER, artifact_id=aid,
+            preview_token=out["preview_token"], plan=plan)
     assert excinfo.value.code == "formula_not_allowed"
-    # 表头本身是公式同样拒绝
+    assert db.rev0_rows[aid] == []
+    # 表头本身是公式：parse 放行、execute 表头重读时拒绝
     data = _write_xlsx(tmp_path / "F2.xlsx", ["=SUM(A1)"], [["x"]])
+    out = imp.parse_upload(data, "F2.xlsx")
+    assert out["preview"]["columns"][0]["source_name"] == "=SUM(A1)"
+    plan = imp.build_mapping(
+        out["preview_token"],
+        column_ops=[{"source": "=SUM(A1)", "action": "new", "target_name": "MOP",
+                     "column_type": "text"}])
     with pytest.raises(ArtifactImportError) as excinfo:
-        imp.parse_upload(data, "F2.xlsx")
+        await imp.execute_import(
+            svc, user=OWNER, artifact_id=aid,
+            preview_token=out["preview_token"], plan=plan)
+    assert excinfo.value.code == "formula_not_allowed"
+
+
+async def test_formula_rejection_scoped_to_selected_sheet(tmp_path):
+    """codex三审 P2-3 回归：sheet1 合法数据 + sheet2 汇总公式 → 上传预览成功；
+    import sheet1 成功；import sheet2 被拒（公式只查所选 sheet）。"""
+    db, svc, imp = _make_service()
+    art = await svc.create_artifact(user=OWNER, domain_id="plant-a", title="多表")
+    aid = art["artifact_id"]
+    data = _write_xlsx_multi(tmp_path / "M.xlsx", [
+        ("Sheet1", ["MOP"], [("NC-1",), ("NC-2",)]),
+        ("Sheet2", ["汇总"], [("=SUM(Sheet1!A:A)",)]),
+    ])
+    out = imp.parse_upload(data, "M.xlsx")     # 旧口径：整文件拒绝——现放行
+    assert [s["name"] for s in out["preview"]["sheets"]] == ["Sheet1", "Sheet2"]
+    # import sheet1：成功
+    plan = imp.build_mapping(
+        out["preview_token"], sheet="Sheet1",
+        column_ops=[{"source": "MOP", "action": "new", "target_name": "MOP",
+                     "column_type": "text", "is_primary_key": True}])
+    report = await imp.execute_import(
+        svc, user=OWNER, artifact_id=aid,
+        preview_token=out["preview_token"], plan=plan)
+    assert report["sheet"] == "Sheet1" and report["inserted"] == 2
+    # import sheet2：公式 → 拒绝（新 token——上一步成功已消费）；追加模式
+    # map_to 既有列（schema 已由 sheet1 建立，create 会被 schema 门禁拦）
+    out2 = imp.parse_upload(data, "M.xlsx")
+    column_ids = {c["column_name"]: c["column_id"] for c in db.columns[aid]}
+    plan2 = imp.build_mapping(
+        out2["preview_token"], sheet="Sheet2",
+        column_ops=[{"source": "汇总", "action": "map_to",
+                     "target": column_ids["MOP"]}],
+        target_columns=await svc.list_columns(user=OWNER, artifact_id=aid),
+    )
+    with pytest.raises(ArtifactImportError) as excinfo:
+        await imp.execute_import(
+            svc, user=OWNER, artifact_id=aid,
+            preview_token=out2["preview_token"], plan=plan2)
     assert excinfo.value.code == "formula_not_allowed"
 
 
@@ -358,7 +418,7 @@ async def test_execute_create_imports_rows_with_provenance(tmp_path):
     rows = db.rev0_rows[aid]
     assert len(rows) == 8
     first = rows[0]
-    assert first["row_key"] == "16:NC20260601000295"  # 主键值长度前缀编码即 row_key
+    assert first["row_key"] == "4e433230323630363031303030323935"  # 主键值 hex 编码即 row_key
     assert first["data"]["L1分类"] == "数据业务"
     assert first["data"]["L2分类"] == "网络部署/扩容"
     provenance = first["provenance"][0]
@@ -441,13 +501,13 @@ async def test_execute_append_maps_updates_and_drops(tmp_path):
     assert [m["column_name"] for m in report["missing_columns"]] == ["L2分类"]
     rows = {r["row_key"]: r for r in db.rev0_rows[aid]}
     # 同 MOP 行：data 覆盖 + provenance 双来源（A/B 导入同一编码 → 同键 UPSERT 命中）
-    shared = rows["16:NC20260601000295"]
+    shared = rows["4e433230323630363031303030323935"]
     assert shared["data"]["是否夜间执行"] == "是"
     assert len(shared["provenance"]) == 2
     assert {p["file_name"] for p in shared["provenance"]} == {"A.xlsx", "B.xlsx"}
     # drop 列不进 data：新行无该键；被本批覆盖的行该列置 null（§6.2
     # 「schema 有文件无的列 → 该批行此列置 null」——UPSERT data 覆盖语义）
-    new_row = rows["16:NC20260601000401"]
+    new_row = rows["4e433230323630363031303030343031"]
     assert "L2分类" not in new_row["data"]
     assert shared["data"].get("L2分类") is None
     # 新列已入 schema
@@ -492,9 +552,9 @@ async def test_key_conflict_block_then_keep_first(tmp_path):
     assert report["key_conflicts"] == 1
     assert report["inserted"] == 1 and report["updated"] == 1
     after = {r["row_key"]: r for r in db.rev0_rows[aid]}
-    assert after["16:NC20260601000303"]["data"]["L1分类"] == "新行1"  # 保留首行
-    assert "__duplicate_key__" in after["16:NC20260601000303"]["conflicts"]
-    assert after["16:NC20260601000295"]["data"]["L1分类"] == "变更A"
+    assert after["4e433230323630363031303030333033"]["data"]["L1分类"] == "新行1"  # 保留首行
+    assert "__duplicate_key__" in after["4e433230323630363031303030333033"]["conflicts"]
+    assert after["4e433230323630363031303030323935"]["data"]["L1分类"] == "变更A"
 
 
 # ------------------------------------------------------------- 类型策略
@@ -531,9 +591,9 @@ async def test_type_error_strict_blocks_and_tolerant_marks(tmp_path):
     assert report["type_errors"] == 1
     assert report["inserted"] == 3
     row_map = {r["row_key"]: r for r in db.rev0_rows[aid]}
-    assert row_map["2:X2"]["data"]["数量"] is None
-    assert row_map["2:X2"]["conflicts"]["数量"] == "type_error:abc"
-    assert row_map["2:X1"]["data"]["数量"] == 3
+    assert row_map["5832"]["data"]["数量"] is None
+    assert row_map["5832"]["conflicts"]["数量"] == "type_error:abc"
+    assert row_map["5831"]["data"]["数量"] == 3
 
 
 # ------------------------------------------------------------- 预览 TTL
@@ -607,8 +667,8 @@ async def test_execute_append_ordinal_continues_after_existing(tmp_path):
     )
     rows = {r["row_key"]: r for r in db.rev0_rows[aid]}
     # B.xlsx 新 MOP 两行（文件内第 4/5 数据行）→ ordinal 12/13（8 存量 + 前 3 行）
-    assert rows["16:NC20260601000401"]["ordinal"] == 12
-    assert rows["16:NC20260601000402"]["ordinal"] == 13
+    assert rows["4e433230323630363031303030343031"]["ordinal"] == 12
+    assert rows["4e433230323630363031303030343032"]["ordinal"] == 13
 
 
 async def test_preview_token_binding_mismatch_404(tmp_path):

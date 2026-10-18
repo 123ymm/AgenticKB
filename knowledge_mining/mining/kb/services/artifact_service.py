@@ -404,6 +404,7 @@ class ArtifactService:
         try:
             result = await self._db.publish(
                 artifact_id, change_summary, _uid(user),
+                expected_updated_at=_expected_dt(expected_updated_at),
             )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
@@ -424,7 +425,10 @@ class ArtifactService:
         artifact, _ = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
         _check_freshness(artifact, expected_updated_at)
         try:
-            return await self._db.rollback_to(artifact_id, int(revision))
+            return await self._db.rollback_to(
+                artifact_id, int(revision),
+                expected_updated_at=_expected_dt(expected_updated_at),
+            )
         except (TypeError, ValueError) as exc:
             raise InvalidOperation("invalid_revision") from exc
         except ArtifactRepoError as exc:
@@ -437,7 +441,9 @@ class ArtifactService:
         artifact, _ = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
         _check_freshness(artifact, expected_updated_at)
         try:
-            return await self._db.deprecate(artifact_id)
+            return await self._db.deprecate(
+                artifact_id, expected_updated_at=_expected_dt(expected_updated_at),
+            )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
 
@@ -448,7 +454,9 @@ class ArtifactService:
         artifact, _ = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
         _check_freshness(artifact, expected_updated_at)
         try:
-            return await self._db.republish(artifact_id)
+            return await self._db.republish(
+                artifact_id, expected_updated_at=_expected_dt(expected_updated_at),
+            )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
 
@@ -460,7 +468,9 @@ class ArtifactService:
         artifact, _ = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
         _check_freshness(artifact, expected_updated_at)
         try:
-            return await self._db.discard_draft(artifact_id)
+            return await self._db.discard_draft(
+                artifact_id, expected_updated_at=_expected_dt(expected_updated_at),
+            )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
 
@@ -537,6 +547,7 @@ class ArtifactService:
         try:
             return await self._db.upsert_column(
                 artifact_id, column_id, fields, rename_from=rename_from,
+                expected_updated_at=_expected_dt(expected_updated_at),
             )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
@@ -572,13 +583,16 @@ class ArtifactService:
         ):
             raise InvalidOperation("invalid_column_ids")
         try:
-            return await self._db.set_primary_key(artifact_id, column_ids)
+            return await self._db.set_primary_key(
+                artifact_id, column_ids,
+                expected_updated_at=_expected_dt(expected_updated_at),
+            )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
 
     async def replace_columns(
         self, *, user: dict[str, Any], artifact_id: str,
-        columns: list[dict[str, Any]],
+        columns: list[dict[str, Any]], expected_updated_at: Any = None,
     ) -> None:
         """首次导入建列（Task 5 导入服务调用；删旧插新，draft 态）。计划内
         列名重复 → 400（对抗审查修复⑳，DB 部分唯一索引兜底）。"""
@@ -589,7 +603,10 @@ class ArtifactService:
             raise InvalidOperation(
                 f"duplicate_column_name:{','.join(duplicated)}")
         try:
-            await self._db.replace_columns_for_artifact(artifact_id, columns)
+            await self._db.replace_columns_for_artifact(
+                artifact_id, columns,
+                expected_updated_at=_expected_dt(expected_updated_at),
+            )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
 
@@ -659,16 +676,21 @@ class ArtifactService:
         canonical = str(column_def["column_name"])
         expected = _expected_dt(expected_updated_at)
         ok, casted = _cast_cell(value, str(column_def.get("column_type") or "text"))
-        if ok:
-            row = await self._db.update_cell(
-                artifact_id, row_key, canonical, casted, _uid(user),
-                expected_updated_at=expected,
-            )
-        else:
-            row = await self._db.update_cell_conflict(
-                artifact_id, row_key, canonical, f"type_error:{value}", _uid(user),
-                expected_updated_at=expected,
-            )
+        try:
+            if ok:
+                row = await self._db.update_cell(
+                    artifact_id, row_key, canonical, casted, _uid(user),
+                    expected_updated_at=expected,
+                )
+            else:
+                row = await self._db.update_cell_conflict(
+                    artifact_id, row_key, canonical, f"type_error:{value}",
+                    _uid(user), expected_updated_at=expected,
+                )
+        except ArtifactRepoError as exc:
+            # codex三审 P2-1：stale 必须翻成 StaleArtifact（409）——不包装会
+            # 以 ArtifactRepoError（RuntimeError）裸抛 → 路由 500。
+            raise _translate(exc) from exc
         if row is None:
             raise InvalidOperation("row_not_found")
         return row
@@ -727,9 +749,12 @@ class ArtifactService:
         """追加导入落行（Task 5 导入服务调用）：UPSERT by row_key + ensure_draft
         前置 + 乐观锁令牌推进。"""
         await self._require_design_session(user, artifact_id, None)
-        result = await self._db.insert_rows_upsert(
-            artifact_id, revision, rows, updated_by=_uid(user),
-        )
+        try:
+            result = await self._db.insert_rows_upsert(
+                artifact_id, revision, rows, updated_by=_uid(user),
+            )
+        except ArtifactRepoError as exc:
+            raise _translate(exc) from exc
         await self._db.touch_updated_at(artifact_id)
         return result
 
@@ -775,17 +800,23 @@ class ArtifactService:
         if pk_names and await self._db.get_row(artifact_id, 0, row_key) is not None:
             raise PrimaryKeyConflict(f"duplicate_key:{row_key}")
         ordinal = await self._db.count_rows(artifact_id, 0) + 1
-        await self._db.insert_rows_upsert(
-            artifact_id, 0,
-            [{
-                "row_key": row_key,
-                "data": canonical_data,
-                "provenance": [{"channel": "manual", "created_by": _uid(user)}],
-                "conflicts": conflicts,
-                "ordinal": ordinal,
-            }],
-            updated_by=_uid(user),
-        )
+        try:
+            # codex三审 P1-4：手工行增路径的乐观锁权威校验在 db 层事务内
+            # （FOR UPDATE 取行+比对+写同事务），expected 透传。
+            await self._db.insert_rows_upsert(
+                artifact_id, 0,
+                [{
+                    "row_key": row_key,
+                    "data": canonical_data,
+                    "provenance": [{"channel": "manual", "created_by": _uid(user)}],
+                    "conflicts": conflicts,
+                    "ordinal": ordinal,
+                }],
+                updated_by=_uid(user),
+                expected_updated_at=_expected_dt(expected_updated_at),
+            )
+        except ArtifactRepoError as exc:
+            raise _translate(exc) from exc
         await self._db.touch_updated_at(artifact_id)
         row = await self._db.get_row(artifact_id, 0, row_key)
         if row is None:
