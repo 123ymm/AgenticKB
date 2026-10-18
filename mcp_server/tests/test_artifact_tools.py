@@ -206,6 +206,33 @@ def test_art_ref_rejects_relation_and_mode(monkeypatch, calls):
     assert calls == []  # 参数检查在前，未发任何上游请求
 
 
+def test_art_ref_works_with_zero_open_kbs(monkeypatch, calls):
+    """codex二审批号⑨回归：制品与库权限解绑（61号拍板）——零开放库钥匙
+    也能查 art_。_scope_kbs 对空开放集直接报"未开放任何知识库"，art_ 分支
+    必须分流在它之前；对照：同身份查 ev_/st_ 仍被挡。"""
+    def responder(request):
+        return ok({"view": "artifact_card", "artifact_ref": "art_ab12",
+                   "title": "端口规格表"})
+
+    install(monkeypatch, handler_for(calls, responder), calls)
+    bare = Identity(
+        username="bob",
+        user_id="u-2",
+        key_id="key-2",
+        key_domain="cloud_core_network",
+        open_kbs=(),
+    )
+    ident_server(monkeypatch, ident=bare)
+
+    out = server.get_knowledge(ref="art_ab12")
+    assert out["view"] == "artifact_card"
+    assert len(calls) == 1   # 正常转发到 serving 制品端点，未触发 kb scope 错误
+
+    # 对照：零开放库查结构引用仍按原口径拒绝（"未开放任何知识库"）
+    with pytest.raises(ToolError, match="未开放任何知识库"):
+        server.get_knowledge(ref="st_x1")
+
+
 # ── server 层：错误转译 ──────────────────────────────────────────────────
 
 

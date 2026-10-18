@@ -144,7 +144,11 @@ async def env(tmp_path):
     """service 层（db/svc/imp）+ 路由层（ASGI client）双面孔：用例1-5/8 走
     service，用例6/7/9 打真实 REST 路由（状态码口径）。"""
     db = AcceptanceFakeArtifactDB()
-    db.domain_bindings.add(("u-owner", DOMAIN))
+    # codex二审批号⑧：非 admin 成员路径需当前域绑定——协作用户全部绑域
+    # （u-stranger 也绑：用例6 的 404 走「非成员」而非「无绑定」）。
+    db.domain_bindings.update(
+        (uid, DOMAIN) for uid in ("u-owner", "u-editor", "u-viewer", "u-stranger")
+    )
     # 成员治理（修复⑪）预检底料：验收用例涉及的协作用户均 active
     db.users.update({
         uid: "active" for uid in ("u-owner", "u-editor", "u-viewer", "u-stranger")
@@ -292,13 +296,13 @@ class TestSixtyOneAcceptanceCases:
 
         rows = {r["row_key"]: r for r in env.db.rev0_rows[aid]}
         # 同 MOP 行：data 覆盖（UPSERT）+ provenance 双来源
-        shared = rows["NC20260601000295"]
+        shared = rows["16:NC20260601000295"]
         assert shared["data"]["是否夜间执行"] == "是"
         assert len(shared["provenance"]) == 2
         assert {p["file_name"] for p in shared["provenance"]} == {"A.xlsx", "B.xlsx"}
         # 新行插入（drop 列不进 data）
-        assert rows["NC20260601000401"]["data"]["L1分类"] == "数据业务"
-        assert "L2分类" not in rows["NC20260601000401"]["data"]
+        assert rows["16:NC20260601000401"]["data"]["L1分类"] == "数据业务"
+        assert "L2分类" not in rows["16:NC20260601000401"]["data"]
         # schema 已含追加新列
         assert any(c["column_name"] == "是否夜间执行"
                    for c in await env.db.list_columns(aid))
@@ -308,7 +312,7 @@ class TestSixtyOneAcceptanceCases:
         assert diff["removed_count"] == 0
         # 3 条被覆盖行 × 2 列变更（L2分类 置空 + 是否夜间执行 赋值）= 6 条列级
         assert diff["changed_count"] == 6
-        assert {"row_key": "NC20260601000295", "column": "是否夜间执行",
+        assert {"row_key": "16:NC20260601000295", "column": "是否夜间执行",
                 "old": None, "new": "是"} in diff["changed"]
 
     async def test_case4_rollback_roundtrip(self, env):
@@ -334,7 +338,7 @@ class TestSixtyOneAcceptanceCases:
         # 拨低后重发布：ensure_draft 从 rev1 检出 8 行 → 新版本取 max+1 = rev3
         await env.svc.rollback_to(user=OWNER, artifact_id=aid, revision=1)
         await env.svc.update_cell(
-            user=OWNER, artifact_id=aid, row_key="NC20260601000295",
+            user=OWNER, artifact_id=aid, row_key="16:NC20260601000295",
             column="L2分类", value="演练前核查")
         result = await env.svc.publish(user=OWNER, artifact_id=aid,
                                        change_summary="回滚后重发")
@@ -354,10 +358,10 @@ class TestSixtyOneAcceptanceCases:
             user=OWNER, artifact_id=aid, revision=1))["rows"]
 
         await env.svc.update_cell(
-            user=OWNER, artifact_id=aid, row_key="NC20260601000295",
+            user=OWNER, artifact_id=aid, row_key="16:NC20260601000295",
             column="L1分类", value="乱改")
         await env.svc.delete_row(
-            user=OWNER, artifact_id=aid, row_key="NC20260601000296")
+            user=OWNER, artifact_id=aid, row_key="16:NC20260601000296")
         diff = await env.svc.diff_draft_vs_current(user=OWNER, artifact_id=aid)
         assert diff["changed_count"] == 1 and diff["removed_count"] == 1
 
@@ -433,7 +437,9 @@ class TestSixtyOneAcceptanceCases:
         assert artifact["status"] == "published"
 
     async def test_case9_alias_compat(self, env):
-        """用例9：alias 兼容读——列改名写 alias（旧名留档）。
+        """用例9：alias 兼容读——列改名写 alias（旧名留档）+ rev0 data 键同
+        事务迁移（codex二审批号②闭环：新键有值、旧键无残留，Java/前端按新
+        schema 读数不为空；读取侧经 alias 映射闭环）。
         DSL 旧名展开（alias→现名）在 serving ArtifactQueryServiceTest 用例断言。"""
         aid = await _published_rev1(env)
         columns = await env.svc.list_columns(user=OWNER, artifact_id=aid)
@@ -452,3 +458,9 @@ class TestSixtyOneAcceptanceCases:
         }
         assert columns["MOP单号"]["alias"] == ["MOP"]
         assert columns["MOP单号"]["is_primary_key"] is True  # 改名不动主键标记
+        # data 键迁移：draft 行新键有值、旧键无残留
+        draft_rows = (await env.svc.list_rows(
+            user=OWNER, artifact_id=aid, draft=True))["rows"]
+        assert draft_rows
+        assert all(r["data"].get("MOP单号") for r in draft_rows)
+        assert all("MOP" not in r["data"] for r in draft_rows)

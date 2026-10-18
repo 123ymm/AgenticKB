@@ -627,7 +627,8 @@ async def patch_column(
     user: dict[str, Any] = Depends(current_user),
     svc: ArtifactService = Depends(get_artifact_service),
 ):
-    """改列名=写 alias（§7.1 旧名兼容读取）；status=dropped=软删。"""
+    """改列名=service 层写 alias+同事务迁 rev0 data 键（§7.1 + codex二审
+    批号②）；status=dropped=软删。"""
     fields = body.model_dump(exclude_unset=True)
     expected = fields.pop("expected_updated_at", None)
     status = fields.pop("status", None)
@@ -639,16 +640,8 @@ async def patch_column(
             return {"column_id": column_id, "status": "dropped"}
         columns = await svc.list_columns(
             user=user, artifact_id=artifact_id, include_dropped=True)
-        current = next(
-            (c for c in columns if c.get("column_id") == column_id), None)
-        if current is None:
+        if not any(c.get("column_id") == column_id for c in columns):
             raise HTTPException(404, f"column_not_found:{column_id}")
-        if "column_name" in fields and fields["column_name"] != current.get("column_name"):
-            alias = [str(a) for a in (current.get("alias") or [])]
-            old_name = str(current.get("column_name"))
-            if old_name and old_name not in alias:
-                alias.append(old_name)
-            fields["alias"] = alias
         return await svc.upsert_column(
             user=user, artifact_id=artifact_id, column_id=column_id,
             fields=fields, expected_updated_at=expected,
@@ -711,7 +704,9 @@ async def insert_row(
         raise _map_error(exc) from None
 
 
-@router.patch("/{artifact_id}/table/rows/{row_key}")
+# row_key 用 :path converter——长度前缀编码的键可含 '/'（codex二审批号④），
+# 前端已 encodeURIComponent，无需再动。
+@router.patch("/{artifact_id}/table/rows/{row_key:path}")
 async def update_row_cell(
     artifact_id: str,
     row_key: str,
@@ -746,7 +741,7 @@ async def batch_assign(
         raise _map_error(exc) from None
 
 
-@router.delete("/{artifact_id}/table/rows/{row_key}")
+@router.delete("/{artifact_id}/table/rows/{row_key:path}")
 async def delete_row(
     artifact_id: str,
     row_key: str,

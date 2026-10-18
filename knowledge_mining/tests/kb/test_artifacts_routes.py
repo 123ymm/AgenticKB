@@ -71,7 +71,9 @@ def _xlsx_bytes(path: Path, header: list[str], rows: list[tuple]) -> bytes:
 @pytest_asyncio.fixture
 async def env(tmp_path):
     db = FakeArtifactDB()
-    db.domain_bindings.add(("u-alice", DOMAIN))
+    # codex二审批号⑧：非 admin 成员路径需当前域绑定——测试内切换的成员用户
+    # 绑域；u-stranger 刻意不绑（保留「无域绑定 403/404」门禁断言的锐度）。
+    db.domain_bindings.update((uid, DOMAIN) for uid in ("u-alice", "u-viewer", "u-bob"))
     svc = ArtifactService(db)
     imp = ArtifactImportService(db)
     app = FastAPI()
@@ -317,11 +319,11 @@ async def test_row_write_defenses_map_400(env):
     assert r.status_code == 200, r.text
 
     r = await env.client.patch(
-        f"/api/artifacts/{aid}/table/rows/NC20260601000295",
+        f"/api/artifacts/{aid}/table/rows/16:NC20260601000295",
         json={"column": "L1分类", "value": "=SUM(A1)"})
     assert r.status_code == 400 and "formula_not_allowed" in r.text
     r = await env.client.patch(
-        f"/api/artifacts/{aid}/table/rows/NC20260601000295",
+        f"/api/artifacts/{aid}/table/rows/16:NC20260601000295",
         json={"column": "不存在列", "value": "x"})
     assert r.status_code == 400 and "unknown_column" in r.text
     r = await env.client.post(
@@ -443,7 +445,7 @@ async def test_cell_update_batch_assign_delete_row(env):
     assert r.status_code == 200, r.text
 
     r = await env.client.patch(
-        f"/api/artifacts/{aid}/table/rows/NC20260601000295",
+        f"/api/artifacts/{aid}/table/rows/16:NC20260601000295",
         json={"column": "L2分类", "value": "演练前核查"})
     assert r.status_code == 200, r.text
     assert r.json()["data"]["L2分类"] == "演练前核查"
@@ -456,7 +458,7 @@ async def test_cell_update_batch_assign_delete_row(env):
     assert r.status_code == 200 and r.json()["updated"] == 3
 
     r = await env.client.request(
-        "DELETE", f"/api/artifacts/{aid}/table/rows/NC20260601000302")
+        "DELETE", f"/api/artifacts/{aid}/table/rows/16:NC20260601000302")
     assert r.status_code == 200
     r = await env.client.get(f"/api/artifacts/{aid}/table/rows?draft=1")
     assert r.json()["total"] == 7
@@ -491,7 +493,7 @@ async def test_insert_row_manual_add(env):
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["row_key"] == "NC20260601000410"
+    assert body["row_key"] == "16:NC20260601000410"   # 长度前缀编码（批号④）
     assert body["data"]["L2分类"] == "演练前核查"
     assert body["ordinal"] == 9
     assert body["provenance"] == [{"channel": "manual", "created_by": "u-alice"}]
@@ -529,3 +531,32 @@ async def test_insert_row_manual_add(env):
     assert r.status_code == 201, r.text
     key = r.json()["row_key"]
     assert len(key) == 32 and all(c in "0123456789abcdef" for c in key)
+
+
+async def test_row_key_with_slash_addressable_in_routes(env):
+    """codex二审批号④回归：长度前缀编码的 row_key 可含 '/'——行路由用
+    path converter 后 PATCH/DELETE 不再被段内斜杠截断（前端已
+    encodeURIComponent）。"""
+    from knowledge_mining.mining.kb.db_artifacts import _encode_key_parts
+
+    aid = await _create_artifact(env)
+    env.db.columns[aid] = [
+        {"column_id": "c1", "column_name": "路径", "column_type": "text",
+         "is_indexed": False, "is_primary_key": False, "ordinal": 1,
+         "status": "active"},
+    ]
+    key = _encode_key_parts(["a/b", "c"])   # "3:a/b1:c"——含 '/'
+    assert "/" in key
+    env.db.rev0_rows[aid] = [
+        {"row_key": key, "data": {"路径": "旧"}, "provenance": [],
+         "conflicts": {}, "ordinal": 1},
+    ]
+    r = await env.client.patch(
+        f"/api/artifacts/{aid}/table/rows/{key}",
+        json={"column": "路径", "value": "新"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["路径"] == "新"
+    r = await env.client.request("DELETE", f"/api/artifacts/{aid}/table/rows/{key}")
+    assert r.status_code == 200
+    assert env.db.rev0_rows[aid] == []

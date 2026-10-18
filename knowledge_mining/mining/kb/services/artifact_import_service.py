@@ -32,6 +32,7 @@ from typing import Any, Iterator
 
 from openpyxl import load_workbook
 
+from knowledge_mining.mining.kb.db_artifacts import _encode_key_parts
 from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactError,
     ArtifactNotFound,
@@ -267,8 +268,11 @@ def _normalize_policy(raw: Any) -> dict[str, str]:
 
 
 def _row_key(data: dict[str, Any], pk_names: list[str]) -> tuple[str, bool]:
-    """主键值 join('/')（多列组合，61号 §6.3）；无主键或主键值全空 → uuid。
-    返回 (row_key, missing_pk)——missing_pk=True 时调用方落冲突标记。"""
+    """主键值长度前缀编码（多列组合，61号 §6.3 + codex二审批号④：与
+    db_artifacts._row_key_value 同构——追加 UPSERT 与 set_primary_key 重算/
+    手工行增对同一主键值必须得到同一 row_key，否则同键行判重失效）；无主键
+    或主键值全空 → uuid。返回 (row_key, missing_pk)——missing_pk=True 时
+    调用方落冲突标记。"""
     if not pk_names:
         return uuid.uuid4().hex, False
     parts = [
@@ -277,7 +281,7 @@ def _row_key(data: dict[str, Any], pk_names: list[str]) -> tuple[str, bool]:
     ]
     if not any(parts):
         return uuid.uuid4().hex, True
-    return "/".join(parts), False
+    return _encode_key_parts(parts), False
 
 
 # ----------------------------------------------------------------- service

@@ -603,11 +603,32 @@ def _get_by_ref(ident: Identity, ref: str, domain: str | None,
                 relation: str | None, query: dict | None,
                 depth: int | None, limit: int | None, cursor: str | None) -> dict:
     """ref 分流：ev_ 内容 / doc_ 分页 / st_ 按 query|relation|能力报告 /
-    art_ 按 query|说明卡。kb_names 只被 ev_/doc_/st_ 消费——制品按域开放，
-    传了仅做开放库校验，不缩制品可见范围。"""
-    kb_ids = _scope_kbs(ident, kb_names)
+    art_ 按 query|说明卡。kb_names 只被 ev_/doc_/st_ 消费——制品按域开放。
+    codex二审批号⑨：art_ 分支在 _scope_kbs **之前**——制品与库权限解绑
+    （61号拍板），零开放库钥匙必须也能查 art_；_scope_kbs 对空开放集直接
+    报"未开放任何知识库"，挡在前面会误伤。"""
     resolved = _domain(ident, domain)
     username = ident.username
+
+    if ref.startswith("art_"):
+        # 61号批次3：制品引用。query=None → artifact_card（元信息+列能力）；
+        # query 同 st_ 表格 DSL（limit/cursor 写在 query 里，不吃顶层分页参数）。
+        # relation/mode 是结构/证据语义——显式拒绝不静默。
+        if relation and str(relation).strip():
+            raise ToolError(
+                "art_ 是知识制品引用，不支持 relation 结构导航。要查表格传 query"
+                "（DSL：select/where/order_by/limit/cursor/aggregate，字段名以说明卡"
+                " columns 为准），或只传 ref 看说明卡。"
+            )
+        if mode:
+            raise ToolError(
+                "mode（展开粒度）只用于 ev_ 证据引用，与 art_ 制品引用互斥。"
+            )
+        out = _serving_call(backend.query_artifact, ref, query, resolved, ident)
+        # 上游三视图自带 view 自标识（artifact_card/artifact_rows/artifact_aggregate）
+        return {**out}
+
+    kb_ids = _scope_kbs(ident, kb_names)
 
     if ref.startswith("ev_"):
         if relation or query:
@@ -630,24 +651,6 @@ def _get_by_ref(ident: Identity, ref: str, domain: str | None,
         # 与 doc_（内容引用）并存；content_revision=替换暗号。（57号"剥内部 id"
         # 决定已推翻：id 非秘密，防探测靠权限检查不靠藏 id。）
         return {**out, "view": "document_content"}
-
-    if ref.startswith("art_"):
-        # 61号批次3：制品引用。query=None → artifact_card（元信息+列能力）；
-        # query 同 st_ 表格 DSL（limit/cursor 写在 query 里，不吃顶层分页参数）。
-        # relation/mode 是结构/证据语义——显式拒绝不静默。
-        if relation and str(relation).strip():
-            raise ToolError(
-                "art_ 是知识制品引用，不支持 relation 结构导航。要查表格传 query"
-                "（DSL：select/where/order_by/limit/cursor/aggregate，字段名以说明卡"
-                " columns 为准），或只传 ref 看说明卡。"
-            )
-        if mode:
-            raise ToolError(
-                "mode（展开粒度）只用于 ev_ 证据引用，与 art_ 制品引用互斥。"
-            )
-        out = _serving_call(backend.query_artifact, ref, query, resolved, ident)
-        # 上游三视图自带 view 自标识（artifact_card/artifact_rows/artifact_aggregate）
-        return {**out}
 
     # st_（或其他形状）：query > relation > 能力报告
     if query is not None:

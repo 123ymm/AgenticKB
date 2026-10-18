@@ -6,12 +6,14 @@
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 
 import pytest
 
 from knowledge_mining.mining.kb.db_artifacts import ArtifactError as ArtifactRepoError
+from knowledge_mining.mining.kb.db_artifacts import _encode_key_parts
 from knowledge_mining.mining.kb.db_artifacts import _row_key_value
 from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactForbidden,
@@ -52,6 +54,17 @@ class FakeArtifactDB:
     def _touch(self, artifact_id: str) -> None:
         art = self.artifacts[artifact_id]
         art["updated_at"] = datetime.now(timezone.utc)
+
+    def _assert_expected(self, artifact_id: str, expected_updated_at) -> None:
+        """对齐真库（codex二审批号⑥b）：写路径原子乐观锁——全精度比对
+        updated_at，失配 stale_artifact。"""
+        if expected_updated_at is None:
+            return
+        art = self.artifacts.get(artifact_id)
+        if art is None:
+            raise ArtifactRepoError("artifact_not_found")
+        if art["updated_at"] != expected_updated_at:
+            raise ArtifactRepoError("stale_artifact")
 
     # ---- 基础读写 --------------------------------------------------------
 
@@ -174,6 +187,9 @@ class FakeArtifactDB:
     async def is_domain_admin(self, user_id: str, domain_id: str) -> bool:
         return (user_id, domain_id) in self.domain_admins
 
+    async def user_in_domain(self, user_id: str, domain_id: str) -> bool:
+        return (user_id, domain_id) in self.domain_bindings
+
     # ---- 生命周期 ---------------------------------------------------------
 
     async def publish(
@@ -264,7 +280,8 @@ class FakeArtifactDB:
                 )
                 self.rev0_rows[artifact_id] = [dict(r) for r in current]
             art["draft_open"] = True
-            self._touch(artifact_id)
+            # 对齐真库（codex二审批号⑥裁定）：checkout 不推进乐观锁令牌——
+            # rev0 是 current 逐字节副本，内容未变。
         return dict(art)
 
     # ---- schema / 行 ------------------------------------------------------
@@ -279,11 +296,20 @@ class FakeArtifactDB:
 
     async def upsert_column(
         self, artifact_id: str, column_id: str, fields: dict,
+        *, rename_from: str | None = None,
     ) -> dict:
+        """对齐真库（codex二审批号①②）：改名时同"事务"迁移 rev0 data 键 +
+        恒推进 updated_at（乐观锁令牌随 schema 变更前进）。"""
         cols = self.columns.setdefault(artifact_id, [])
         for col in cols:
             if col["column_id"] == column_id:
                 col.update(fields)
+                if rename_from is not None:
+                    for row in self.rev0_rows.get(artifact_id, []):
+                        if rename_from in row["data"]:
+                            row["data"][fields["column_name"]] = \
+                                row["data"].pop(rename_from)
+                self._touch(artifact_id)
                 return dict(col)
         row = {"column_id": column_id,
                "column_name": str(fields.get("column_name") or column_id),
@@ -294,6 +320,7 @@ class FakeArtifactDB:
                "ordinal": int(fields.get("ordinal", len(cols))),
                "status": "active"}
         cols.append(row)
+        self._touch(artifact_id)
         return dict(row)
 
     async def drop_column(self, artifact_id: str, column_id: str) -> None:
@@ -338,6 +365,7 @@ class FakeArtifactDB:
     ) -> None:
         self.calls.append("replace_columns_for_artifact")
         self.columns[artifact_id] = [dict(c) for c in columns]
+        self._touch(artifact_id)   # 对齐真库：schema 变更推进乐观锁令牌
 
     async def insert_rows_upsert(
         self, artifact_id: str, revision: int, rows: list[dict], updated_by: str = "",
@@ -365,11 +393,15 @@ class FakeArtifactDB:
 
     async def update_cell(
         self, artifact_id: str, row_key: str, column: str, value, updated_by: str,
+        expected_updated_at=None,
     ) -> dict | None:
+        """对齐真库（codex二审批号⑥b）：原子乐观锁 + 写 + touch 一步完成。"""
         self.calls.append("update_cell")
+        self._assert_expected(artifact_id, expected_updated_at)
         for row in self.rev0_rows.get(artifact_id, []):
             if row["row_key"] == row_key:
                 row["data"] = {**row["data"], column: value}
+                self._touch(artifact_id)
                 return dict(row)
         return None
 
@@ -387,26 +419,31 @@ class FakeArtifactDB:
 
     async def update_cell_conflict(
         self, artifact_id: str, row_key: str, column: str,
-        marker: str, updated_by: str,
+        marker: str, updated_by: str, expected_updated_at=None,
     ) -> dict | None:
         """类型校验失败的单格更新：值置 null + conflicts[column]=marker。"""
         self.calls.append("update_cell_conflict")
+        self._assert_expected(artifact_id, expected_updated_at)
         for row in self.rev0_rows.get(artifact_id, []):
             if row["row_key"] == row_key:
                 row["data"] = {**row["data"], column: None}
                 row["conflicts"] = {**row.get("conflicts", {}), column: marker}
+                self._touch(artifact_id)
                 return dict(row)
         return None
 
     async def batch_assign(
         self, artifact_id: str, column: str, value, where_clauses: list, updated_by: str,
+        expected_updated_at=None,
     ) -> int:
         self.calls.append("batch_assign")
+        self._assert_expected(artifact_id, expected_updated_at)
         n = 0
         for row in self.rev0_rows.get(artifact_id, []):
             if self._match(row["data"], where_clauses):
                 row["data"] = {**row["data"], column: value}
                 n += 1
+        self._touch(artifact_id)
         return n
 
     @staticmethod
@@ -420,13 +457,17 @@ class FakeArtifactDB:
                 return False
         return True
 
-    async def delete_row(self, artifact_id: str, row_key: str) -> bool:
+    async def delete_row(
+        self, artifact_id: str, row_key: str, expected_updated_at=None,
+    ) -> bool:
         self.calls.append("delete_row")
+        self._assert_expected(artifact_id, expected_updated_at)
         rows = self.rev0_rows.get(artifact_id, [])
         kept = [r for r in rows if r["row_key"] != row_key]
         if len(kept) == len(rows):
             return False
         self.rev0_rows[artifact_id] = kept
+        self._touch(artifact_id)
         return True
 
     async def list_rows(
@@ -511,6 +552,13 @@ async def _seeded_db() -> FakeArtifactDB:
          "status": "active"},
     ]
     db.domain_admins.add(("u-domadmin", "plant-a"))
+    # codex二审批号⑧：非 admin 成员路径需当前域绑定——成员 fixture 用户全部
+    # 绑 plant-a（u-stranger 也绑定：保持「同域非成员 404」的锐利口径——
+    # 404 来自成员检查而非域绑定缺失）。
+    db.domain_bindings.update(
+        (uid, "plant-a") for uid in
+        ("u-owner", "u-editor", "u-viewer", "u-stranger", "u-maker")
+    )
     # 成员治理（修复⑪）预检底料：常见 fixture 用户均 active
     db.users.update({
         uid: "active" for uid in (
@@ -734,10 +782,10 @@ async def test_matching_or_absent_expected_updated_at_passes() -> None:
     db = await _seeded_db()
     svc = ArtifactService(db)
     owner = _user("u-owner")
-    # NOW 带 .5 微秒；expected 截到秒 → 容差放行
+    # codex二审批号⑥a：全精度比较——令牌必须逐微秒匹配（秒截断容差已除）
     await svc.update_cell(
         user=owner, artifact_id=AID, row_key="MOP-1", column="L1", value="演练",
-        expected_updated_at=NOW_ISO,
+        expected_updated_at=NOW.isoformat(),
     )
     fresh = db.artifacts[AID]["updated_at"].isoformat()
     # 不传 → 放行
@@ -745,7 +793,40 @@ async def test_matching_or_absent_expected_updated_at_passes() -> None:
         user=owner, artifact_id=AID, row_key="MOP-1", column="L1", value="演练2",
     )
     assert "update_cell" in db.calls
-    assert fresh  # sanity
+    assert fresh != NOW_ISO   # 写路径推进了令牌（真时间）
+
+
+@pytest.mark.asyncio
+async def test_same_second_different_microsecond_token_rejected() -> None:
+    """codex二审批号⑥a回归：秒截断容差已除——同秒不同微秒的旧 token 拒绝
+    （NOW 带 .5 微秒，秒截断版 = 不同令牌）。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    with pytest.raises(StaleArtifact):
+        await svc.update_cell(
+            user=_user("u-owner"), artifact_id=AID, row_key="MOP-1",
+            column="L1", value="x", expected_updated_at=NOW_ISO,
+        )
+    assert "update_cell" not in db.calls
+
+
+@pytest.mark.asyncio
+async def test_write_advances_token_old_token_rejected_on_second_edit() -> None:
+    """codex二审批号⑥回归：写路径推进乐观锁令牌——第一次编辑后用编辑前的
+    token 再写 → StaleArtifact（409）。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+    token_before = db.artifacts[AID]["updated_at"].isoformat()
+    await svc.update_cell(
+        user=owner, artifact_id=AID, row_key="MOP-1", column="L1", value="第一次",
+    )
+    assert db.artifacts[AID]["updated_at"].isoformat() != token_before
+    with pytest.raises(StaleArtifact):
+        await svc.update_cell(
+            user=owner, artifact_id=AID, row_key="MOP-1", column="L1",
+            value="第二次", expected_updated_at=token_before,
+        )
 
 
 @pytest.mark.asyncio
@@ -901,13 +982,14 @@ async def test_set_primary_key_maps_repo_conflict_error() -> None:
         await svc.set_primary_key(
             user=_user("u-owner"), artifact_id=AID, column_ids=["c002"],
         )
-    # 组合主键 c001+c002：键=MOP值/L1值（列名取数），不折叠
+    # 组合主键 c001+c002：键=MOP值+L1值 长度前缀编码（列名取数），不折叠
     db.rev0_rows[AID][1]["data"]["L1"] = "扩容"
     result = await svc.set_primary_key(
         user=_user("u-owner"), artifact_id=AID, column_ids=["c001", "c002"],
     )
     assert result["rekeyed_rows"] == 2
-    assert {r["row_key"] for r in db.rev0_rows[AID]} == {"MOP-1/部署", "MOP-2/扩容"}
+    assert {r["row_key"] for r in db.rev0_rows[AID]} \
+        == {"5:MOP-12:部署", "5:MOP-22:扩容"}
     # 未知列 → 400 InvalidOperation
     with pytest.raises(InvalidOperation):
         await svc.set_primary_key(
@@ -941,6 +1023,7 @@ async def test_update_cell_int_float_cast_marks_conflict() -> None:
     db = await _seeded_db()
     await db.upsert_column(AID, "c003", {"column_name": "数量", "column_type": "int"})
     await db.upsert_column(AID, "c004", {"column_name": "单价", "column_type": "float"})
+    await db.upsert_column(AID, "c007", {"column_name": "备注", "column_type": "text"})
     svc = ArtifactService(db)
     owner = _user("u-owner")
 
@@ -967,10 +1050,11 @@ async def test_update_cell_int_float_cast_marks_conflict() -> None:
         user=owner, artifact_id=AID, row_key="MOP-1", column="单价", value="3.5x")
     assert row["data"]["单价"] is None
     assert row["conflicts"]["单价"] == "type_error:3.5x"
-    # text 列不设卡（登记列直通）；未登记列 → 400 unknown_column（修复⑩）
+    # text 列不设卡（登记列直通；主键列 MOP 已被批号⑦拦截，用非主键 text 列）；
+    # 未登记列 → 400 unknown_column（修复⑩）
     row = await svc.update_cell(
-        user=owner, artifact_id=AID, row_key="MOP-1", column="MOP", value="x")
-    assert row["data"]["MOP"] == "x"
+        user=owner, artifact_id=AID, row_key="MOP-1", column="备注", value="x")
+    assert row["data"]["备注"] == "x"
     with pytest.raises(InvalidOperation, match="unknown_column"):
         await svc.update_cell(
             user=owner, artifact_id=AID, row_key="MOP-1", column="自由列", value="x")
@@ -1038,7 +1122,7 @@ async def test_insert_single_row_alias_canonical_and_tolerant_cast() -> None:
     )
     assert "MOP" not in row["data"]          # 旧名不落影子键
     assert row["data"]["MOP单号"] == "NC-NEW"  # 归一到规范名
-    assert row["row_key"] == "NC-NEW"         # 主键拼接用列名取数
+    assert row["row_key"] == "6:NC-NEW"       # 主键拼接用列名取数（长度前缀编码）
     assert row["data"]["数量"] is None         # tolerant：置 null + 标记
     assert row["conflicts"]["数量"] == "type_error:abc"
 
@@ -1181,27 +1265,116 @@ async def test_replace_columns_rejects_in_plan_duplicate_names() -> None:
             ])
 
 
+# ------------------------------------------- codex 二审九项回归
+
+@pytest.mark.asyncio
+async def test_rename_column_appends_alias_and_migrates_data_keys() -> None:
+    """codex二审批号②回归（用例⑨闭环）：service 层列改名 → alias 追加旧名 +
+    rev0 data 键同事务迁移（rename_from 透传）——新键有值、旧键无残留。
+    Java/serving 读取侧经 alias 映射旧名→新名定位列，行 data 已是新键，
+    读取闭环无需 Java 改动。"""
+    db = await _seeded_db()
+    await db.ensure_draft(AID)   # current(rev1) → rev0，行带 MOP/L1 键
+    svc = ArtifactService(db)
+    col = await svc.upsert_column(
+        user=_user("u-owner"), artifact_id=AID, column_id="c002",
+        fields={"column_name": "一级分类"},
+    )
+    assert col["column_name"] == "一级分类"
+    assert col["alias"] == ["L1"]      # 读回 alias==[旧名]（批号①序列化闭环）
+    rows = {r["row_key"]: r for r in db.rev0_rows[AID]}
+    assert rows["MOP-1"]["data"]["一级分类"] == "部署"
+    assert "L1" not in rows["MOP-1"]["data"]
+    listed = (await svc.list_rows(
+        user=_user("u-owner"), artifact_id=AID, draft=True))["rows"]
+    assert all("一级分类" in r["data"] and "L1" not in r["data"]
+               for r in listed)
+
+
+@pytest.mark.asyncio
+async def test_primary_key_column_edits_rejected() -> None:
+    """codex二审批号⑦回归：update_cell/batch_assign 改主键列 → 400
+    primary_key_immutable（row_key 按主键值编码，改值=行地址脱钩；
+    改主键走「设置主键」整体重算行键）。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+    with pytest.raises(InvalidOperation, match="primary_key_immutable"):
+        await svc.update_cell(
+            user=owner, artifact_id=AID, row_key="MOP-1", column="MOP", value="X")
+    with pytest.raises(InvalidOperation, match="primary_key_immutable"):
+        await svc.batch_assign(
+            user=owner, artifact_id=AID, column="MOP", value="X", where_clauses=[])
+    assert "update_cell" not in db.calls
+    assert "batch_assign" not in db.calls
+
+
+@pytest.mark.asyncio
+async def test_member_without_domain_binding_gets_404() -> None:
+    """codex二审批号⑧回归：成员行在、当前域绑定已撤 → ArtifactNotFound
+    （404 反探测，域外不可见，与 KB 面硬边界对齐）；域绑定在 → 正常。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    viewer = _user("u-viewer")
+    assert (await svc.get_artifact(user=viewer, artifact_id=AID))["artifact_id"] == AID
+    db.domain_bindings.discard(("u-viewer", "plant-a"))
+    with pytest.raises(ArtifactNotFound):
+        await svc.get_artifact(user=viewer, artifact_id=AID)
+    with pytest.raises(ArtifactNotFound):
+        await svc.update_cell(
+            user=viewer, artifact_id=AID, row_key="MOP-1", column="L1", value="x")
+
+
+def test_row_key_value_length_prefix_encoding_no_collision() -> None:
+    """codex二审批号④回归：'/' 直拼下 (A/B,C) 与 (A,B/C) 同键——长度前缀
+    编码消除碰撞；单列同编码（3:ABC 形态）；None → 空段。"""
+    assert _row_key_value({"x": "A/B", "y": "C"}, ["x", "y"]) == "3:A/B1:C"
+    assert _row_key_value({"x": "A", "y": "B/C"}, ["x", "y"]) == "1:A3:B/C"
+    assert _row_key_value({"x": "A/B", "y": "C"}, ["x", "y"]) \
+        != _row_key_value({"x": "A", "y": "B/C"}, ["x", "y"])
+    assert _row_key_value({"x": "ABC"}, ["x"]) == "3:ABC"
+    assert _row_key_value({"x": None, "y": "C"}, ["x", "y"]) == "0:1:C"
+    assert _encode_key_parts(["旧名"]) == "2:旧名"   # len=字符数非字节数
+
+
 # ------------------------------------------- 仓储 SQL 静态守卫（非门控）
 
 class _RecordingCursor:
-    def __init__(self) -> None:
-        self._rows = [{"_inserted": True}]
+    def __init__(self, rows: list | None = None) -> None:
+        self._rows = rows if rows is not None else [{"_inserted": True}]
 
     async def fetchall(self):
         return self._rows
+
+    async def fetchone(self):
+        return self._rows[0] if self._rows else None
 
     @property
     def rowcount(self) -> int:
         return len(self._rows)
 
 
+class _TransactionContext:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class _RecordingConnection:
-    def __init__(self, log: list) -> None:
+    def __init__(self, log: list, rows: list | None = None) -> None:
         self._log = log
+        self._rows = rows
 
     async def execute(self, query, params=()):
+        if hasattr(query, "as_string"):   # psycopg sql.Composed/SQL → 渲染真 SQL
+            query = query.as_string(None)
         self._log.append((str(query), params))
-        return _RecordingCursor()
+        return _RecordingCursor(self._rows)
+
+    def transaction(self) -> _TransactionContext:
+        return _TransactionContext()
 
 
 class _PoolContext:
@@ -1216,13 +1389,14 @@ class _PoolContext:
 
 
 class _RecordingPool:
-    """最小 psycopg AsyncConnectionPool 形态——只够 insert_rows_upsert 走通。"""
+    """最小 psycopg AsyncConnectionPool 形态——只够被测仓储方法走通。"""
 
-    def __init__(self) -> None:
+    def __init__(self, rows: list | None = None) -> None:
         self.log: list = []
+        self._rows = rows
 
     def connection(self) -> _PoolContext:
-        return _PoolContext(_RecordingConnection(self.log))
+        return _PoolContext(_RecordingConnection(self.log, self._rows))
 
 
 @pytest.mark.asyncio
@@ -1241,4 +1415,69 @@ async def test_insert_rows_upsert_placeholder_count_matches_params() -> None:
     assert result == {"inserted": 1, "updated": 0}
     sql, params = pool.log[0]
     assert sql.count("%s") == len(params)
-    assert len(params) == 8   # 8 列 × 1 行（artifact_id..updated_by）
+    assert len(params) == 8   # 8 列 × 1 行（artifact_id..updated_by)
+
+
+@pytest.mark.asyncio
+async def test_upsert_column_json_fields_passed_as_json_strings() -> None:
+    """codex二审批号①回归（静态）：enum_values/alias 走 ::jsonb 占位——参数
+    必须是 JSON 字符串（原生 list 被 psycopg 适配成 text[]，'{old}'::jsonb
+    非法）；改名路径同事务发迁键 UPDATE（批号②）。"""
+    from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
+
+    pool = _RecordingPool()
+    db = ArtifactDB(pool)
+    await db.upsert_column(
+        "art_x", "c1",
+        {"column_name": "新列", "alias": ["旧名"], "enum_values": ["a", "b"]},
+        rename_from="旧列",
+    )
+    updates = [p for q, p in pool.log
+               if isinstance(p, dict) and "UPDATE kb_table_columns" in q]
+    assert updates
+    json_values = sorted(
+        str(v) for k, v in updates[0].items() if str(k).startswith("f")
+    )
+    assert json.loads(json_values[0]) == ["a", "b"]
+    assert json.loads(json_values[1]) == ["旧名"]
+    # 同事务迁键：rev0 data 键旧→新（jsonb_build_object 形态，只迁 rev0）
+    renames = [q for q, _ in pool.log if "jsonb_build_object" in q]
+    assert renames
+    assert "revision = 0" in renames[0]
+    assert "%(old)s" in renames[0] and "%(new)s" in renames[0]
+
+
+@pytest.mark.asyncio
+async def test_expression_index_ddl_has_artifact_where_clause() -> None:
+    """codex二审批号⑤回归（静态）：CREATE INDEX 部分索引限定
+    WHERE artifact_id = <字面量>——无界表达式索引对 kb_table_rows 全表求
+    cast，其他制品同名列脏值会当场炸掉索引创建（连带炸发布）。"""
+    from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
+
+    pool = _RecordingPool()
+    db = ArtifactDB(pool)
+    created = await db.create_expression_indexes("art_x", 1, [
+        {"column_id": "c1", "column_name": "端口", "column_type": "int"},
+        {"column_id": "c2", "column_name": "名称", "column_type": "text"},
+    ])
+    assert created == ["idx_kbtr_art_x_c1", "idx_kbtr_art_x_c2"]
+    int_ddl, text_ddl = pool.log[0][0], pool.log[1][0]
+    assert "WHERE artifact_id = 'art_x'" in int_ddl
+    assert "(revision," in int_ddl and "::numeric" in int_ddl
+    assert "WHERE artifact_id = 'art_x'" in text_ddl
+
+
+@pytest.mark.asyncio
+async def test_drop_index_cleanup_pattern_keeps_trailing_wildcard() -> None:
+    """codex二审批号⑤回归（静态）：清理 LIKE pattern 以未转义 % 结尾——旧
+    写法连通配符一起转义成字面 %，清理恒空匹配=旧索引永不回收。"""
+    from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
+
+    pool = _RecordingPool(rows=[])
+    db = ArtifactDB(pool)
+    await db.drop_draft_expression_indexes("art_un_der")
+    select_sql, params = pool.log[0]
+    assert "pg_indexes" in select_sql
+    pattern = params[0]
+    assert pattern == "idx\\_kbtr\\_art\\_un\\_der\\_%"   # 前缀字面 + 通配尾
+    assert pattern.endswith("%") and not pattern.endswith("\\%")

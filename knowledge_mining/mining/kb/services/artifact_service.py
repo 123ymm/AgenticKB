@@ -33,6 +33,12 @@ _META_FIELDS = {"title", "description", "usage_note"}
 
 _MAX_TITLE_LENGTH = 200
 
+#: codex二审批号⑦：普通编辑不得改主键列——改了 data 与 row_key 即脱钩
+#: （行地址按主键值编码）。改主键必须走设置主键功能（整体重算行键）。
+_PK_IMMUTABLE_MSG = (
+    "primary_key_immutable:改主键值请用设置主键功能（重算行键）"
+)
+
 
 # ----------------------------------------------------------------- errors
 
@@ -74,6 +80,7 @@ _REPO_CODE_TO_ERROR: dict[str, type[ArtifactError]] = {
     "primary_key_conflict": PrimaryKeyConflict,
     "artifact_not_found": ArtifactNotFound,
     "no_pending_changes": NoPendingChanges,
+    "stale_artifact": StaleArtifact,
 }
 
 
@@ -111,13 +118,22 @@ def _parse_ts(value: Any) -> datetime:
 def _check_freshness(
     artifact: dict[str, Any], expected_updated_at: Any,
 ) -> None:
-    """乐观锁：秒级截断比较（datetime.fromisoformat 容差）。None=不校验。"""
+    """乐观锁前置快检（体验友好）：全精度比较（codex二审批号⑥a——秒截断
+    会把同秒不同微秒的旧 token 放行；PG TIMESTAMPTZ 与 isoformat 都是微秒
+    精度，直接比）。并发权威在 db 层 _assert_expected_updated_at（FOR UPDATE
+    原子校验+写+touch 同事务）。None=不校验。"""
     if expected_updated_at is None:
         return
     expected = _parse_ts(expected_updated_at)
     current = _parse_ts(artifact.get("updated_at"))
-    if expected.replace(microsecond=0) != current.replace(microsecond=0):
+    if expected != current:
         raise StaleArtifact(str(artifact.get("artifact_id")))
+
+
+def _expected_dt(expected_updated_at: Any) -> Any:
+    """expected_updated_at → datetime（db 层原子比对用）；None 透传。
+    格式非法早抛（_require_design_session 前置已拦过一次，这里兜直调路径）。"""
+    return _parse_ts(expected_updated_at) if expected_updated_at is not None else None
 
 
 # 单格/单值数值 cast（导入向导与手工编辑共用口径——artifact_import_service
@@ -213,7 +229,10 @@ class ArtifactService:
         """返回 (artifact, role)。★非成员一律 ArtifactNotFound（含同域非成员，
         不暴露存在性）；成员角色不在 allowed → ArtifactForbidden。admin 旁路
         返回的角色（admin / domain_admin）满足任意 allowed。
-        """
+
+        codex二审批号⑧：非 admin 成员路径还必须当前绑定在制品域内——撤销
+        域绑定后残留的成员行不放行（ArtifactNotFound 404，域外不可见口径，
+        与 KB 面硬边界对齐）。"""
         artifact = await self._db.get_artifact(artifact_id)
         if artifact is None:
             raise ArtifactNotFound(artifact_id)
@@ -221,6 +240,8 @@ class ArtifactService:
             return artifact, "admin"
         if await self._db.is_domain_admin(_uid(user), artifact["domain_id"]):
             return artifact, "domain_admin"
+        if not await self._db.user_in_domain(_uid(user), artifact["domain_id"]):
+            raise ArtifactNotFound(artifact_id)
         role = await self._db.artifact_role(artifact_id, _uid(user))
         if role is None and artifact.get("owner_user_id") == _uid(user):
             role = "owner"
@@ -487,16 +508,36 @@ class ArtifactService:
         fields: dict[str, Any], expected_updated_at: Any = None,
     ) -> dict[str, Any]:
         """PATCH 式列变更 + active 列名唯一校验（对抗审查修复⑳，DB 部分唯一
-        索引兜底）：改名/新建撞既有 active 列名 → 400。dropped 列不占名。"""
+        索引兜底）：改名/新建撞既有 active 列名 → 400。dropped 列不占名。
+
+        codex二审批号②：检测到 column_name 变更时——alias 数组追加旧名
+        （旧名兼容读取，§7.1）+ rename_from 透传 db 层（同事务迁移 rev0 行
+        data 键，用例⑨闭环：不迁键则存量行旧键残留，新 schema 读数全空）。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
+        columns = await self._db.list_columns(artifact_id)
         new_name = fields.get("column_name")
         if new_name is not None:
             self._assert_name_not_taken(
-                await self._db.list_columns(artifact_id),
-                str(new_name), exclude_column_id=column_id,
+                columns, str(new_name), exclude_column_id=column_id,
             )
+        rename_from = None
+        if new_name is not None:
+            current = next(
+                (c for c in columns
+                 if str(c.get("column_id")) == str(column_id)), None,
+            )
+            if current is not None \
+                    and str(new_name) != str(current.get("column_name")):
+                old_name = str(current.get("column_name"))
+                alias = [str(a) for a in (current.get("alias") or [])]
+                if old_name and old_name not in alias:
+                    alias.append(old_name)
+                fields = {**fields, "alias": alias}
+                rename_from = old_name
         try:
-            return await self._db.upsert_column(artifact_id, column_id, fields)
+            return await self._db.upsert_column(
+                artifact_id, column_id, fields, rename_from=rename_from,
+            )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
 
@@ -602,28 +643,34 @@ class ArtifactService:
     ) -> dict[str, Any]:
         """单格更新（§7.2 + 对抗审查修复⑨⑩）。行写防线：①值过 _is_formula
         （=+-@ 前缀 400）；②列必须存在（name/alias 可寻址，未知 400）且以
-        规范 column_name 落库（防 alias 旧名写影子键）；③类型 cast 失败 →
+        规范 column_name 落库（防 alias 旧名写影子键）；③主键列禁改
+        （codex二审批号⑦——primary_key_immutable 400）；④类型 cast 失败 →
         值置 null + conflicts[column]="type_error:值"（与导入 tolerant 路径
-        对称），不阻断。"""
+        对称），不阻断。乐观锁：expected 透传 db 层原子校验（FOR UPDATE +
+        写 + touch 同事务，codex二审批号⑥b），service 不再单独 touch。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
         if value is not None and _is_formula(value):
             raise InvalidOperation("formula_not_allowed")
         column_def = await self._find_column(artifact_id, column)
         if column_def is None:
             raise InvalidOperation(f"unknown_column:{column}")
+        if column_def.get("is_primary_key"):
+            raise InvalidOperation(_PK_IMMUTABLE_MSG)
         canonical = str(column_def["column_name"])
+        expected = _expected_dt(expected_updated_at)
         ok, casted = _cast_cell(value, str(column_def.get("column_type") or "text"))
         if ok:
             row = await self._db.update_cell(
                 artifact_id, row_key, canonical, casted, _uid(user),
+                expected_updated_at=expected,
             )
         else:
             row = await self._db.update_cell_conflict(
                 artifact_id, row_key, canonical, f"type_error:{value}", _uid(user),
+                expected_updated_at=expected,
             )
         if row is None:
             raise InvalidOperation("row_not_found")
-        await self._db.touch_updated_at(artifact_id)
         return row
 
     async def batch_assign(
@@ -633,14 +680,17 @@ class ArtifactService:
     ) -> dict[str, int]:
         """批量赋值（§7.2 + 对抗审查修复⑥⑩）。校验前置（批量场景 intolerant）：
         ①值过 _is_formula（400）；②目标列必须存在（unknown_column 400，alias
-        解析为规范名）；③int/float/date/bool 列值 cast 失败直接 400（strict——
-        批量写坏多行无逃生门，与单格 tolerant 语义刻意不同）。"""
+        解析为规范名）；③主键列禁改（codex二审批号⑦）；④int/float/date/bool
+        列值 cast 失败直接 400（strict——批量写坏多行无逃生门，与单格
+        tolerant 语义刻意不同）。乐观锁同 update_cell（db 层原子，⑥b）。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
         if value is not None and _is_formula(value):
             raise InvalidOperation("formula_not_allowed")
         column_def = await self._find_column(artifact_id, column)
         if column_def is None:
             raise InvalidOperation(f"unknown_column:{column}")
+        if column_def.get("is_primary_key"):
+            raise InvalidOperation(_PK_IMMUTABLE_MSG)
         canonical = str(column_def["column_name"])
         ok, casted = _cast_cell(value, str(column_def.get("column_type") or "text"))
         if not ok:
@@ -648,20 +698,27 @@ class ArtifactService:
         try:
             updated = await self._db.batch_assign(
                 artifact_id, canonical, casted, where_clauses, _uid(user),
+                expected_updated_at=_expected_dt(expected_updated_at),
             )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
-        await self._db.touch_updated_at(artifact_id)
         return {"updated": updated}
 
     async def delete_row(
         self, *, user: dict[str, Any], artifact_id: str, row_key: str,
         expected_updated_at: Any = None,
     ) -> None:
+        """乐观锁：expected 透传 db 层原子校验+touch（codex二审批号⑥b）。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
-        if not await self._db.delete_row(artifact_id, row_key):
+        try:
+            hit = await self._db.delete_row(
+                artifact_id, row_key,
+                expected_updated_at=_expected_dt(expected_updated_at),
+            )
+        except ArtifactRepoError as exc:
+            raise _translate(exc) from exc
+        if not hit:
             raise InvalidOperation("row_not_found")
-        await self._db.touch_updated_at(artifact_id)
 
     async def insert_rows(
         self, *, user: dict[str, Any], artifact_id: str,

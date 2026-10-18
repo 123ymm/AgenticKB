@@ -63,6 +63,9 @@ def _write_xlsx(path: Path, header: list[str], rows: list[tuple]) -> bytes:
 
 def _make_service() -> tuple[FakeArtifactDB, ArtifactService, ArtifactImportService]:
     db = FakeArtifactDB()
+    # codex二审批号⑧：execute_import 经 list_columns/_require_design_session 走
+    # _assert_role——OWNER 需 plant-a 域绑定。
+    db.domain_bindings.add(("u-owner", "plant-a"))
     return db, ArtifactService(db), ArtifactImportService(db)
 
 
@@ -251,7 +254,7 @@ async def test_execute_create_imports_rows_with_provenance(tmp_path):
     rows = db.rev0_rows[aid]
     assert len(rows) == 8
     first = rows[0]
-    assert first["row_key"] == "NC20260601000295"  # 主键值即 row_key
+    assert first["row_key"] == "16:NC20260601000295"  # 主键值长度前缀编码即 row_key
     assert first["data"]["L1分类"] == "数据业务"
     assert first["data"]["L2分类"] == "网络部署/扩容"
     provenance = first["provenance"][0]
@@ -333,14 +336,14 @@ async def test_execute_append_maps_updates_and_drops(tmp_path):
     assert report["updated"] == 3
     assert [m["column_name"] for m in report["missing_columns"]] == ["L2分类"]
     rows = {r["row_key"]: r for r in db.rev0_rows[aid]}
-    # 同 MOP 行：data 覆盖 + provenance 双来源
-    shared = rows["NC20260601000295"]
+    # 同 MOP 行：data 覆盖 + provenance 双来源（A/B 导入同一编码 → 同键 UPSERT 命中）
+    shared = rows["16:NC20260601000295"]
     assert shared["data"]["是否夜间执行"] == "是"
     assert len(shared["provenance"]) == 2
     assert {p["file_name"] for p in shared["provenance"]} == {"A.xlsx", "B.xlsx"}
     # drop 列不进 data：新行无该键；被本批覆盖的行该列置 null（§6.2
     # 「schema 有文件无的列 → 该批行此列置 null」——UPSERT data 覆盖语义）
-    new_row = rows["NC20260601000401"]
+    new_row = rows["16:NC20260601000401"]
     assert "L2分类" not in new_row["data"]
     assert shared["data"].get("L2分类") is None
     # 新列已入 schema
@@ -385,9 +388,9 @@ async def test_key_conflict_block_then_keep_first(tmp_path):
     assert report["key_conflicts"] == 1
     assert report["inserted"] == 1 and report["updated"] == 1
     after = {r["row_key"]: r for r in db.rev0_rows[aid]}
-    assert after["NC20260601000303"]["data"]["L1分类"] == "新行1"  # 保留首行
-    assert "__duplicate_key__" in after["NC20260601000303"]["conflicts"]
-    assert after["NC20260601000295"]["data"]["L1分类"] == "变更A"
+    assert after["16:NC20260601000303"]["data"]["L1分类"] == "新行1"  # 保留首行
+    assert "__duplicate_key__" in after["16:NC20260601000303"]["conflicts"]
+    assert after["16:NC20260601000295"]["data"]["L1分类"] == "变更A"
 
 
 # ------------------------------------------------------------- 类型策略
@@ -424,9 +427,9 @@ async def test_type_error_strict_blocks_and_tolerant_marks(tmp_path):
     assert report["type_errors"] == 1
     assert report["inserted"] == 3
     row_map = {r["row_key"]: r for r in db.rev0_rows[aid]}
-    assert row_map["X2"]["data"]["数量"] is None
-    assert row_map["X2"]["conflicts"]["数量"] == "type_error:abc"
-    assert row_map["X1"]["data"]["数量"] == 3
+    assert row_map["2:X2"]["data"]["数量"] is None
+    assert row_map["2:X2"]["conflicts"]["数量"] == "type_error:abc"
+    assert row_map["2:X1"]["data"]["数量"] == 3
 
 
 # ------------------------------------------------------------- 预览 TTL
@@ -500,8 +503,8 @@ async def test_execute_append_ordinal_continues_after_existing(tmp_path):
     )
     rows = {r["row_key"]: r for r in db.rev0_rows[aid]}
     # B.xlsx 新 MOP 两行（文件内第 4/5 数据行）→ ordinal 12/13（8 存量 + 前 3 行）
-    assert rows["NC20260601000401"]["ordinal"] == 12
-    assert rows["NC20260601000402"]["ordinal"] == 13
+    assert rows["16:NC20260601000401"]["ordinal"] == 12
+    assert rows["16:NC20260601000402"]["ordinal"] == 13
 
 
 async def test_preview_token_binding_mismatch_404(tmp_path):

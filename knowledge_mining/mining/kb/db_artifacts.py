@@ -50,11 +50,21 @@ def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
 
+def _encode_key_parts(parts: list[str]) -> str:
+    """主键值段 → 长度前缀编码（无歧义可逆）：单列 ``3:ABC``，多列直接拼接
+    ``5:MOP-11:A``。codex二审批号：'/' 直拼下 (A/B,C) 与 (A,B/C) 同键（碰撞），
+    且含 '/' 的键值会破坏 REST 行地址路由——长度前缀两者都消除。导入向导
+    artifact_import_service._row_key 复用同一编码，保证追加 UPSERT 与
+    set_primary_key 重算的键同构。"""
+    return "".join(f"{len(s)}:{s}" for s in parts)
+
+
 def _row_key_value(data: dict[str, Any], column_ids: list[str]) -> str:
-    """主键值拼接：None→空串；多列 '/' 连接；无主键由调用方生成 uuid。"""
+    """主键值拼接：None→空串；多列长度前缀编码（见 _encode_key_parts）；
+    无主键由调用方生成 uuid。"""
     if not column_ids:
         return uuid.uuid4().hex
-    return "/".join(
+    return _encode_key_parts(
         "" if data.get(c) is None else str(data.get(c)) for c in column_ids
     )
 
@@ -343,6 +353,17 @@ class ArtifactDB:
             row = await cur.fetchone()
             return str(row["domain"]) if row else None
 
+    async def user_in_domain(self, user_id: str, domain_id: str) -> bool:
+        """当前域绑定存在性（codex二审批号⑧）：非 admin 成员路径的域外拦截
+        依据——撤销域绑定后成员行残留不得继续放行（404 反探测口径，
+        与 KB 面硬边界对齐）。admin 路径不走此检查（site/domain admin 自证）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 FROM user_domains WHERE user_id = %s AND domain = %s",
+                (user_id, domain_id),
+            )
+            return await cur.fetchone() is not None
+
     # ------------------------------------------------------------ 生命周期
 
     async def publish(
@@ -539,7 +560,12 @@ class ArtifactDB:
     async def ensure_draft(self, artifact_id: str) -> dict[str, Any]:
         """设计态编辑统一入口（61号 §4.3）：draft_open=FALSE 且 current>0 →
         checkout（current→rev0 复制）再置 TRUE；draft_open=FALSE 且 current=0
-        （从未发布）直接置 TRUE（rev0 即工作区）。幂等。"""
+        （从未发布）直接置 TRUE（rev0 即工作区）。幂等。
+
+        codex二审批号⑥裁定：checkout **不推进 updated_at**——rev0 是 current
+        的逐字节副本，用户可见内容未变；若推进，发布后首次编辑（携带发布时
+        token）会在 db 层原子校验被自己的 ensure_draft touch 误杀（恒 409）。
+        乐观锁令牌只随真实内容变更前进（写行/改列/发布族）。"""
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 cur = await conn.execute(
@@ -563,7 +589,7 @@ class ArtifactDB:
                         )
                     cur = await conn.execute(
                         """UPDATE kb_artifacts
-                           SET draft_open = TRUE, updated_at = now()
+                           SET draft_open = TRUE
                            WHERE artifact_id = %s
                            RETURNING artifact_id, domain_id, kind, title, description,
                                      usage_note, owner_user_id, status,
@@ -594,9 +620,18 @@ class ArtifactDB:
 
     async def upsert_column(
         self, artifact_id: str, column_id: str, fields: dict[str, Any],
+        *, rename_from: str | None = None,
     ) -> dict[str, Any]:
         """PATCH 式列变更。主键变更必须走 set_primary_key（要重算 row_key），
-        is_primary_key 不在白名单。"""
+        is_primary_key 不在白名单。
+
+        codex二审两项：①enum_values/alias 走 ``%(key)s::jsonb`` 的分支必须
+        传 _json(val)——原生 list 会被 psycopg 适配成 text[] ``'{old}'``，
+        ::jsonb 非法；②列改名（rename_from=旧名）在同一事务内迁移 rev0 行
+        data 键（用例⑨闭环：Java/前端按新 schema 键名读数，旧键残留=读空；
+        已发布快照不回改——旧版快照旧键+旧 schema 自洽，读取侧经 alias 映射
+        闭环，Java 无需改）。本方法恒推进 kb_artifacts.updated_at（乐观锁
+        令牌随 schema 变更前进）。"""
         allowed = {"column_name", "column_type", "enum_values", "is_indexed",
                    "ordinal", "alias"}
         sets: list[str] = []
@@ -609,9 +644,12 @@ class ArtifactDB:
             key = f"f{len(params)}"
             if col in ("enum_values", "alias"):
                 sets.append(f"{col} = %({key})s::jsonb")
+                params[key] = _json(val)
             else:
                 sets.append(f"{col} = %({key})s")
-            params[key] = val
+                params[key] = val
+        if rename_from is not None and "column_name" not in fields:
+            raise ArtifactError("invalid_column_field")
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 cur = await conn.execute(
@@ -635,6 +673,16 @@ class ArtifactDB:
                         + " WHERE artifact_id = %(a)s AND column_id = %(c)s",
                         params,
                     )
+                if rename_from is not None:
+                    await self._rename_data_keys(
+                        conn, artifact_id, rename_from,
+                        str(fields["column_name"]),
+                    )
+                await conn.execute(
+                    "UPDATE kb_artifacts SET updated_at = now()"
+                    " WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
                 cur = await conn.execute(
                     """SELECT artifact_id, column_id, column_name, column_type,
                               enum_values, is_primary_key, is_indexed, alias, status,
@@ -647,6 +695,36 @@ class ArtifactDB:
                 if row is None:
                     raise ArtifactError("invalid_column_field")
                 return dict(row)
+
+    async def rename_column_data_keys(
+        self, artifact_id: str, old_name: str, new_name: str,
+    ) -> int:
+        """列改名后独立迁移 rev0 行 data 键（旧键值原样搬到新键）。常态路径
+        经 upsert_column(rename_from=...) 在同一事务内完成；本方法留给补账/
+        测试直调。只迁 rev0——已发布快照永不回改（见 upsert_column 注释）。
+        返回迁移行数。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """UPDATE kb_table_rows
+                   SET data = data - %(old)s
+                       || jsonb_build_object(%(new)s, data->%(old)s)
+                   WHERE artifact_id = %(a)s AND revision = 0 AND data ? %(old)s""",
+                {"old": old_name, "new": new_name, "a": artifact_id},
+            )
+            return int(cur.rowcount or 0)
+
+    @staticmethod
+    async def _rename_data_keys(
+        conn: Any, artifact_id: str, old_name: str, new_name: str,
+    ) -> None:
+        """upsert_column 事务内共用的迁键 SQL（与 rename_column_data_keys 同句）。"""
+        await conn.execute(
+            """UPDATE kb_table_rows
+               SET data = data - %(old)s
+                   || jsonb_build_object(%(new)s, data->%(old)s)
+               WHERE artifact_id = %(a)s AND revision = 0 AND data ? %(old)s""",
+            {"old": old_name, "new": new_name, "a": artifact_id},
+        )
 
     async def drop_column(self, artifact_id: str, column_id: str) -> None:
         """软删（单调扩展铁律：动存量数据=不动）。同时清 is_primary_key 标记。"""
@@ -689,7 +767,9 @@ class ArtifactDB:
                     raise ArtifactError("unknown_column")
                 pk_names = [id_to_name[c] for c in column_ids]
                 cur = await conn.execute(
-                    """SELECT row_key, data FROM kb_table_rows
+                    """SELECT row_key, data, provenance, conflicts, ordinal,
+                              updated_by
+                       FROM kb_table_rows
                        WHERE artifact_id = %s AND revision = 0 FOR UPDATE""",
                     (artifact_id,),
                 )
@@ -731,7 +811,9 @@ class ArtifactDB:
         conn: Any, artifact_id: str,
         rows: list[dict[str, Any]], remap: dict[str, str],
     ) -> None:
-        """把被改键的行按新 row_key 原样重插（data/provenance 不动）。"""
+        """把被改键的行按新 row_key 原样重插（codex二审批号③：SELECT 已补全
+        provenance/conflicts/ordinal/updated_by——重插完整保留来源账与质量标记，
+        只有 row_key 换新、updated_at=now()）。"""
         to_insert = [
             {
                 "row_key": remap[r["row_key"]],
@@ -739,6 +821,7 @@ class ArtifactDB:
                 "provenance": _json(r.get("provenance") or []),
                 "conflicts": _json(r.get("conflicts") or {}),
                 "ordinal": r.get("ordinal") or 0,
+                "updated_by": str(r.get("updated_by") or ""),
             }
             for r in rows if r["row_key"] in remap
         ]
@@ -749,13 +832,14 @@ class ArtifactDB:
                 flat.extend([
                     artifact_id, item["row_key"], item["data"],
                     item["provenance"], item["conflicts"], item["ordinal"],
+                    item["updated_by"],
                 ])
             await conn.execute(
                 """INSERT INTO kb_table_rows
                    (artifact_id, revision, row_key, data, provenance, conflicts,
                     ordinal, updated_at, updated_by)
                    VALUES """ + ", ".join(
-                       ["(%s, 0, %s, %s, %s, %s, %s, now(), '')"] * len(chunk),
+                       ["(%s, 0, %s, %s, %s, %s, %s, now(), %s)"] * len(chunk),
                    ),
                 flat,
             )
@@ -763,7 +847,9 @@ class ArtifactDB:
     async def replace_columns_for_artifact(
         self, artifact_id: str, columns: list[dict[str, Any]],
     ) -> None:
-        """首次导入建列（删旧插新；draft 态，无历史列则等价全建）。"""
+        """首次导入建列（删旧插新；draft 态，无历史列则等价全建）。
+        codex二审批号⑥c：schema 变更路径必须推进 updated_at——否则旧乐观锁
+        令牌永远有效。"""
         for col in columns:
             if col.get("column_type") not in _VALID_COLUMN_TYPES:
                 raise ArtifactError("invalid_column_type")
@@ -785,6 +871,7 @@ class ArtifactDB:
                          bool(col.get("is_indexed", False)),
                          _json(col.get("alias") or []), int(col.get("ordinal", 0))),
                     )
+                await self._touch_in_conn(conn, artifact_id)
 
     # ------------------------------------------------------------------ 行
 
@@ -844,41 +931,80 @@ class ArtifactDB:
                         updated += 1
         return {"inserted": inserted, "updated": updated}
 
+    async def _assert_expected_updated_at(
+        self, conn: Any, artifact_id: str, expected_updated_at: Any,
+    ) -> None:
+        """写路径乐观锁权威校验（codex二审批号⑥）：FOR UPDATE 锁 kb_artifacts
+        行 → 全精度比对 updated_at（PG TIMESTAMPTZ 微秒）→ 失配 stale_artifact。
+        service 层 _check_freshness 只是前置快检（体验），此处才是并发权威。"""
+        if expected_updated_at is None:
+            return
+        cur = await conn.execute(
+            "SELECT updated_at FROM kb_artifacts WHERE artifact_id = %s FOR UPDATE",
+            (artifact_id,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise ArtifactError("artifact_not_found")
+        if row["updated_at"] != expected_updated_at:
+            raise ArtifactError("stale_artifact")
+
+    @staticmethod
+    async def _touch_in_conn(conn: Any, artifact_id: str) -> None:
+        await conn.execute(
+            "UPDATE kb_artifacts SET updated_at = now() WHERE artifact_id = %s",
+            (artifact_id,),
+        )
+
     async def update_cell(
         self, artifact_id: str, row_key: str, column: str,
-        value: Any, updated_by: str,
+        value: Any, updated_by: str, expected_updated_at: Any = None,
     ) -> dict[str, Any] | None:
-        """单格更新（jsonb_set），只动 rev0。行不存在返回 None。"""
+        """单格更新（jsonb_set），只动 rev0。行不存在返回 None。
+        expected_updated_at 见 _assert_expected_updated_at（原子校验+touch 同事务）。"""
         async with self._pool.connection() as conn:
-            cur = await conn.execute(
-                """UPDATE kb_table_rows
-                   SET data = jsonb_set(data, ARRAY[%s], %s::jsonb),
-                       updated_at = now(), updated_by = %s
-                   WHERE artifact_id = %s AND revision = 0 AND row_key = %s
-                   RETURNING row_key, data, provenance, conflicts, ordinal""",
-                (column, _json(value), updated_by, artifact_id, row_key),
-            )
-            row = await cur.fetchone()
-            return dict(row) if row else None
+            async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at)
+                cur = await conn.execute(
+                    """UPDATE kb_table_rows
+                       SET data = jsonb_set(data, ARRAY[%s], %s::jsonb),
+                           updated_at = now(), updated_by = %s
+                       WHERE artifact_id = %s AND revision = 0 AND row_key = %s
+                       RETURNING row_key, data, provenance, conflicts, ordinal""",
+                    (column, _json(value), updated_by, artifact_id, row_key),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                await self._touch_in_conn(conn, artifact_id)
+                return dict(row)
 
     async def update_cell_conflict(
         self, artifact_id: str, row_key: str, column: str,
-        marker: str, updated_by: str,
+        marker: str, updated_by: str, expected_updated_at: Any = None,
     ) -> dict[str, Any] | None:
         """类型校验失败的单格更新（§7.2，与导入 tolerant 路径对称）：该格置
-        null + conflicts[column]=marker，不阻断。行不存在返回 None。"""
+        null + conflicts[column]=marker，不阻断。行不存在返回 None。
+        expected_updated_at 见 _assert_expected_updated_at。"""
         async with self._pool.connection() as conn:
-            cur = await conn.execute(
-                """UPDATE kb_table_rows
-                   SET data = jsonb_set(data, ARRAY[%s], 'null'::jsonb),
-                       conflicts = conflicts || jsonb_build_object(%s, %s),
-                       updated_at = now(), updated_by = %s
-                   WHERE artifact_id = %s AND revision = 0 AND row_key = %s
-                   RETURNING row_key, data, provenance, conflicts, ordinal""",
-                (column, column, marker, updated_by, artifact_id, row_key),
-            )
-            row = await cur.fetchone()
-            return dict(row) if row else None
+            async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at)
+                cur = await conn.execute(
+                    """UPDATE kb_table_rows
+                       SET data = jsonb_set(data, ARRAY[%s], 'null'::jsonb),
+                           conflicts = conflicts || jsonb_build_object(%s, %s),
+                           updated_at = now(), updated_by = %s
+                       WHERE artifact_id = %s AND revision = 0 AND row_key = %s
+                       RETURNING row_key, data, provenance, conflicts, ordinal""",
+                    (column, column, marker, updated_by, artifact_id, row_key),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                await self._touch_in_conn(conn, artifact_id)
+                return dict(row)
 
     async def get_row(
         self, artifact_id: str, revision: int, row_key: str,
@@ -897,22 +1023,28 @@ class ArtifactDB:
     async def batch_assign(
         self, artifact_id: str, column: str, value: Any,
         where_clauses: list[dict[str, Any]], updated_by: str,
+        expected_updated_at: Any = None,
     ) -> int:
         """批量赋值一条 SQL：data || '{"列":"值"}'（61号 §7.2）。返回命中行数。
         where_clauses=[{column, op, value}]，op 白名单见 _VALID_FILTER_OPS，
-        列名与值全参数化。
+        列名与值全参数化。expected_updated_at 见 _assert_expected_updated_at。
         """
         conds, filter_params = self._build_row_filters(where_clauses)
         # 占位符顺序 = SQL 出现顺序：SET 的 jsonb / updated_by / WHERE 的 artifact_id
         params = [_json({column: value}), updated_by, artifact_id, *filter_params]
         async with self._pool.connection() as conn:
-            cur = await conn.execute(
-                """UPDATE kb_table_rows
-                   SET data = data || %s::jsonb, updated_at = now(), updated_by = %s
-                   WHERE artifact_id = %s AND revision = 0""" + conds,
-                params,
-            )
-            return int(cur.rowcount or 0)
+            async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at)
+                cur = await conn.execute(
+                    """UPDATE kb_table_rows
+                       SET data = data || %s::jsonb, updated_at = now(),
+                           updated_by = %s
+                       WHERE artifact_id = %s AND revision = 0""" + conds,
+                    params,
+                )
+                await self._touch_in_conn(conn, artifact_id)
+                return int(cur.rowcount or 0)
 
     @staticmethod
     def _build_row_filters(where_clauses: list[dict[str, Any]]) -> tuple[str, list[Any]]:
@@ -948,15 +1080,24 @@ class ArtifactDB:
                 params.extend([col, str(val)])
         return " AND " + " AND ".join(parts), params
 
-    async def delete_row(self, artifact_id: str, row_key: str) -> bool:
+    async def delete_row(
+        self, artifact_id: str, row_key: str, expected_updated_at: Any = None,
+    ) -> bool:
+        """expected_updated_at 见 _assert_expected_updated_at（原子校验+touch）。"""
         async with self._pool.connection() as conn:
-            cur = await conn.execute(
-                """DELETE FROM kb_table_rows
-                   WHERE artifact_id = %s AND revision = 0 AND row_key = %s
-                   RETURNING row_key""",
-                (artifact_id, row_key),
-            )
-            return await cur.fetchone() is not None
+            async with conn.transaction():
+                await self._assert_expected_updated_at(
+                    conn, artifact_id, expected_updated_at)
+                cur = await conn.execute(
+                    """DELETE FROM kb_table_rows
+                       WHERE artifact_id = %s AND revision = 0 AND row_key = %s
+                       RETURNING row_key""",
+                    (artifact_id, row_key),
+                )
+                hit = await cur.fetchone() is not None
+                if hit:
+                    await self._touch_in_conn(conn, artifact_id)
+                return hit
 
     async def list_rows(
         self, artifact_id: str, revision: int, page: int = 1, size: int = 50,
@@ -1072,8 +1213,13 @@ class ArtifactDB:
     ) -> list[str]:
         """按 is_indexed 列生成类型化表达式索引：int/float 加 ::numeric cast
         （空串先 NULLIF，防 cast 崩）；其余按文本。命名 idx_kbtr_{art}_{col}。
-        revision 仅为调用方语义（61号：发布后建）；索引列前缀含 artifact_id+
-        revision，本制品任意版本查询共用同一索引。返回创建的索引名列表。
+        revision 仅为调用方语义（61号：发布后建）；索引列含 revision，本制品
+        任意版本查询共用同一索引。返回创建的索引名列表。
+
+        codex二审批号⑤：表达式必须限定 ``WHERE artifact_id = <本制品>``——
+        否则 CREATE INDEX 对 kb_table_rows 全表行求 cast，其他制品同名列的
+        脏值（如 text 列里的非数文本）会当场炸掉索引创建（进而炸发布）。
+        部分索引不影响跨版本共用语义（过滤列恒为同一 artifact_id 字面量）。
         """
         created: list[str] = []
         if not indexed_columns:
@@ -1088,19 +1234,26 @@ class ArtifactDB:
                     expr = sql.SQL("(data->{})").format(col_ref)
                 stmt = sql.SQL(
                     "CREATE INDEX IF NOT EXISTS {} ON kb_table_rows"
-                    " (artifact_id, revision, {})"
-                ).format(sql.Identifier(name), expr)
+                    " (revision, {}) WHERE artifact_id = {}"
+                ).format(
+                    sql.Identifier(name), expr, sql.Literal(artifact_id),
+                )
                 await conn.execute(stmt)
                 created.append(name)
         return created
 
     async def drop_draft_expression_indexes(self, artifact_id: str) -> None:
         """清理本制品全部动态索引（重发布前——列类型/名字变了旧定义会残留，
-        CREATE INDEX IF NOT EXISTS 不会替换既有索引）。"""
-        pattern = (
-            f"idx_kbtr_{artifact_id}_%"
+        CREATE INDEX IF NOT EXISTS 不会替换既有索引）。
+
+        codex二审批号⑤：转义必须只作用于前缀——旧写法把末尾通配符 % 一并
+        转义成 ``\\%``（字面 %），清理恒空匹配=旧索引永不回收。先转义前缀
+        （artifact_id 内的 ``_`` 仍按字面匹配，正确）再追加未转义 ``%``。"""
+        prefix = (
+            f"idx_kbtr_{artifact_id}_"
             .replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         )
+        pattern = prefix + "%"
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT indexname FROM pg_indexes
