@@ -584,12 +584,16 @@ async def list_import_batches(
 async def list_columns(
     artifact_id: str,
     include_dropped: bool = Query(default=False),
+    runtime: bool = Query(default=False),
     user: dict[str, Any] = Depends(current_user),
     svc: ArtifactService = Depends(get_artifact_service),
 ):
+    """runtime=true → 发布定格快照列（revisions.schema_json，viewer+ 可读，
+    codex二审功能项②：运行态表头与设计态草稿解耦）。"""
     try:
         return {"columns": await svc.list_columns(
-            user=user, artifact_id=artifact_id, include_dropped=include_dropped)}
+            user=user, artifact_id=artifact_id,
+            include_dropped=include_dropped, runtime=runtime)}
     except ArtifactError as exc:
         raise _map_error(exc) from None
 

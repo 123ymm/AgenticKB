@@ -211,11 +211,16 @@ export function useArtifactsApi() {
     },
 
     // ── 列定义 ──
+    /** options.includeDropped=含软删列（设计态）；options.runtime=发布定格
+     * 快照列（revisions.schema_json，viewer+ 可读——运行态表头口径）。 */
     async listColumns(
-      artifactId: string, includeDropped = false,
+      artifactId: string, options?: { includeDropped?: boolean; runtime?: boolean },
     ): Promise<ArtifactColumn[]> {
+      const params: Record<string, unknown> = {}
+      if (options?.includeDropped) params.include_dropped = true
+      if (options?.runtime) params.runtime = true
       const { data } = await client.get(`/api/artifacts/${artifactId}/table/columns`, {
-        params: includeDropped ? { include_dropped: true } : undefined,
+        params: Object.keys(params).length > 0 ? params : undefined,
       })
       return data.columns ?? []
     },

@@ -60,7 +60,7 @@
           <ArtifactImportWizard
             :artifact-id="artifactId"
             :active="activeTab === 'design'"
-            @imported="onDesignChanged"
+            @imported="reloadAll"
           />
           <el-divider content-position="left">列定义</el-divider>
           <ArtifactSchemaPanel
@@ -68,7 +68,7 @@
             :can-write="canWrite"
             :columns="artifact.schema"
             :expected-updated-at="artifact.updated_at"
-            @changed="refreshAfterMutation"
+            @changed="reloadAll"
           />
           <el-divider content-position="left">数据编辑</el-divider>
           <ArtifactRowsPanel
@@ -145,7 +145,7 @@
           :can-write="canWrite"
           :current-revision="artifact.current_revision"
           :expected-updated-at="artifact.updated_at"
-          @changed="refreshAfterMutation"
+          @changed="reloadAll"
         />
       </el-tab-pane>
     </el-tabs>
@@ -182,7 +182,7 @@
       :usage-note="artifact?.usage_note || ''"
       :draft-open="artifact?.draft_open"
       :current-revision="artifact?.current_revision ?? 0"
-      @published="onPublished"
+      @published="reloadAll"
       @changed="reload"
     />
   </div>
@@ -201,7 +201,7 @@ import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
 import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
 import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.vue'
 import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
-import type { ArtifactColumn, ArtifactDetail, ArtifactRow, ImportReport, PublishResult } from '@/types/artifacts'
+import type { ArtifactColumn, ArtifactDetail, ArtifactRow } from '@/types/artifacts'
 
 const props = defineProps<{ artifactId: string }>()
 
@@ -212,13 +212,14 @@ const loading = ref(false)
 const loadError = ref('')
 const activeTab = ref<'design' | 'runtime' | 'members' | 'versions'>('design')
 
-// 运行态只读行（非 draft，服务端分页）
+// 运行态只读行（非 draft，服务端分页）+ 运行态列（发布定格快照，懒加载）
 const runtimeRows = ref<ArtifactRow[]>([])
+const runtimeColumns = ref<ArtifactColumn[]>([])
 const rowsTotal = ref(0)
 const rowsPage = ref(1)
 const rowsPageSize = 20
 const rowsLoading = ref(false)
-const rowsLoaded = ref(false)
+const runtimeLoaded = ref(false)
 
 // 版本面板（发布后命令式刷新 revisions）+ 行面板（跨面板变更后刷新行）
 const versionsPanel = ref<InstanceType<typeof ArtifactVersionsPanel> | null>(null)
@@ -240,9 +241,6 @@ const isOwner = computed(() => artifact.value?.my_role === 'owner')
 const hasPendingChanges = computed(() =>
   !!artifact.value && (artifact.value.draft_open || artifact.value.current_revision === 0))
 
-/** 只读行列 = 详情 schema（viewer 已由后端回落到发布快照列）。 */
-const runtimeColumns = computed<ArtifactColumn[]>(() => artifact.value?.schema ?? [])
-
 async function reload() {
   loading.value = true
   loadError.value = ''
@@ -256,22 +254,32 @@ async function reload() {
   }
 }
 
-/** 跨面板变更（导入/列变更/回滚/发布）后：重载详情（乐观锁令牌+schema）并刷新行面板。 */
-async function refreshAfterMutation() {
+/**
+ * 统一刷新（codex二审功能项②）：详情（乐观锁令牌+设计态 schema）+ 运行态
+ * schema/行数据 + 行编辑面板 + 版本面板。导入/列变更/回滚/discard/发布/
+ * 停用/恢复后一律走这里——原先分散的局部刷新是「回滚后部分缓存不刷新」的根因。
+ */
+async function reloadAll() {
   await reload()
-  rowsPanel.value?.loadRows()
+  if (runtimeLoaded.value) {
+    await Promise.all([loadRuntimeSchema(), loadRuntimeRows()])
+  }
+  rowsPanel.value?.loadRows?.()
+  versionsPanel.value?.loadRevisions?.()
 }
 
-/** 导入向导回报：schema/行数都变了——重载详情并刷新行编辑面板。 */
-async function onDesignChanged(_report: ImportReport) {
-  await refreshAfterMutation()
-}
-
-/** 发布成功：详情 + 运行态 + 行面板 + 版本面板刷新。 */
-async function onPublished(_result: PublishResult) {
-  await refreshAfterMutation()
-  if (rowsLoaded.value) await loadRuntimeRows()
-  versionsPanel.value?.loadRevisions()
+/**
+ * 运行态列 = 发布定格快照（GET /table/columns?runtime=true 读
+ * revisions.schema_json）——设计态草稿新列不再漏进运行态表头（空列）。
+ */
+async function loadRuntimeSchema() {
+  try {
+    runtimeColumns.value = await api.listColumns(
+      props.artifactId, { runtime: true })
+  } catch (error) {
+    runtimeColumns.value = []
+    ElMessage.error(`加载运行态列定义失败：${await apiErrorDetail(error)}`)
+  }
 }
 
 async function loadRuntimeRows() {
@@ -282,7 +290,6 @@ async function loadRuntimeRows() {
     })
     runtimeRows.value = page.rows
     rowsTotal.value = page.total
-    rowsLoaded.value = true
   } catch (error) {
     ElMessage.error(`加载运行态数据失败：${await apiErrorDetail(error)}`)
   } finally {
@@ -290,9 +297,14 @@ async function loadRuntimeRows() {
   }
 }
 
-// tab 首次切入再拉数据（运行态懒加载；成员/版本面板走 el-tab-pane lazy 自加载）
+/** 运行态 tab 首次切入：schema + 行一起拉（懒加载；成员/版本面板走 lazy 自加载）。 */
+function loadRuntimeData() {
+  runtimeLoaded.value = true
+  void Promise.all([loadRuntimeSchema(), loadRuntimeRows()])
+}
+
 watch(activeTab, (tab) => {
-  if (tab === 'runtime' && !rowsLoaded.value) loadRuntimeRows()
+  if (tab === 'runtime' && !runtimeLoaded.value) loadRuntimeData()
 })
 
 function onRowsPageChange(page: number) {
@@ -335,7 +347,7 @@ async function saveMeta() {
   }
 }
 
-/** 简单生命周期动作（停用/恢复/丢弃）：确认 → POST → 重载。 */
+/** 简单生命周期动作（停用/恢复/丢弃）：确认 → POST → 统一刷新（reloadAll）。 */
 async function lifecycleAction(fn: () => Promise<unknown>, confirmText: string) {
   try {
     await ElMessageBox.confirm(confirmText, { type: 'warning' })
@@ -345,9 +357,7 @@ async function lifecycleAction(fn: () => Promise<unknown>, confirmText: string) 
   try {
     await fn()
     ElMessage.success('操作成功')
-    await reload()
-    if (rowsLoaded.value) await loadRuntimeRows()
-    versionsPanel.value?.loadRevisions()
+    await reloadAll()
   } catch (error) {
     ElMessage.error(await apiErrorDetail(error))
   }
@@ -396,6 +406,8 @@ function displayValue(value: unknown): string {
 }
 
 onMounted(reload)
+
+defineExpose({ reloadAll })
 </script>
 
 <style scoped>

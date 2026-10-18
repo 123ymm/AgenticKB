@@ -213,7 +213,7 @@ const displayedColumns = computed(() => includeDropped.value
 async function onIncludeDropped(): Promise<void> {
   if (!includeDropped.value) return
   try {
-    const all = await api.listColumns(props.artifactId, true)
+    const all = await api.listColumns(props.artifactId, { includeDropped: true })
     droppedColumns.value = all.filter(c => c.status === 'dropped')
   } catch (error) {
     includeDropped.value = false

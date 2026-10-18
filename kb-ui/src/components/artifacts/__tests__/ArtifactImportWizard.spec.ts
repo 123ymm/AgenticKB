@@ -61,8 +61,31 @@ const previewEnvelope = {
   preview_token: 'tok_1234567890ab',
   preview: {
     file_name: 'A.xlsx',
-    sheets: ['Sheet1', 'Sheet2'],
+    sheets: [
+      {
+        name: 'Sheet1',
+        columns: [
+          { source_name: 'MOP', inferred_type: 'text', enum_candidates: [] },
+          { source_name: 'L1分类', inferred_type: 'enum', enum_candidates: ['数据业务', '网络维护', '云资源'] },
+        ],
+        sample_rows: [
+          { MOP: 'NC001', L1分类: '数据业务' },
+          { MOP: 'NC002', L1分类: '网络维护' },
+        ],
+      },
+      {
+        name: 'Sheet2',
+        columns: [
+          { source_name: 'MOP编号', inferred_type: 'text', enum_candidates: [] },
+          { source_name: '是否夜间执行', inferred_type: 'enum', enum_candidates: ['是', '否'] },
+        ],
+        sample_rows: [
+          { MOP编号: 'NC001', 是否夜间执行: '是' },
+        ],
+      },
+    ],
     default_sheet: 'Sheet1',
+    // 顶层兼容口径 = 默认 sheet 引用
     columns: [
       { source_name: 'MOP', inferred_type: 'text', enum_candidates: [] },
       { source_name: 'L1分类', inferred_type: 'enum', enum_candidates: ['数据业务', '网络维护', '云资源'] },
@@ -133,6 +156,43 @@ describe('ArtifactImportWizard', () => {
     expect(vm.mappings[1].enumValues).toEqual(['数据业务', '网络维护', '云资源'])
     expect(vm.mappingConfirmed).toBe(false)
     expect(wrapper.text()).toContain('② 列映射')
+  })
+
+  it('rebuilds mappings from the selected sheet on switch (multi-sheet preview)', async () => {
+    const wrapper = mountWizard()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as WizardVm
+    await vm.doUpload(new File(['x'], 'A.xlsx'))
+    await flushPromises()
+
+    // 上传后默认 Sheet1：映射行 = Sheet1 列
+    expect(vm.sheet).toBe('Sheet1')
+    expect(vm.mappings.map(m => m.source)).toEqual(['MOP', 'L1分类'])
+    expect(vm.mappingConfirmed).toBe(false)
+
+    // 切到 Sheet2：映射行重建为第二 sheet 的异构表头，类型回推断值
+    vm.sheet = 'Sheet2'
+    await flushPromises()
+    expect(vm.mappings.map(m => m.source)).toEqual(['MOP编号', '是否夜间执行'])
+    expect(vm.mappings[1].columnType).toBe('enum')
+    expect(vm.mappings[1].enumValues).toEqual(['是', '否'])
+    expect(vm.mappings.every(m => !m.isPrimaryKey)).toBe(true)
+
+    // 确认后进卡③，再切回 Sheet1 → 重建 + 退回卡② 重新确认
+    vm.confirmMapping()
+    expect(vm.mappingConfirmed).toBe(true)
+    vm.sheet = 'Sheet1'
+    await flushPromises()
+    expect(vm.mappings.map(m => m.source)).toEqual(['MOP', 'L1分类'])
+    expect(vm.mappingConfirmed).toBe(false)
+
+    // 导入 plan 带当前选中 sheet
+    vm.confirmMapping()
+    await vm.runImport()
+    await flushPromises()
+    expect(state.api.importTable).toHaveBeenCalledWith('art-1', expect.objectContaining({
+      plan: expect.objectContaining({ sheet: 'Sheet1' }),
+    }))
   })
 
   it('auto-maps same-name columns and reports missing schema columns in append mode', async () => {

@@ -139,8 +139,15 @@ describe('artifacts API', () => {
       conflict_policy: { type_error: 'tolerant' },
     })
 
-    await api.listColumns('a1', true)
+    await api.listColumns('a1', { includeDropped: true })
     expect(state.requests[3].config.params).toEqual({ include_dropped: true })
+
+    await api.listColumns('a1', { runtime: true })
+    expect(state.requests[4].config.params).toEqual({ runtime: true })
+
+    // 无选项 → 不附带查询参数
+    await api.listColumns('a1')
+    expect(state.requests[5].config.params).toBeUndefined()
   })
 
   it('passes optimistic-lock fields and row query params through', async () => {

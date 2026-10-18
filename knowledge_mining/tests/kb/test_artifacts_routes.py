@@ -250,6 +250,55 @@ async def test_list_revisions_runtime_readable(env):
 
 # ------------------------------------------------------------- 错误映射
 
+async def test_list_columns_runtime_returns_published_snapshot(env):
+    """codex二审功能项②路由级：?runtime=true → 发布定格快照列
+    （revisions.schema_json，viewer+ 可读）——设计态草稿新列不漏进运行态；
+    viewer 默认（设计态）403、runtime 200。"""
+    aid = await _create_artifact(env)
+    token = await _upload_a(env, aid)
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/table/import",
+        json={"preview_token": token, "plan": {"column_ops": [
+            {"source": "MOP", "action": "new", "target_name": "MOP",
+             "column_type": "text", "is_primary_key": True},
+            {"source": "L1分类", "action": "new", "target_name": "L1分类",
+             "column_type": "text"},
+        ]}},
+    )
+    assert r.status_code == 200, r.text
+    await env.client.patch(f"/api/artifacts/{aid}", json={"usage_note": "查责任域"})
+    r = await env.client.post(
+        f"/api/artifacts/{aid}/publish", json={"change_summary": "r1"})
+    assert r.status_code == 200, r.text
+
+    # 设计态草稿加新列（未发布）——默认口径可见，runtime 口径不可见
+    await env.db.ensure_draft(aid)
+    env.db.columns[aid].append({
+        "column_id": "c_draft", "column_name": "草稿新列", "column_type": "text",
+        "is_indexed": False, "is_primary_key": False, "ordinal": 3,
+        "status": "active",
+    })
+    r = await env.client.get(f"/api/artifacts/{aid}/table/columns")
+    assert [c["column_name"] for c in r.json()["columns"]] == ["MOP", "L1分类", "草稿新列"]
+    r = await env.client.get(f"/api/artifacts/{aid}/table/columns?runtime=true")
+    assert r.status_code == 200, r.text
+    assert [c["column_name"] for c in r.json()["columns"]] == ["MOP", "L1分类"]
+
+    # viewer：设计态 403 / runtime 200（运行态快照对全员开放）
+    env.db.members[aid]["u-viewer"] = "viewer"
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{aid}/table/columns")
+    assert r.status_code == 403
+    r = await env.client.get(f"/api/artifacts/{aid}/table/columns?runtime=true")
+    assert r.status_code == 200
+    assert [c["column_name"] for c in r.json()["columns"]] == ["MOP", "L1分类"]
+
+    # 未发布制品 runtime → 空数组（无快照可读）
+    aid2 = await _create_artifact(env)
+    r = await env.client.get(f"/api/artifacts/{aid2}/table/columns?runtime=true")
+    assert r.status_code == 200 and r.json()["columns"] == []
+
+
 async def test_permission_404_and_403_mapping(env):
     aid = await _create_artifact(env)
     env.db.members[aid]["u-viewer"] = "viewer"  # viewer 成员

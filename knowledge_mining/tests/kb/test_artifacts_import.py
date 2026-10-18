@@ -61,6 +61,20 @@ def _write_xlsx(path: Path, header: list[str], rows: list[tuple]) -> bytes:
     return path.read_bytes()
 
 
+def _write_xlsx_multi(
+    path: Path, sheets: list[tuple[str, list[str], list[tuple]]],
+) -> bytes:
+    """多 sheet 文件（codex二审功能项①：异构表头切换 sheet 场景）。"""
+    workbook = Workbook(write_only=True)
+    for name, header, rows in sheets:
+        sheet = workbook.create_sheet(name)
+        sheet.append(header)
+        for row in rows:
+            sheet.append(list(row))
+    workbook.save(str(path))
+    return path.read_bytes()
+
+
 def _make_service() -> tuple[FakeArtifactDB, ArtifactService, ArtifactImportService]:
     db = FakeArtifactDB()
     # codex二审批号⑧：execute_import 经 list_columns/_require_design_session 走
@@ -116,7 +130,7 @@ async def test_parse_upload_infers_types_and_samples(tmp_path):
     out = imp.parse_upload(data, "A.xlsx")
     preview = out["preview"]
     assert preview["file_name"] == "A.xlsx"
-    assert preview["sheets"] == ["Sheet1"]
+    assert [s["name"] for s in preview["sheets"]] == ["Sheet1"]
     assert preview["default_sheet"] == "Sheet1"
     columns = {c["source_name"]: c for c in preview["columns"]}
     # L1分类：distinct 3 且非数值 → enum，候选=distinct 值
@@ -190,6 +204,96 @@ async def test_parse_upload_row_limit(tmp_path, monkeypatch):
     with pytest.raises(ArtifactImportError) as excinfo:
         imp.parse_upload(data, "A.xlsx")
     assert excinfo.value.code == "too_many_rows"
+
+
+# ------------------------------------------- codex二审功能项①：多 sheet 扫描
+
+async def test_parse_upload_scans_all_sheets(tmp_path):
+    """parse_upload 扫全部 sheet：preview.sheets 为 per-sheet 对象
+    [{name, columns, sample_rows}]；顶层 columns/sample_rows 保留默认
+    sheet 引用（向后兼容）。"""
+    _, _, imp = _make_service()
+    data = _write_xlsx_multi(tmp_path / "M.xlsx", [
+        ("Sheet1", A_HEADER, A_ROWS),
+        ("Sheet2", B_HEADER, B_ROWS),
+    ])
+    preview = imp.parse_upload(data, "M.xlsx")["preview"]
+    assert [s["name"] for s in preview["sheets"]] == ["Sheet1", "Sheet2"]
+    sheet2 = preview["sheets"][1]
+    assert [c["source_name"] for c in sheet2["columns"]] == B_HEADER
+    assert sheet2["sample_rows"][0]["MOP编号"] == "NC20260601000295"
+    # 顶层兼容：默认 sheet 的列与样例 + default_sheet 名
+    assert preview["default_sheet"] == "Sheet1"
+    assert [c["source_name"] for c in preview["columns"]] == A_HEADER
+    assert preview["sample_rows"][0]["MOP"] == "NC20260601000295"
+
+
+async def test_parse_upload_secondary_sheet_sampling_budget(tmp_path, monkeypatch):
+    """抽样预算：默认 sheet 200 行、其余 sheet 50 行（护栏常量钉死）。"""
+    import knowledge_mining.mining.kb.services.artifact_import_service as mod
+
+    assert mod.SECONDARY_SHEET_SAMPLE_ROWS == 50
+    assert mod.INFERENCE_SAMPLE_ROWS == 200
+    # 第二 sheet 超 50 行样例仍只保留 ≤50（SAMPLE_ROWS 截断）
+    rows = [(f"NC{i}", "数据业务", f"事项{i}", "是") for i in range(80)]
+    data = _write_xlsx_multi(tmp_path / "M.xlsx", [
+        ("Sheet1", A_HEADER, A_ROWS),
+        ("Sheet2", B_HEADER, rows),
+    ])
+    imp = _make_service()[2]
+    preview = imp.parse_upload(data, "M.xlsx")["preview"]
+    sheet2 = preview["sheets"][1]
+    assert len(sheet2["sample_rows"]) == mod.SAMPLE_ROWS
+
+
+async def test_build_mapping_selects_sheet_headers(tmp_path):
+    """两 sheet 异构表头：build_mapping(sheet=第二) 用第二 sheet 列名合法；
+    用第一 sheet 列名（不在第二 sheet 表头）→ unknown_source_column。"""
+    _, _, imp = _make_service()
+    data = _write_xlsx_multi(tmp_path / "M.xlsx", [
+        ("Sheet1", A_HEADER, A_ROWS),
+        ("Sheet2", B_HEADER, B_ROWS),
+    ])
+    token = imp.parse_upload(data, "M.xlsx")["preview_token"]
+    ops_b = [
+        {"source": "MOP编号", "action": "new", "target_name": "MOP",
+         "column_type": "text", "is_primary_key": True},
+        {"source": "是否夜间执行", "action": "new", "target_name": "是否夜间执行",
+         "column_type": "text"},
+    ]
+    plan = imp.build_mapping(token, sheet="Sheet2", column_ops=ops_b)
+    assert plan["sheet"] == "Sheet2"
+    assert [c["source"] for c in plan["columns"]] == ["MOP编号", "是否夜间执行"]
+    # 第一 sheet 的列名（MOP）不在 Sheet2 表头 → 拒绝（原缺陷的失败口径）
+    with pytest.raises(InvalidOperation) as excinfo:
+        imp.build_mapping(token, sheet="Sheet2", column_ops=A_CREATE_OPS)
+    assert "unknown_source_column" in str(excinfo.value)
+
+
+async def test_execute_import_from_secondary_sheet(tmp_path):
+    """端到端：选第二 sheet 建表导入——行/批次/provenance 都带 Sheet2 口径。"""
+    db, svc, imp = _make_service()
+    art = await svc.create_artifact(user=OWNER, domain_id="plant-a", title="二级表")
+    aid = art["artifact_id"]
+    data = _write_xlsx_multi(tmp_path / "M.xlsx", [
+        ("Sheet1", A_HEADER, A_ROWS),
+        ("Sheet2", B_HEADER, B_ROWS),
+    ])
+    token = imp.parse_upload(data, "M.xlsx")["preview_token"]
+    ops_b = [
+        {"source": "MOP编号", "action": "new", "target_name": "MOP",
+         "column_type": "text", "is_primary_key": True},
+        {"source": "是否夜间执行", "action": "new", "target_name": "是否夜间执行",
+         "column_type": "text"},
+    ]
+    plan = imp.build_mapping(token, sheet="Sheet2", column_ops=ops_b)
+    report = await imp.execute_import(
+        svc, user=OWNER, artifact_id=aid, preview_token=token, plan=plan)
+    assert report["sheet"] == "Sheet2"
+    assert report["inserted"] == len(B_ROWS)
+    assert db.batches[aid][0]["sheet_name"] == "Sheet2"
+    first = db.rev0_rows[aid][0]
+    assert first["provenance"][0]["sheet_name"] == "Sheet2"
 
 
 # ------------------------------------------------------------- 第二步：映射

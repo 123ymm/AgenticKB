@@ -49,7 +49,8 @@ MAX_EXPANDED_BYTES = 200 * 1024 * 1024       # 解压 ≤ 200MB
 MAX_ZIP_MEMBERS = 1_000
 MAX_COLUMNS = 200                            # 单 sheet ≤ 200 列
 MAX_ROWS = 100_000                           # 单 sheet ≤ 10 万行
-INFERENCE_SAMPLE_ROWS = 200                  # 类型推断抽样 ≤ 200 行
+INFERENCE_SAMPLE_ROWS = 200                  # 类型推断抽样 ≤ 200 行（默认 sheet）
+SECONDARY_SHEET_SAMPLE_ROWS = 50             # 其余 sheet 类型推断抽样 ≤ 50 行
 SAMPLE_ROWS = 50                             # 预览样例行 ≤ 50
 ENUM_MAX_DISTINCT = 50                       # distinct ≤ 50 且非全数值 → enum
 PREVIEW_TTL_SECONDS = 3600.0                 # 预览 token 1h
@@ -299,8 +300,8 @@ class ArtifactImportService:
         self, file_bytes: bytes, file_name: str, *,
         artifact_id: str | None = None, uploader: str | None = None,
     ) -> dict[str, Any]:
-        """护栏 → 临时文件 → 默认 sheet 扫描（类型推断+样例）→ 预览登记
-        （绑定 artifact_id+uploader，修复⑬）。routes 侧经 anyio.to_thread
+        """护栏 → 临时文件 → 全部 sheet 扫描（每 sheet 类型推断+样例）→ 预览
+        登记（绑定 artifact_id+uploader，修复⑬）。routes 侧经 anyio.to_thread
         调用（修复⑮：openpyxl 扫描不占事件循环）。"""
         _cleanup_expired_previews()
         _enforce_preview_cap(uploader)
@@ -314,16 +315,19 @@ class ArtifactImportService:
         with open(path, "wb") as handle:
             handle.write(file_bytes)
         try:
-            scan = self._scan_default_sheet(path)
+            sheets = self._scan_all_sheets(path)
         except Exception:
             _remove_file(path)
             raise
+        default = sheets[0]
         _PREVIEW_TOKENS[token] = {
             "path": path,
             "file_name": file_name,
-            "sheets": scan["sheetnames"],
-            "columns": scan["columns"],
-            "sample_rows": scan["sample_rows"],
+            "sheets": sheets,
+            # 顶层 columns/sample_rows = 默认 sheet 引用（向后兼容，codex二审
+            # 功能项①：preview.sheets 改 per-sheet 对象后旧消费者仍可读）
+            "columns": default["columns"],
+            "sample_rows": default["sample_rows"],
             "parsed_at": time.monotonic(),
             "artifact_id": artifact_id,
             "uploader": uploader,
@@ -349,13 +353,20 @@ class ArtifactImportService:
     @staticmethod
     def _preview_payload(preview_token: str) -> dict[str, Any]:
         record = _PREVIEW_TOKENS[preview_token]
+        sheets = record["sheets"]
         return {
             "file_name": record["file_name"],
-            "sheets": list(record["sheets"]),
-            "default_sheet": record["sheets"][0],
+            # codex二审功能项①：sheets 为 per-sheet 对象 [{name, columns,
+            # sample_rows}]；顶层 columns/sample_rows 保留默认 sheet 引用
+            "sheets": [dict(sheet) for sheet in sheets],
+            "default_sheet": sheets[0]["name"],
             "columns": record["columns"],
             "sample_rows": record["sample_rows"],
         }
+
+    @staticmethod
+    def _sheet_names(record: dict[str, Any]) -> list[str]:
+        return [str(sheet["name"]) for sheet in record["sheets"]]
 
     def _require_preview(
         self, preview_token: str, *,
@@ -369,50 +380,74 @@ class ArtifactImportService:
         return record
 
     @staticmethod
-    def _scan_default_sheet(path: str) -> dict[str, Any]:
-        """默认（第一个）sheet 全量扫描：护栏检查 + 类型推断抽样 + 样例行。"""
+    def _scan_all_sheets(path: str) -> list[dict[str, Any]]:
+        """全部 sheet 扫描（codex二审功能项①：只扫默认 sheet 时，切换 sheet
+        后映射仍用首个 sheet 的列 → 异构第二 sheet 导入必失败）。
+
+        每 sheet：护栏检查（列数/行数/公式）+ 类型推断抽样 + 样例行。抽样
+        预算：默认 sheet = INFERENCE_SAMPLE_ROWS（200），其余 sheet =
+        SECONDARY_SHEET_SAMPLE_ROWS（50）——避免宽多 sheet 文件抽样成本翻倍。
+        默认 sheet 空表头 → empty_sheet（原有口径）；其余 sheet 空则保留
+        columns=[] 的占位条目（选中时 build_mapping 重读表头自然报错，不上传
+        整体失败——Excel 常见尾随空 sheet）。行数上限护栏仍按单 sheet 计。
+        """
         workbook = _open_workbook(path)
         try:
-            sheetnames = [str(name) for name in workbook.sheetnames]
-            sheet = workbook[sheetnames[0]]
-            iterator = sheet.iter_rows(values_only=True)
-            header_row = next(iterator, None)
-            if header_row is None:
-                raise ArtifactImportError("empty_sheet")
-            for cell in header_row:
-                if _is_formula(cell):
-                    raise ArtifactImportError("formula_not_allowed")
-            headers = _dedupe_headers(header_row)
-            if len(headers) > MAX_COLUMNS:
-                raise ArtifactImportError("too_many_columns")
-            sample: list[dict[str, Any]] = []
-            data_rows = 0
-            for row in iterator:
-                data_rows += 1
-                if data_rows > MAX_ROWS:
-                    raise ArtifactImportError("too_many_rows")
-                for cell in row:
-                    if _is_formula(cell):
-                        raise ArtifactImportError("formula_not_allowed")
-                if len(sample) < INFERENCE_SAMPLE_ROWS:
-                    sample.append(
-                        {name: value for name, value in zip(headers, row)})
-            columns = []
-            for name in headers:
-                inferred, candidates = _infer_column_type(
-                    [row.get(name) for row in sample])
-                columns.append({
-                    "source_name": name,
-                    "inferred_type": inferred,
-                    "enum_candidates": candidates if inferred == "enum" else [],
-                })
-            return {
-                "sheetnames": sheetnames,
-                "columns": columns,
-                "sample_rows": sample[:SAMPLE_ROWS],
-            }
+            sheets: list[dict[str, Any]] = []
+            for position, name in enumerate(workbook.sheetnames):
+                sample_budget = (
+                    INFERENCE_SAMPLE_ROWS if position == 0
+                    else SECONDARY_SHEET_SAMPLE_ROWS
+                )
+                sheets.append(ArtifactImportService._scan_one_sheet(
+                    workbook[str(name)], sample_budget,
+                    require_header=position == 0,
+                ))
+            return sheets
         finally:
             workbook.close()
+
+    @staticmethod
+    def _scan_one_sheet(
+        sheet: Any, sample_budget: int, *, require_header: bool,
+    ) -> dict[str, Any]:
+        iterator = sheet.iter_rows(values_only=True)
+        header_row = next(iterator, None)
+        if header_row is None:
+            if require_header:
+                raise ArtifactImportError("empty_sheet")
+            return {"name": str(sheet.title), "columns": [], "sample_rows": []}
+        for cell in header_row:
+            if _is_formula(cell):
+                raise ArtifactImportError("formula_not_allowed")
+        headers = _dedupe_headers(header_row)
+        if len(headers) > MAX_COLUMNS:
+            raise ArtifactImportError("too_many_columns")
+        sample: list[dict[str, Any]] = []
+        data_rows = 0
+        for row in iterator:
+            data_rows += 1
+            if data_rows > MAX_ROWS:
+                raise ArtifactImportError("too_many_rows")
+            for cell in row:
+                if _is_formula(cell):
+                    raise ArtifactImportError("formula_not_allowed")
+            if len(sample) < sample_budget:
+                sample.append({name: value for name, value in zip(headers, row)})
+        columns = []
+        for name in headers:
+            inferred, candidates = _infer_column_type(
+                [row.get(name) for row in sample])
+            columns.append({
+                "source_name": name,
+                "inferred_type": inferred,
+                "enum_candidates": candidates if inferred == "enum" else [],
+            })
+        return {
+            "name": str(sheet.title),
+            "columns": columns,
+            "sample_rows": sample[:SAMPLE_ROWS],
+        }
 
     @staticmethod
     def _read_headers(path: str, sheet: str, header_row: int) -> list[str]:
@@ -478,8 +513,9 @@ class ArtifactImportService:
         record = self._require_preview(
             preview_token, artifact_id=artifact_id, uploader=uploader,
         )
-        sheet = sheet or record["sheets"][0]
-        if sheet not in record["sheets"]:
+        sheet_names = self._sheet_names(record)
+        sheet = sheet or sheet_names[0]
+        if sheet not in sheet_names:
             raise ArtifactImportError("unknown_sheet")
         try:
             header_row = int(header_row)
@@ -587,7 +623,7 @@ class ArtifactImportService:
         plan_columns = list(plan.get("columns") or [])
         if not plan_columns:
             raise InvalidOperation("empty_plan_columns")
-        sheet = str(plan.get("sheet") or record["sheets"][0])
+        sheet = str(plan.get("sheet") or self._sheet_names(record)[0])
         try:
             header_row = int(plan.get("header_row") or 1)
         except (TypeError, ValueError) as exc:

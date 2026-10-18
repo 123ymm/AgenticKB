@@ -50,6 +50,22 @@
         <el-form-item label="描述">
           <el-input v-model="form.description" type="textarea" :rows="3" placeholder="这份表给谁用、解决什么问题（可选）" />
         </el-form-item>
+        <el-form-item label="归属域">
+          <el-select
+            v-model="form.domainId"
+            placeholder="选择知识域"
+            style="width: 100%"
+            data-test="create-artifact-domain"
+          >
+            <el-option
+              v-for="d in domainStore.enabledDomains"
+              :key="d.domain_id"
+              :value="d.domain_id"
+              :label="d.domain_id"
+            />
+          </el-select>
+          <div class="artifact-list__domain-hint">制品将创建到该知识域（默认当前域：{{ domainStore.currentDomain || '未知' }}）</div>
+        </el-form-item>
         <p class="artifact-list__hint">创建后进入设计态：上传 Excel → 列映射 → 导入 → 填使用说明 → 发布。</p>
       </el-form>
       <template #footer>
@@ -66,17 +82,19 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
+import { useDomainStore } from '@/stores/domain'
 import EmptyState from '@/components/common/EmptyState.vue'
 import type { Artifact } from '@/types/artifacts'
 
 const api = useArtifactsApi()
 const router = useRouter()
+const domainStore = useDomainStore()
 
 const artifacts = ref<Artifact[]>([])
 const loading = ref(false)
 const createVisible = ref(false)
 const creating = ref(false)
-const form = ref({ title: '', description: '' })
+const form = ref({ title: '', description: '', domainId: '' })
 
 async function load() {
   loading.value = true
@@ -90,7 +108,10 @@ async function load() {
 }
 
 function openCreate() {
-  form.value = { title: '', description: '' }
+  // codex二审功能项③：显式带当前域创建——不再依赖后端 first_domain_for_user
+  // 兜底（多域用户在 B 域页面会落到 A 域）。域选择对齐 Header/McpAccessView
+  // 的 domain store 机制（enabledDomains），不新造状态源。
+  form.value = { title: '', description: '', domainId: domainStore.currentDomain }
   createVisible.value = true
 }
 
@@ -100,11 +121,16 @@ async function createArtifact() {
     ElMessage.warning('请填写标题')
     return
   }
+  if (!form.value.domainId) {
+    ElMessage.warning('无法确定归属知识域，请在新建窗口选择目标域')
+    return
+  }
   creating.value = true
   try {
     const artifact = await api.create({
       title,
       description: form.value.description.trim() || undefined,
+      domain_id: form.value.domainId,
     })
     createVisible.value = false
     await router.push({ name: 'artifact-detail', params: { artifactId: artifact.artifact_id } })
@@ -149,4 +175,5 @@ onMounted(load)
 .artifact-list__header p { margin: 5px 0 0; color: var(--kb-text-tertiary); font-size: 13px; }
 .artifact-list__link { border: 0; background: none; padding: 0; color: var(--kb-accent, #2563eb); font-weight: 650; cursor: pointer; }
 .artifact-list__hint { margin: -5px 0 0 70px; color: var(--kb-text-tertiary); font-size: 12px; }
+.artifact-list__domain-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; }
 </style>

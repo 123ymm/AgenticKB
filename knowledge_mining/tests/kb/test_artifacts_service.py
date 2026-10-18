@@ -39,6 +39,9 @@ class FakeArtifactDB:
         self.members: dict[str, dict[str, str]] = {}   # artifact_id -> user_id -> role
         self.rev0_rows: dict[str, list[dict]] = {}
         self.revision_rows: dict[str, dict[int, list[dict]]] = {}
+        # codex二审功能项②：发布定格 schema 快照（真库 revisions.schema_json
+        # 在 publish 时落库——运行态读快照而非实时列）
+        self.revision_schemas: dict[str, dict[int, list[dict]]] = {}
         # 版本历史（镜像真库 list_revisions：不含 artifact_id，由路由层补）
         self.revisions: dict[str, list[dict]] = {}
         self.columns: dict[str, list[dict]] = {}
@@ -207,6 +210,8 @@ class FakeArtifactDB:
         new_rev = max([int(art["current_revision"]), *history, *row_revs], default=0) + 1
         rows = self.rev0_rows.get(artifact_id, [])
         self.revision_rows.setdefault(artifact_id, {})[new_rev] = [dict(r) for r in rows]
+        self.revision_schemas.setdefault(artifact_id, {})[new_rev] = [
+            dict(c) for c in self.columns.get(artifact_id, [])]
         self.revisions.setdefault(artifact_id, []).append({
             "revision": new_rev, "row_count": len(rows),
             "change_summary": change_summary, "published_by": published_by,
@@ -226,9 +231,14 @@ class FakeArtifactDB:
     async def get_revision(self, artifact_id: str, revision: int) -> dict | None:
         if revision not in self.revision_rows.get(artifact_id, {}):
             return None
+        # 发布路径产出的 revision 读定格快照；直 plant revision_rows 的测试
+        # 形态无快照 → 回落实时列（与旧行为兼容）
+        schema = self.revision_schemas.get(artifact_id, {}).get(revision)
+        if schema is None:
+            schema = [dict(c) for c in self.columns.get(artifact_id, [])]
         return {
             "artifact_id": artifact_id, "revision": revision,
-            "schema_json": [dict(c) for c in self.columns.get(artifact_id, [])],
+            "schema_json": [dict(c) for c in schema],
             "row_count": len(self.revision_rows[artifact_id][revision]),
         }
 

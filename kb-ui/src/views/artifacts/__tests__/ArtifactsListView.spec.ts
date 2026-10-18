@@ -3,7 +3,13 @@ import { flushPromises, shallowMount } from '@vue/test-utils'
 import type { VueWrapper } from '@vue/test-utils'
 
 const state = vi.hoisted(() => ({
-  domain: { currentDomain: 'plant-a' },
+  domain: {
+    currentDomain: 'plant-a',
+    enabledDomains: [
+      { domain_id: 'plant-a', enabled: true },
+      { domain_id: 'plant-b', enabled: true },
+    ],
+  },
   router: { push: vi.fn() },
   api: {
     list: vi.fn(), create: vi.fn(),
@@ -23,7 +29,7 @@ import ArtifactsListView from '../ArtifactsListView.vue'
 
 interface ListVm {
   artifacts: unknown[]
-  form: { title: string; description: string }
+  form: { title: string; description: string; domainId: string }
   createArtifact: () => Promise<void>
   statusTagType: (status: string) => 'info' | 'success' | 'danger'
   statusLabel: (status: string) => string
@@ -95,20 +101,35 @@ describe('artifacts list view', () => {
     expect(vm.statusLabel('deprecated')).toBe('已停用')
   })
 
-  it('creates an artifact and routes into its detail page', async () => {
+  it('creates an artifact with the current domain and routes into its detail page', async () => {
     const wrapper = mountList()
     await flushPromises()
     const vm = wrapper.vm as unknown as ListVm
 
-    vm.form = { title: '  新制品  ', description: ' 说明 ' }
+    vm.form = { title: '  新制品  ', description: ' 说明 ', domainId: 'plant-a' }
     await vm.createArtifact()
 
+    // codex二审功能项③：create payload 显式带当前域（不再依赖后端绑定域兜底）
     expect(state.api.create).toHaveBeenCalledWith({
-      title: '新制品', description: '说明',
+      title: '新制品', description: '说明', domain_id: 'plant-a',
     })
     expect(state.router.push).toHaveBeenCalledWith({
       name: 'artifact-detail', params: { artifactId: 'art_new' },
     })
+  })
+
+  it('blocks creation when the target domain is unknown', async () => {
+    state.domain.currentDomain = ''
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ListVm
+
+    vm.form = { title: '无域制品', description: '', domainId: '' }
+    await vm.createArtifact()
+
+    expect(state.ui.warning).toHaveBeenCalledWith(expect.stringContaining('归属知识域'))
+    expect(state.api.create).not.toHaveBeenCalled()
+    expect(state.router.push).not.toHaveBeenCalled()
   })
 
   it('blocks empty title and surfaces api errors without routing', async () => {
@@ -116,7 +137,7 @@ describe('artifacts list view', () => {
     await flushPromises()
     const vm = wrapper.vm as unknown as ListVm
 
-    vm.form = { title: '   ', description: '' }
+    vm.form = { title: '   ', description: '', domainId: 'plant-a' }
     await vm.createArtifact()
     expect(state.ui.warning).toHaveBeenCalled()
     expect(state.api.create).not.toHaveBeenCalled()
@@ -124,7 +145,7 @@ describe('artifacts list view', () => {
     state.api.create.mockRejectedValueOnce({
       response: { status: 422, data: { detail: 'domain_id_required: x' } },
     })
-    vm.form = { title: '无域制品', description: '' }
+    vm.form = { title: '无域制品', description: '', domainId: 'plant-a' }
     await vm.createArtifact()
     expect(state.router.push).not.toHaveBeenCalled()
     expect(state.ui.error).toHaveBeenCalled()

@@ -121,10 +121,19 @@ export interface PreviewColumn {
   enum_candidates: string[]
 }
 
+/** 单个 sheet 的预览（codex二审功能项①：每 sheet 独立表头/推断/样例）。 */
+export interface SheetPreview {
+  name: string
+  columns: PreviewColumn[]
+  sample_rows: Array<Record<string, unknown>>
+}
+
 export interface PreviewPayload {
   file_name: string
-  sheets: string[]
+  /** per-sheet 对象（后端多 sheet 扫描）；default_sheet = sheets[0].name。 */
+  sheets: SheetPreview[]
   default_sheet: string
+  /** 默认 sheet 的引用（向后兼容顶层口径）。 */
   columns: PreviewColumn[]
   sample_rows: Array<Record<string, unknown>>
 }

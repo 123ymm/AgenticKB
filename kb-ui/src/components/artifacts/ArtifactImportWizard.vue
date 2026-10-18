@@ -25,13 +25,13 @@
         <span>工作表：</span>
         <el-select v-model="sheet" size="small" style="width: 200px" data-test="wizard-sheet">
           <el-option
-            v-for="name in envelope.preview.sheets"
-            :key="name"
-            :value="name"
-            :label="name"
+            v-for="s in envelope.preview.sheets"
+            :key="s.name"
+            :value="s.name"
+            :label="s.name"
           />
         </el-select>
-        <span class="import-wizard__hint">（列映射基于首个工作表的表头推断）</span>
+        <span class="import-wizard__hint">（每个工作表独立推断列类型；切换会重建列映射）</span>
       </div>
     </el-card>
 
@@ -43,8 +43,8 @@
       </template>
       <div class="import-wizard__map">
         <div class="import-wizard__sources">
-          <div class="import-wizard__pane-title">文件列（类型推断）</div>
-          <div v-for="col in envelope.preview.columns" :key="col.source_name" class="import-wizard__source">
+          <div class="import-wizard__pane-title">文件列（类型推断：{{ sheet }}）</div>
+          <div v-for="col in activeSheetColumns" :key="col.source_name" class="import-wizard__source">
             <span class="import-wizard__source-name">{{ col.source_name }}</span>
             <el-tag size="small" effect="plain" :type="typeTagType(col.inferred_type)">
               {{ typeLabel(col.inferred_type) }}
@@ -227,7 +227,8 @@ import type { UploadRequestOptions } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import type {
-  ArtifactColumn, ImportConflictPolicy, ImportReport, PreviewEnvelope,
+  ArtifactColumn, ImportConflictPolicy, ImportReport, PreviewColumn,
+  PreviewEnvelope, SheetPreview,
 } from '@/types/artifacts'
 
 /** 后端 build_mapping 认可的列类型（§6.2 推断口径）。 */
@@ -276,6 +277,14 @@ const columnsLoaded = ref(false)
 
 const hasExisting = computed(() => existingColumns.value.length > 0)
 
+/** 当前选中 sheet 的预览（codex二审功能项①：列/样例按 sheet 切换）。 */
+const activeSheet = computed<SheetPreview | null>(() => {
+  const sheets = envelope.value?.preview.sheets ?? []
+  return sheets.find(s => s.name === sheet.value) ?? sheets[0] ?? null
+})
+
+const activeSheetColumns = computed<PreviewColumn[]>(() => activeSheet.value?.columns ?? [])
+
 const mappedIds = computed(() => new Set(
   mappings.value
     .filter(m => m.action === 'map_to' && m.targetColumnId)
@@ -311,9 +320,9 @@ const projectedColumns = computed(() => mappings.value
   .filter(m => m.action !== 'drop')
   .map(targetNameOf))
 
-/** 卡③ 投影行：样例行按映射改写到目标列名。 */
+/** 卡③ 投影行：当前 sheet 的样例行按映射改写到目标列名。 */
 const projectedRows = computed(() => {
-  const sample = envelope.value?.preview.sample_rows ?? []
+  const sample = activeSheet.value?.sample_rows ?? []
   return sample.map(row => {
     const out: Record<string, unknown> = {}
     mappings.value.forEach(m => {
@@ -354,7 +363,7 @@ async function doUpload(file: File): Promise<void> {
     sheet.value = data.preview.default_sheet
     report.value = null
     mappingConfirmed.value = false
-    initMappings(data)
+    initMappings(data.preview.columns)
   } catch (error) {
     ElMessage.error(`上传失败：${await apiErrorDetail(error)}`)
   } finally {
@@ -362,9 +371,13 @@ async function doUpload(file: File): Promise<void> {
   }
 }
 
-/** 按预览列初始化映射行：已有列精确同名（含 alias）→ map_to，否则新建。 */
-function initMappings(data: PreviewEnvelope): void {
-  mappings.value = data.preview.columns.map(col => {
+/**
+ * 按预览列初始化映射行：已有列精确同名（含 alias）→ map_to，否则新建。
+ * 切换 sheet 时用对应 sheet 的 columns 重建（主键/类型/枚举选择全部回到
+ * 推断默认——旧 sheet 的手工选择对异构表头无意义，codex二审功能项①）。
+ */
+function initMappings(columns: PreviewColumn[]): void {
+  mappings.value = columns.map(col => {
     const matched = existingColumns.value.find(c =>
       c.status === 'active'
       && (c.column_name === col.source_name || (c.alias ?? []).includes(col.source_name)))
@@ -383,6 +396,15 @@ function initMappings(data: PreviewEnvelope): void {
     }
   })
 }
+
+/** 切换工作表：重建列映射（新 sheet 表头）+ 退回卡② 重新确认。 */
+watch(sheet, (name) => {
+  if (!envelope.value || !name) return
+  const target = envelope.value.preview.sheets.find(s => s.name === name)
+  if (!target) return
+  initMappings(target.columns)
+  mappingConfirmed.value = false
+})
 
 function onActionChange(m: ColumnMapping): void {
   if (m.action !== 'new') m.isPrimaryKey = false
