@@ -576,7 +576,10 @@ class ArtifactQueryServiceTest {
             try (InputStream in = getClass().getClassLoader()
                     .getResourceAsStream("mapper/ArtifactToolMapper.xml")) {
                 assertThat(in).as("mapper XML must be on classpath").isNotNull();
-                return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                // 归一换行：Windows 检出（core.autocrlf）资源文件是 CRLF，而多行
+                // contains 断言用 \n 字面量——不归一则在 Windows 检出下必红。
+                return new String(in.readAllBytes(), StandardCharsets.UTF_8)
+                        .replace("\r\n", "\n");
             }
         }
 

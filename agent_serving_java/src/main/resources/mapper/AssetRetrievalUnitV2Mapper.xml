@@ -153,25 +153,46 @@
         LIMIT #{limit}
     </select>
 
-    <!-- dense 通道：embeddings_v2 ⋈ units_v2，dense_eligible + 维度一致；同表示多向量取最佳。 -->
+    <!--
+      dense 通道：embeddings_v2 ⋈ units_v2，dense_eligible + 维度一致；同表示多向量取最佳。
+      009（1.1.15 性能修复）改写为 ANN 可用形态：原 DISTINCT ON 直接铺在全量行上且
+      排序键以 representation_id 打头——pgvector 无法走"按距离近邻搜索"路径，40 万向量
+      全量读盘逐条算距离（TOAST ~4KB/条，内网实测单查询 100s+）。
+      现分两层：
+        ① 候选层（最内层）：全部 scope/filters 下推不变 + ORDER BY 距离 LIMIT candidateBudget
+           ——这是 HNSW 索引（idx_are_v2_vec_hnsw）+ pgvector 0.8 迭代扫描的标准入口形态；
+           连接层需 SET hnsw.iterative_scan（ServingBeans/DomainPoolManager 连接初始化已设）。
+        ② 去重层：DISTINCT ON 按表示取最佳距离（与旧版语义一致），外层稳定排序 LIMIT。
+      语义边界：候选层已含全部过滤（仍是"过滤在 Top-K 前下推"，不是全库先 Top-K 再过滤，
+      无漏召回）；与旧版唯一差异是候选窗截断——同表示多向量挤占窗口时由调用方
+      （DenseVectorOperator）的预算分层 + 受控扩召兜底。
+    -->
     <select id="searchDenseV2" resultMap="unitV2RowMap">
         SELECT t.* FROM (
             <include refid="sectionClosureCte"/>
-            SELECT DISTINCT ON (e.representation_id)
-                   un.representation_id, un.snapshot_id, un.representation_type, un.content_type,
-                   un.content_text, un.structural_context, un.target_type, un.target_ref,
-                   un.canonical_evidence_id, un.container_ref, un.ordinal, un.facets_json,
-                   (1 - (e.embedding_vector_vec &lt;=&gt; #{queryVector}::vector)) AS channel_score
-            FROM asset_retrieval_embeddings_v2 e
-            JOIN asset_retrieval_units_v2 un ON un.representation_id = e.representation_id
-            WHERE un.dense_eligible = TRUE
-              AND e.dimension = #{dim}
-              AND e.snapshot_id IN
-            <foreach collection="snapshotIds" item="sid" open="(" separator="," close=")">
-                #{sid}
-            </foreach>
-            <include refid="unitPushdownFilters"/>
-            ORDER BY e.representation_id, e.embedding_vector_vec &lt;=&gt; #{queryVector}::vector
+            SELECT DISTINCT ON (c.representation_id)
+                   c.representation_id, c.snapshot_id, c.representation_type, c.content_type,
+                   c.content_text, c.structural_context, c.target_type, c.target_ref,
+                   c.canonical_evidence_id, c.container_ref, c.ordinal, c.facets_json,
+                   (1 - c.distance) AS channel_score
+            FROM (
+                SELECT un.representation_id, un.snapshot_id, un.representation_type, un.content_type,
+                       un.content_text, un.structural_context, un.target_type, un.target_ref,
+                       un.canonical_evidence_id, un.container_ref, un.ordinal, un.facets_json,
+                       (e.embedding_vector_vec &lt;=&gt; #{queryVector}::vector) AS distance
+                FROM asset_retrieval_embeddings_v2 e
+                JOIN asset_retrieval_units_v2 un ON un.representation_id = e.representation_id
+                WHERE un.dense_eligible = TRUE
+                  AND e.dimension = #{dim}
+                  AND e.snapshot_id IN
+                <foreach collection="snapshotIds" item="sid" open="(" separator="," close=")">
+                    #{sid}
+                </foreach>
+                <include refid="unitPushdownFilters"/>
+                ORDER BY e.embedding_vector_vec &lt;=&gt; #{queryVector}::vector
+                LIMIT #{candidateBudget}
+            ) c
+            ORDER BY c.representation_id, c.distance
         ) t
         ORDER BY t.channel_score DESC, t.canonical_evidence_id ASC, t.representation_id ASC
         LIMIT #{limit}

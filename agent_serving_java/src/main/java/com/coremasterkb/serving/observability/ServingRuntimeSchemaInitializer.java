@@ -33,8 +33,9 @@ public class ServingRuntimeSchemaInitializer implements DomainSchemaEnsurer {
     // 1.1.14 勘误：迁移清单变更时必须同步本镜像（= manifest_checksum，与
     // mining contract.CURRENT_SCHEMA_CHECKSUM 同源）——漏刷会让 serving 启动
     // fail-closed 校验拒绝就绪。
+    // 1.1.15 资产包替换：加 009（v2 向量 HNSW 索引）后刷新。
     private static final String EXPECTED_SCHEMA_CHECKSUM =
-            "c819099c543573422c279567c3a2517e1735878f7966fb328bfb4134eb116866";
+            "60d075feee1ddb371233fbd3b8b46ab99f102aef83bad459f8125ff9a7281561";
     private static final String EXPECTED_SCHEMA_MARKER =
             "schema/" + EXPECTED_SCHEMA_VERSION;
 

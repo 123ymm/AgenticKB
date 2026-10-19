@@ -38,11 +38,38 @@ class _Cursor:
         return list(self._rows)
 
 
+# pg_indexes 默认返回（= 全部 REQUIRED_INDEXES 的合格定义；末行为 009 的 HNSW）
+_DEFAULT_INDEX_ROWS: list[tuple[str, str]] = [
+    ("idx_user_domains_domain", "CREATE INDEX idx_user_domains_domain ON user_domains (domain)"),
+    ("idx_mcp_keys_user", "CREATE INDEX idx_mcp_keys_user ON mcp_keys (user_id)"),
+    ("idx_mcp_keys_hash", "CREATE UNIQUE INDEX idx_mcp_keys_hash ON mcp_keys (key_hash)"),
+    ("idx_mcp_keys_active_name", "CREATE UNIQUE INDEX idx_mcp_keys_active_name ON mcp_keys (user_id, domain, name) WHERE status = 'active'"),
+    ("idx_knowledge_access_domain_time", "CREATE INDEX idx_knowledge_access_domain_time ON knowledge_access_records (domain, occurred_at DESC, id DESC)"),
+    ("idx_knowledge_access_actor_time", "CREATE INDEX idx_knowledge_access_actor_time ON knowledge_access_records (actor_user_id, occurred_at DESC, id DESC)"),
+    ("idx_knowledge_access_source_tool_time", "CREATE INDEX idx_knowledge_access_source_tool_time ON knowledge_access_records (source, tool_name, occurred_at DESC)"),
+    ("idx_knowledge_access_status_time", "CREATE INDEX idx_knowledge_access_status_time ON knowledge_access_records (status, occurred_at DESC)"),
+    ("idx_knowledge_access_kb_ids", "CREATE INDEX idx_knowledge_access_kb_ids ON knowledge_access_records USING GIN (kb_ids)"),
+    ("idx_are_v2_vec_hnsw", "CREATE INDEX idx_are_v2_vec_hnsw ON public.asset_retrieval_embeddings_v2 USING hnsw (embedding_vector_vec vector_cosine_ops)"),
+]
+
+
 class _ValidationConnection:
-    def __init__(self, *, tables: list[str], extensions: list[str], migration):
+    def __init__(
+        self,
+        *,
+        tables: list[str],
+        extensions: list[str],
+        migration,
+        index_rows: list[tuple[str, str]] | None = None,
+        invalid_indexes: list[tuple[str]] | None = None,
+        staging_ann_indexes: list[tuple[str]] | None = None,
+    ):
         self.tables = tables
         self.extensions = extensions
         self.migration = migration
+        self.index_rows = index_rows
+        self.invalid_indexes = invalid_indexes or []
+        self.staging_ann_indexes = staging_ann_indexes or []
 
     def execute(self, query, params=None):
         text = str(query)
@@ -57,17 +84,15 @@ class _ValidationConnection:
         if "pg_extension" in text:
             return _Cursor([(name,) for name in self.extensions])
         if "pg_indexes" in text:
-            return _Cursor([
-                ("idx_user_domains_domain", "CREATE INDEX idx_user_domains_domain ON user_domains (domain)"),
-                ("idx_mcp_keys_user", "CREATE INDEX idx_mcp_keys_user ON mcp_keys (user_id)"),
-                ("idx_mcp_keys_hash", "CREATE UNIQUE INDEX idx_mcp_keys_hash ON mcp_keys (key_hash)"),
-                ("idx_mcp_keys_active_name", "CREATE UNIQUE INDEX idx_mcp_keys_active_name ON mcp_keys (user_id, domain, name) WHERE status = 'active'"),
-                ("idx_knowledge_access_domain_time", "CREATE INDEX idx_knowledge_access_domain_time ON knowledge_access_records (domain, occurred_at DESC, id DESC)"),
-                ("idx_knowledge_access_actor_time", "CREATE INDEX idx_knowledge_access_actor_time ON knowledge_access_records (actor_user_id, occurred_at DESC, id DESC)"),
-                ("idx_knowledge_access_source_tool_time", "CREATE INDEX idx_knowledge_access_source_tool_time ON knowledge_access_records (source, tool_name, occurred_at DESC)"),
-                ("idx_knowledge_access_status_time", "CREATE INDEX idx_knowledge_access_status_time ON knowledge_access_records (status, occurred_at DESC)"),
-                ("idx_knowledge_access_kb_ids", "CREATE INDEX idx_knowledge_access_kb_ids ON knowledge_access_records USING GIN (kb_ids)"),
-            ])
+            return _Cursor(
+                self.index_rows if self.index_rows is not None else _DEFAULT_INDEX_ROWS
+            )
+        # 009：staging 是挖掘写入面，禁止近邻索引（查询同时含 pg_index/pg_am，先判 pg_am）
+        if "JOIN pg_am am" in text:
+            return _Cursor(list(self.staging_ann_indexes))
+        # 009：关键索引 indisvalid/indisready 复核（定义文本正确 ≠ 可用）
+        if "FROM pg_index i" in text:
+            return _Cursor(list(self.invalid_indexes))
         raise AssertionError(f"unexpected SQL: {text}")
 
 
@@ -138,6 +163,71 @@ def test_schema_validation_rejects_retired_table(tmp_path: Path) -> None:
     )
 
     with pytest.raises(SchemaValidationError, match="退役表仍存在"):
+        validate_schema(connection, manifest, enforce_exact_count=False)
+
+
+def test_schema_validation_requires_v2_hnsw_index(tmp_path: Path) -> None:
+    """009：v2 向量表缺近邻索引 = 校验失败——1.1.14 之前"升级成功却没 ANN 索引"
+    正是缺这道断言才长期无症状（40 万向量全量读盘 100s+）。"""
+    manifest = _manifest(tmp_path)
+    connection = _ValidationConnection(
+        tables=[MIGRATION_LEDGER_TABLE, "knowledge_bases"],
+        extensions=["pg_trgm", "vector"],
+        migration=manifest.migrations[0],
+        index_rows=[row for row in _DEFAULT_INDEX_ROWS if row[0] != "idx_are_v2_vec_hnsw"],
+    )
+
+    with pytest.raises(SchemaValidationError, match="idx_are_v2_vec_hnsw"):
+        validate_schema(connection, manifest, enforce_exact_count=False)
+
+
+def test_schema_validation_rejects_wrong_operator_class_hnsw(tmp_path: Path) -> None:
+    """009：同名索引但操作符类漂移（如误建 l2）——距离语义不符，必须拒绝。"""
+    manifest = _manifest(tmp_path)
+    connection = _ValidationConnection(
+        tables=[MIGRATION_LEDGER_TABLE, "knowledge_bases"],
+        extensions=["pg_trgm", "vector"],
+        migration=manifest.migrations[0],
+        index_rows=[row for row in _DEFAULT_INDEX_ROWS if row[0] != "idx_are_v2_vec_hnsw"]
+        + [
+            (
+                "idx_are_v2_vec_hnsw",
+                "CREATE INDEX idx_are_v2_vec_hnsw ON public.asset_retrieval_embeddings_v2 "
+                "USING hnsw (embedding_vector_vec vector_l2_ops)",
+            )
+        ],
+    )
+
+    with pytest.raises(SchemaValidationError, match="定义漂移"):
+        validate_schema(connection, manifest, enforce_exact_count=False)
+
+
+def test_schema_validation_rejects_invalid_required_index(tmp_path: Path) -> None:
+    """009：CONCURRENTLY 中断残留的 INVALID 索引定义文本完好但 planner 永不使用——
+    必须按 indisvalid/indisready 拒绝，不能只看定义。"""
+    manifest = _manifest(tmp_path)
+    connection = _ValidationConnection(
+        tables=[MIGRATION_LEDGER_TABLE, "knowledge_bases"],
+        extensions=["pg_trgm", "vector"],
+        migration=manifest.migrations[0],
+        invalid_indexes=[("idx_are_v2_vec_hnsw",)],
+    )
+
+    with pytest.raises(SchemaValidationError, match="不可用"):
+        validate_schema(connection, manifest, enforce_exact_count=False)
+
+
+def test_schema_validation_rejects_ann_index_on_staging(tmp_path: Path) -> None:
+    """009：staging 是挖掘写入面（每批次 DELETE+INSERT），出现近邻索引即校验失败。"""
+    manifest = _manifest(tmp_path)
+    connection = _ValidationConnection(
+        tables=[MIGRATION_LEDGER_TABLE, "knowledge_bases"],
+        extensions=["pg_trgm", "vector"],
+        migration=manifest.migrations[0],
+        staging_ann_indexes=[("idx_asset_retrieval_embeddings_v2_staging_vec_hnsw",)],
+    )
+
+    with pytest.raises(SchemaValidationError, match="staging"):
         validate_schema(connection, manifest, enforce_exact_count=False)
 
 

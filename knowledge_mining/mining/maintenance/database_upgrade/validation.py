@@ -58,6 +58,13 @@ REQUIRED_INDEXES: dict[str, tuple[bool, tuple[str, ...]]] = {
     "idx_knowledge_access_kb_ids": (
         False, ("knowledge_access_records", "using gin", "kb_ids"),
     ),
+    # 009（1.1.15 性能修复）：v2 向量召回唯一近邻索引。定义校验之外另有
+    # indisvalid/indisready 与 staging 反向断言（见 validate_schema 尾部）——
+    # 1.1.14 之前"升级成功却没有 ANN 索引"正是缺这道校验才长期无症状。
+    "idx_are_v2_vec_hnsw": (
+        False,
+        ("asset_retrieval_embeddings_v2", "using hnsw", "embedding_vector_vec", "vector_cosine_ops"),
+    ),
 }
 
 
@@ -270,6 +277,38 @@ def validate_schema(
             raise SchemaValidationError(f"关键索引不是 UNIQUE：{name}")
         if any(token not in definition for token in tokens):
             raise SchemaValidationError(f"关键索引定义漂移：{name}: {definition}")
+    # 定义文本正确不等于可用：CONCURRENTLY 中断会留下 INVALID 索引（定义仍在
+    # pg_indexes 里），planner 永不使用——按 indisvalid/indisready 再验一遍全部
+    # 关键索引。
+    unusable = connection.execute(
+        """SELECT c.relname FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indexrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname = ANY(%s)
+              AND (NOT i.indisvalid OR NOT i.indisready)""",
+        (list(REQUIRED_INDEXES),),
+    ).fetchall()
+    if unusable:
+        raise SchemaValidationError(
+            "关键索引不可用（indisvalid/indisready=false，多为中断的"
+            " CONCURRENTLY 残留，须 DROP 后重建）：" + ", ".join(str(r[0]) for r in unusable)
+        )
+    # staging 是挖掘写入面（每批次 DELETE+INSERT）：绝不允许近邻索引出现——
+    # LIKE INCLUDING ALL 克隆或人工误建都会让挖掘付出反复建图代价。
+    staging_ann = connection.execute(
+        """SELECT c.relname FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indexrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_am am ON am.oid = c.relam
+            WHERE n.nspname = 'public'
+              AND c.relname LIKE '%\\_staging\\_%' ESCAPE '\\'
+              AND am.amname IN ('hnsw', 'ivfflat')"""
+    ).fetchall()
+    if staging_ann:
+        raise SchemaValidationError(
+            "staging 表上存在近邻索引（挖掘写入面禁止）：" + ", ".join(str(r[0]) for r in staging_ann)
+        )
     return SchemaValidationReport(tables, extensions, manifest.schema_version)
 
 

@@ -1,5 +1,6 @@
 package com.coremasterkb.serving.domainpack;
 
+import com.coremasterkb.serving.config.ServingBeans;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import jakarta.annotation.PreDestroy;
@@ -148,6 +149,8 @@ public class DomainPoolManager {
         cfg.setMaximumPoolSize(db.poolMax() != null ? db.poolMax() : 10);
         cfg.setConnectionTimeout(5_000);
         cfg.setInitializationFailTimeout(5_000);
+        // 009 配套：与默认池一致打开 pgvector 迭代扫描（见 ServingBeans.PG_SESSION_INIT_SQL）。
+        cfg.setConnectionInitSql(ServingBeans.PG_SESSION_INIT_SQL);
         try {
             HikariDataSource ds = new HikariDataSource(cfg);
             // Eagerly verify the connection

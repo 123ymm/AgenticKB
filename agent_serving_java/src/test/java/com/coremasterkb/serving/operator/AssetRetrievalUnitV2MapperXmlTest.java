@@ -70,6 +70,36 @@ class AssetRetrievalUnitV2MapperXmlTest {
     }
 
     @Test
+    @DisplayName("009: dense 是 ANN 形态——距离序候选 LIMIT 先于 DISTINCT ON，两层预算独立")
+    void denseAnnCandidateContract() throws Exception {
+        String xml = mapperXml();
+
+        // 候选层（最内层）：ORDER BY 距离 + LIMIT candidateBudget——HNSW(idx_are_v2_vec_hnsw)
+        // + pgvector 迭代扫描的标准入口形态；距离表达式必须原样出现在 ORDER BY
+        int orderByIdx = xml.indexOf("ORDER BY e.embedding_vector_vec &lt;=&gt; #{queryVector}::vector");
+        int candidateLimitIdx = xml.indexOf("LIMIT #{candidateBudget}");
+        assertThat(orderByIdx).as("候选层必须以距离表达式排序").isGreaterThan(-1);
+        assertThat(candidateLimitIdx).as("候选层必须有 embedding 级预算 LIMIT").isGreaterThan(orderByIdx);
+
+        // 去重层在候选层之上：DISTINCT ON 按表示取最佳距离（次序键是别名 distance，
+        // 不再是向量表达式——防止去重层退化回全量距离物化）
+        assertThat(xml).contains("DISTINCT ON (c.representation_id)");
+        assertThat(xml).contains("ORDER BY c.representation_id, c.distance");
+        assertThat(xml).contains("AS distance");
+
+        // 表示层预算独立存在（LIMIT #{limit} 在去重层之后）
+        int dedupIdx = xml.indexOf("ORDER BY c.representation_id, c.distance");
+        int limitIdx = xml.indexOf("LIMIT #{limit}", dedupIdx);
+        assertThat(limitIdx).isGreaterThan(dedupIdx);
+
+        // 旧全扫形态不得回归：DISTINCT ON 直接铺全量 + representation_id 打头排序
+        assertThat(xml).doesNotContain("ORDER BY e.representation_id, e.embedding_vector_vec");
+
+        // 参数化：候选预算无 ${} 插值
+        assertThat(xml).doesNotContain("${candidateBudget}");
+    }
+
+    @Test
     @DisplayName("canonical evidence id is selected for channel aggregation")
     void canonicalColumnSelected() throws Exception {
         String xml = mapperXml();

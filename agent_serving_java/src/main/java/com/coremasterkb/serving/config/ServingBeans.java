@@ -54,6 +54,17 @@ public class ServingBeans {
     private static final int CONTROL_FETCH_ATTEMPTS = 5;
     private static final long CONTROL_FETCH_BACKOFF_MS = 2_000;
 
+    /**
+     * 009（1.1.15 性能修复）配套：每个池连接建立时打开 pgvector 迭代索引扫描。
+     * dense 检索（searchDenseV2）永远带 snapshot_id IN 过滤——pgvector 0.8+
+     * 该 GUC 默认 off，不打开则带过滤查询走不了 HNSW（idx_are_v2_vec_hnsw 白建）。
+     * strict_order 保证 ORDER BY 距离 LIMIT 的候选窗语义精确；迁移 009 已把
+     * pgvector <0.8 挡在部署门外，此处 SET 不会遇到未知 GUC。DomainPoolManager
+     * 的域池同用此常量。
+     */
+    public static final String PG_SESSION_INIT_SQL =
+            "SET hnsw.iterative_scan = strict_order";
+
     // -------------------------------------------------------------------------
     // DataSource configuration (DataSourceAutoConfiguration is excluded)
     // -------------------------------------------------------------------------
@@ -133,6 +144,7 @@ public class ServingBeans {
 
         ds.setPoolName("hikari-default");
         ds.setConnectionTimeout(DEFAULT_CONNECTION_TIMEOUT_MS);
+        ds.setConnectionInitSql(PG_SESSION_INIT_SQL);
         return ds;
     }
 

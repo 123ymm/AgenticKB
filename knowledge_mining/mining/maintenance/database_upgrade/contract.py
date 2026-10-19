@@ -7,7 +7,8 @@ CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
 # 1.1.14 勘误：加 006 迁移时必须同步刷新本镜像常量（= manifest_checksum）——
 # 漏刷导致 llm_service 启动 fail-closed 校验仍等旧值而拒绝启动
 # （guard: tests/maintenance/test_migration_manifest.py 断言两者相等）。
-CURRENT_SCHEMA_CHECKSUM = "c819099c543573422c279567c3a2517e1735878f7966fb328bfb4134eb116866"
+# 1.1.15 资产包替换：加 009（v2 向量 HNSW 索引）后刷新。
+CURRENT_SCHEMA_CHECKSUM = "60d075feee1ddb371233fbd3b8b46ab99f102aef83bad459f8125ff9a7281561"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")

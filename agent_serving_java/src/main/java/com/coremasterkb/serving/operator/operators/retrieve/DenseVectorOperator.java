@@ -33,6 +33,15 @@ public class DenseVectorOperator implements Operator {
 
     static final int RECALL_MULTIPLIER = 5;
     static final int RECALL_HARD_CAP = 1000;
+    /**
+     * 009（1.1.15 性能修复）ANN 候选窗分层：embedding 级候选 ≥ 表示级召回 ≥ 最终 topK。
+     * 候选层按距离 LIMIT 截断后，同表示多向量会挤占窗口（一个表示的多条 embedding 都
+     * 落在窗内时，去重后只剩 1 个表示）——CANDIDATE_MULTIPLIER 是为此预留的冗余系数；
+     * 仍不足 topK 时按 ESCALATION_FACTOR 受控扩召一次，不无限重试。
+     */
+    static final int CANDIDATE_MULTIPLIER = 5;
+    static final int CANDIDATE_HARD_CAP = 4000;
+    static final int CANDIDATE_ESCALATION_FACTOR = 4;
 
     private static final String PARAM_SCHEMA = """
             {"type":"object","properties":{
@@ -69,13 +78,30 @@ public class DenseVectorOperator implements Operator {
 
         ScopeFilterPushdown pushdown = ScopeFilterPushdown.from(scope);
         int recall = Math.min(RECALL_HARD_CAP, topK * RECALL_MULTIPLIER);
+        int candidateBudget = Math.min(CANDIDATE_HARD_CAP, recall * CANDIDATE_MULTIPLIER);
 
-        List<UnitV2Row> rows = mapper.searchDenseV2(
-                formatVector(vec), vec.length, scope.snapshotIds(),
-                pushdown.documentJsonParams(), pushdown.representationTypes(),
-                pushdown.contentTypes(), pushdown.targetRefs(),
-                pushdown.sectionScopeDescendants(), pushdown.directoryPrefix(),
-                recall);
+        long startedAt = System.nanoTime();
+        List<UnitV2Row> rows;
+        try {
+            rows = queryDense(vec, scope, pushdown, candidateBudget, recall);
+            if (rows.size() < topK) {
+                int escalated =
+                        Math.min(CANDIDATE_HARD_CAP, candidateBudget * CANDIDATE_ESCALATION_FACTOR);
+                if (escalated > candidateBudget) {
+                    ctx.putAttribute("denseCandidateEscalated", candidateBudget + "->" + escalated);
+                    rows = queryDense(vec, scope, pushdown, escalated, recall);
+                }
+            }
+        } catch (RuntimeException ex) {
+            // 检索失败 ≠ 无命中：ErrorPolicy.SKIP_WITH_EMPTY 只会静默吞异常，无索引时代
+            // 单查询 100s+ 只能靠前端超时暴露。这里显式留痕后降级为空 dense 通道，
+            // keyword/融合通道继续可用；诊断属性随检索记录与 error 日志落盘。
+            ctx.putAttribute("denseVectorDegraded", "dense_query_failed");
+            log.error("[dense_vector] dense SQL failed (candidateBudget={}, snapshots={}, dim={})",
+                    candidateBudget, scope.snapshotIds().size(), vec.length, ex);
+            return SlotValues.of("candidates", List.of());
+        }
+        ctx.putAttribute("denseSqlMicros", (System.nanoTime() - startedAt) / 1_000);
 
         if (rows.isEmpty() && mapper != null) {
             // 空候选的能力性留痕：区分"无向量数据"（capability 缺失）与"正常无命中"。
@@ -95,6 +121,20 @@ public class DenseVectorOperator implements Operator {
         ctx.putAttribute("denseRowCount", rows.size());
         ctx.putAttribute("denseCanonicalCount", candidates.size());
         return SlotValues.of("candidates", candidates);
+    }
+
+    private List<UnitV2Row> queryDense(
+            float[] vec,
+            ActiveScope scope,
+            ScopeFilterPushdown pushdown,
+            int candidateBudget,
+            int limit) {
+        return mapper.searchDenseV2(
+                formatVector(vec), vec.length, scope.snapshotIds(),
+                pushdown.documentJsonParams(), pushdown.representationTypes(),
+                pushdown.contentTypes(), pushdown.targetRefs(),
+                pushdown.sectionScopeDescendants(), pushdown.directoryPrefix(),
+                candidateBudget, limit);
     }
 
     private static String formatVector(float[] vec) {

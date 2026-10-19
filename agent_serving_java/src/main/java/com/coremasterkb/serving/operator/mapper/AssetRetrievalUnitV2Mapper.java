@@ -45,12 +45,16 @@ public interface AssetRetrievalUnitV2Mapper {
 
     /**
      * dense 通道：pgvector 余弦检索（embeddings_v2 ⋈ units_v2，dense_eligible + 维度一致）。
+     * 009（1.1.15 性能修复）：候选层按距离 LIMIT 的 ANN 形态（走 idx_are_v2_vec_hnsw +
+     * pgvector 0.8 迭代扫描），再去重/聚合——调用方（DenseVectorOperator）负责预算分层。
      *
      * @param queryVector pgvector literal，e.g. {@code [0.1,0.2,...]}
      * @param dim         查询向量维度（embedding 与查询向量维度必须一致）
      * @param snapshotIds in-scope snapshot ids（在 embeddings_v2.snapshot_id 上下推）
      * @param documentJsonParams / representationTypes / contentTypes / targetRefs 同 {@link #searchFtsV2}
-     * @param limit       有界召回窗口
+     * @param candidateBudget embedding 级候选窗（最内层 ORDER BY 距离 LIMIT；须 ≥ limit，
+     *                        为同表示多向量挤占窗口预留冗余）
+     * @param limit       表示级有界召回窗口（DISTINCT ON 去重后的 Top-K 前冗余预留）
      */
     List<UnitV2Row> searchDenseV2(
             @Param("queryVector") String queryVector,
@@ -62,6 +66,7 @@ public interface AssetRetrievalUnitV2Mapper {
             @Param("targetRefs") List<String> targetRefs,
             @Param("sectionScopeDescendants") boolean sectionScopeDescendants,
             @Param("directoryPrefix") String directoryPrefix,
+            @Param("candidateBudget") int candidateBudget,
             @Param("limit") int limit);
 
     /**

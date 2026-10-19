@@ -110,7 +110,10 @@ class TypedTableQueryIT {
                         + "raw_content_hash, mime_type, title, created_at) "
                         + "VALUES (?,?,?,?,?,?,?)",
                 SNAP, "cloud_core_network", "n-" + TOKEN, "r-" + TOKEN,
-                "application/vnd.ms-excel", "告警表", "2026-01-01T00:00:00Z");
+                // 与文件名一致走 xlsx MIME——旧 vnd.ms-excel 不在快照白名单
+                // （010 的 ck_asset_snapshot_mime_type），插入必被 CHECK 拒绝
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "告警表", "2026-01-01T00:00:00Z");
         jdbc.update(
                 "INSERT INTO asset_builds (id, build_code, status, build_mode, domain, "
                         + "created_at, kb_id) VALUES (?,?,?,?,?,?,?)",
@@ -119,7 +122,8 @@ class TypedTableQueryIT {
         jdbc.update(
                 "INSERT INTO asset_build_document_snapshots (build_id, document_id, "
                         + "document_snapshot_id, selection_status, reason) "
-                        + "VALUES (?,?,?,'active','test')",
+                        // reason 枚举=add/update/retain/remove（002 DDL CHECK）
+                        + "VALUES (?,?,?,'active','add')",
                 BUILD, DOC, SNAP);
 
         // 生成真实 st_ ref（同一编码器 = 生产路径）

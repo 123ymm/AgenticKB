@@ -298,3 +298,44 @@ def test_java_serving_checksum_mirror_matches_manifest() -> None:
         "contract.CURRENT_SCHEMA_CHECKSUM 与 ServingRuntimeSchemaInitializer"
         ".EXPECTED_SCHEMA_CHECKSUM（否则服务启动 fail-closed 校验拒绝就绪）"
     )
+
+
+def test_all_migrations_are_transactional_no_concurrently() -> None:
+    """迁移器（runner.apply_manifest）把每个迁移 SQL 与账本写在同一事务执行——
+    CREATE INDEX CONCURRENTLY 不能进事务块，出现在任何迁移里都会在部署时炸。
+    断言剥离注释后检查：注释里解释"为什么不用 CONCURRENTLY"是合法的。"""
+    from knowledge_mining.mining.maintenance.database_upgrade.manifest import (
+        _SQL_COMMENT_PATTERN,
+    )
+
+    repo_root = Path(__file__).resolve().parents[3]
+    manifest = load_manifest(repo_root / "databases" / "migrations" / "manifest.yaml")
+    for item in manifest.migrations:
+        raw = item.path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        statements = _SQL_COMMENT_PATTERN.sub(" ", raw).lower()
+        assert "concurrently" not in statements, item.migration_id
+
+
+def test_hnsw_migration_targets_formal_table_with_guards() -> None:
+    """009（1.1.15 性能修复）守卫：HNSW 索引只允许落在正式表——staging 是挖掘
+    写入面（每批次 DELETE+INSERT，LIKE INCLUDING ALL 克隆），带近邻索引会反复
+    付建图代价；且必须带 pgvector>=0.8 与 vector(1024) 列形态两个前置守卫
+    （fail-closed，给运维可读错误而不是建图中途的晦涩报错）。"""
+    repo_root = Path(__file__).resolve().parents[3]
+    manifest = load_manifest(repo_root / "databases" / "migrations" / "manifest.yaml")
+    item = next(
+        entry
+        for entry in manifest.migrations
+        if entry.migration_id.endswith("retrieval_v2_hnsw_index")
+    )
+    assert item.mode is MigrationMode.ONLINE_EXPAND
+
+    sql = item.path.read_text(encoding="utf-8").replace("\r\n", "\n").lower()
+    assert "on asset_retrieval_embeddings_v2\n" in sql
+    assert "on asset_retrieval_embeddings_v2_staging" not in sql
+    assert "vector_cosine_ops" in sql
+    # 前置守卫：pgvector >= 0.8（带过滤查询的迭代索引扫描自 0.8.0 起）+ 列形态
+    assert "array[0, 8, 0]" in sql
+    assert "vector(1024)" in sql
+    # 自愈：同名无效/漂移索引先 DROP 再重建（失败的 CONCURRENTLY 残留）
+    assert "drop index public.idx_are_v2_vec_hnsw" in sql

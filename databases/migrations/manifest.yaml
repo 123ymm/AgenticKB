@@ -40,3 +40,7 @@ migrations:
     path: core/20261019_008_artifact_visibility_key_open.sql
     mode: online_expand
     checksum: 1b1ded54370f4bfb3897e8b0f923be8c8ac439cc28e21e0c8ef6ce47b6a6626f
+  - id: core/20261019_009_retrieval_v2_hnsw_index
+    path: core/20261019_009_retrieval_v2_hnsw_index.sql
+    mode: online_expand
+    checksum: ae1834343c17775719d53281751cf8a56bee699eeee4732bb933f009a2d83f8f
