@@ -52,6 +52,16 @@ manifest 三处镜像校验和——`contract.py` `CURRENT_SCHEMA_CHECKSUM` 与
 身份列（`domain_id` / `owner_user_id` / `artifact_id` 等）故意不建强外键——对齐 kb 表
 惯例：跨表身份用 TEXT 引用，由服务层保证一致。
 
+### 008 增量（1.1.15 权限模型，随替换包）
+
+启动链 017 已含同构 DDL；存量库走 `migrations/core/20261019_008_artifact_visibility_key_open.sql`
+（online_expand）：
+
+- `kb_artifacts.visibility`（private=仅成员 / public=本域全体绑定用户**可读**；
+  写权限仍由 members 角色 + owner 决定）。
+- `mcp_key_open_artifacts`（钥匙级制品开放子集，对齐 `mcp_key_open_kbs` 模式）：
+  public 不自动暴露给 Agent，每把钥匙显式勾选；读时校验开放行 ⊆ 钥匙主人可见面。
+
 ## 当前决定
 
 ### 1. 三个库逻辑上分开

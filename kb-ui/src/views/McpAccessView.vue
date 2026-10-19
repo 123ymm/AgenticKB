@@ -122,6 +122,7 @@
         v-if="configKey"
         :key-item="configKey"
         :domain-kbs="configDomainKbs"
+        :domain-artifacts="configDomainArtifacts"
         @updated="onPanelUpdated"
         @rotated="reload"
         @revoked="onPanelRevoked"
@@ -135,6 +136,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useKbApi } from '@/api/kb'
+import { useArtifactsApi } from '@/api/artifacts'
 import { managementErrorMessage as apiErrorDetail } from '@/utils/managementError'
 import { useDomainStore } from '@/stores/domain'
 import { useAuthStore } from '@/stores/auth'
@@ -146,6 +148,7 @@ import McpKeyConfigPanel from '@/components/mcp/McpKeyConfigPanel.vue'
 const MAX_KEYS = 10
 
 const kbApi = useKbApi()
+const artifactsApi = useArtifactsApi()
 const domainStore = useDomainStore()
 const auth = useAuthStore()
 const router = useRouter()
@@ -165,6 +168,10 @@ const freshVisible = ref(false)
 const configVisible = ref(false)
 const configKey = ref<McpKeyItem | null>(null)
 const configDomainKbs = ref<{ id: string; name: string; document_count: number }[]>([])
+/** 008：钥匙域内当前用户可见的制品（配置抽屉「开放的知识制品」候选）。 */
+const configDomainArtifacts = ref<
+  { artifact_id: string; title: string; status: string; visibility?: string }[]
+>([])
 
 const activeCount = computed(() => keys.value.filter(k => k.status === 'active').length)
 const atLimit = computed(() => activeCount.value >= MAX_KEYS)
@@ -251,14 +258,25 @@ async function createErrorText(e: unknown): Promise<string> {
 async function openConfig(row: McpKeyItem) {
   configKey.value = row
   configDomainKbs.value = []
+  configDomainArtifacts.value = []
   configVisible.value = true
   try {
     // 钥匙域即数据源——不 watch 页面当前域切换
-    const kbs = await kbApi.listKbs(row.domain)
+    const [kbs, domainArtifacts] = await Promise.all([
+      kbApi.listKbs(row.domain),
+      artifactsApi.list({ domain_id: row.domain }),
+    ])
     // 响应竞态防护：等待期间用户可能已切到另一把钥匙——落地前比对当前钥匙
     // id，不是发起时那把则丢弃，避免旧域库清单覆盖新面板（所见非所得）
     if (configKey.value?.id !== row.id) return
     configDomainKbs.value = kbs.map(k => ({ id: k.id, name: k.name, document_count: k.document_count }))
+    // 008：候选=本域我能看到的制品（public+成员）；Agent 通道只暴露勾选子集
+    configDomainArtifacts.value = domainArtifacts
+      .filter(a => a.domain_id === row.domain)
+      .map(a => ({
+        artifact_id: a.artifact_id, title: a.title,
+        status: a.status, visibility: a.visibility,
+      }))
   } catch (e) {
     ElMessage.error(await apiErrorDetail(e))
   }

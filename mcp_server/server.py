@@ -788,9 +788,9 @@ def _browse_top(ident: Identity, domain: str | None) -> dict:
         "default_domain": resolved,
         "hint": (
             "检索内容用 search_knowledge；按文件名找文件用 get_knowledge 传 "
-            "file_query（跨库）；知识制品（表格数据集）在 artifacts 段，用其 "
-            "artifact_ref（art_）配 get_knowledge 的 query 精确查询；domain 可不传"
-            "（自动使用本钥匙绑定的知识域）。"
+            "file_query（跨库）；知识制品（表格数据集）在 artifacts 段（仅本钥匙"
+            "被开放的部分），用其 artifact_ref（art_）配 get_knowledge 的 query "
+            "精确查询；domain 可不传（自动使用本钥匙绑定的知识域）。"
         ),
     }
     # 61号批次3：发现通道——顶层浏览附带域内可见制品说明卡（前 20 张，Agent

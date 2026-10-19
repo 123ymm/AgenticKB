@@ -105,24 +105,29 @@ class ArtifactDB:
         title: str,
         description: str = "",
         owner_user_id: str,
+        visibility: str = "private",
     ) -> dict[str, Any]:
         if kind not in _VALID_KINDS:
             raise ArtifactError("invalid_kind")
+        if visibility not in ("private", "public"):
+            raise ArtifactError("invalid_visibility")
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 cur = await conn.execute(
                     """INSERT INTO kb_artifacts
                        (artifact_id, domain_id, kind, title, description,
-                        owner_user_id, status, current_revision, draft_open)
+                        owner_user_id, visibility, status, current_revision,
+                        draft_open)
                        VALUES (%(id)s, %(dom)s, %(kind)s, %(title)s, %(desc)s,
-                               %(owner)s, 'draft', 0, FALSE)
+                               %(owner)s, %(vis)s, 'draft', 0, FALSE)
                        RETURNING artifact_id, domain_id, kind, title, description,
-                                 usage_note, owner_user_id, status, current_revision,
-                                 draft_open, created_at, updated_at""",
+                                 usage_note, owner_user_id, visibility, status,
+                                 current_revision, draft_open, created_at, updated_at""",
                     {
                         "id": artifact_id or _new_artifact_id(),
                         "dom": domain_id, "kind": kind, "title": title,
                         "desc": description, "owner": owner_user_id,
+                        "vis": visibility,
                     },
                 )
                 row = dict(await cur.fetchone())  # type: ignore[arg-type]
@@ -137,8 +142,8 @@ class ArtifactDB:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT artifact_id, domain_id, kind, title, description,
-                          usage_note, owner_user_id, status, current_revision,
-                          draft_open, created_at, updated_at
+                          usage_note, owner_user_id, visibility, status,
+                          current_revision, draft_open, created_at, updated_at
                    FROM kb_artifacts WHERE artifact_id = %s""",
                 (artifact_id,),
             )
@@ -152,6 +157,7 @@ class ArtifactDB:
         title: str | None = None,
         description: str | None = None,
         usage_note: str | None = None,
+        visibility: str | None = None,
     ) -> dict[str, Any] | None:
         """PATCH 语义：None=未提供不动（显式清空传空串）。恒 bump updated_at。"""
         sets: list[str] = []
@@ -165,6 +171,9 @@ class ArtifactDB:
         if usage_note is not None:
             params["u"] = usage_note
             sets.append("usage_note = %(u)s")
+        if visibility is not None:
+            params["v"] = visibility
+            sets.append("visibility = %(v)s")
         if not sets:
             return await self.get_artifact(artifact_id)
         async with self._pool.connection() as conn:
@@ -172,8 +181,8 @@ class ArtifactDB:
                 "UPDATE kb_artifacts SET " + ", ".join(sets)
                 + ", updated_at = now() WHERE artifact_id = %(id)s"
                 " RETURNING artifact_id, domain_id, kind, title, description,"
-                " usage_note, owner_user_id, status, current_revision, draft_open,"
-                " created_at, updated_at",
+                " usage_note, owner_user_id, visibility, status, current_revision,"
+                " draft_open, created_at, updated_at",
                 params,
             )
             row = await cur.fetchone()
@@ -188,8 +197,10 @@ class ArtifactDB:
             )
 
     async def delete_artifact(self, artifact_id: str) -> None:
-        """owner 硬删：显式级联（列约定无 FK，删除顺序自底向上）。级联后清
-        本制品动态表达式索引（对抗审查修复⑤：idx_kbtr_{art}_* 不随行表清空）。"""
+        """owner 硬删（service 层已门禁 status=deprecated）：显式级联（列约定
+        无 FK，删除顺序自底向上；钥匙开放行无 artifact 侧 FK，一并显式清）。
+        级联后清本制品动态表达式索引（对抗审查修复⑤：idx_kbtr_{art}_* 不随
+        行表清空）。"""
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 await conn.execute(
@@ -202,6 +213,10 @@ class ArtifactDB:
                 )
                 await conn.execute(
                     "DELETE FROM kb_artifact_batches WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM mcp_key_open_artifacts WHERE artifact_id = %s",
                     (artifact_id,),
                 )
                 await conn.execute(
@@ -224,18 +239,25 @@ class ArtifactDB:
 
         codex三审批号 P2-2：加当前域绑定过滤——被撤域的用户即使残留成员行/
         owner 身份，制品也不再出现在列表（与详情 404 反探测口径对齐；
-        admin 路径在 service 层已分流到 list_all_artifacts，不受影响）。"""
+        admin 路径在 service 层已分流到 list_all_artifacts，不受影响）。
+
+        008 权限模型：public 制品对本域绑定用户开放——非成员出现在列表，
+        my_role 合成为 'viewer'（只读；写权限仍走成员行，前端 canWrite 判定
+        owner/editor 不受影响）。"""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT a.artifact_id, a.domain_id, a.kind, a.title, a.description,
-                          a.usage_note, a.owner_user_id, a.status, a.current_revision,
-                          a.draft_open, a.created_at, a.updated_at,
+                          a.usage_note, a.owner_user_id, a.visibility, a.status,
+                          a.current_revision, a.draft_open, a.created_at, a.updated_at,
                           CASE WHEN a.owner_user_id = %(u)s THEN 'owner'
-                               ELSE m.role END AS my_role
+                               WHEN m.role IS NOT NULL THEN m.role
+                               WHEN a.visibility = 'public' THEN 'viewer'
+                               ELSE NULL END AS my_role
                    FROM kb_artifacts a
                    LEFT JOIN kb_artifact_members m
                           ON m.artifact_id = a.artifact_id AND m.user_id = %(u)s
-                   WHERE (a.owner_user_id = %(u)s OR m.user_id IS NOT NULL)
+                   WHERE (a.owner_user_id = %(u)s OR m.user_id IS NOT NULL
+                          OR a.visibility = 'public')
                      AND EXISTS (SELECT 1 FROM user_domains ud
                                  WHERE ud.user_id = %(u)s
                                    AND ud.domain = a.domain_id)
@@ -255,12 +277,35 @@ class ArtifactDB:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT a.artifact_id, a.domain_id, a.kind, a.title, a.description,
-                          a.usage_note, a.owner_user_id, a.status, a.current_revision,
-                          a.draft_open, a.created_at, a.updated_at
+                          a.usage_note, a.owner_user_id, a.visibility, a.status,
+                          a.current_revision, a.draft_open, a.created_at, a.updated_at
                    FROM kb_artifacts a""" + clause + " ORDER BY a.created_at",
                 params,
             )
             return [dict(r) for r in await cur.fetchall()]
+
+    async def readable_artifact_domain(
+        self, artifact_id: str, user_id: str,
+    ) -> str | None:
+        """钥匙开放集候选校验（008）：用户对制品的**读可见面**——成员/owner/
+        public 三者之一，且当前绑定在制品域内。可读 → 返回 domain_id（供
+        key.domain 一致性校验）；不可读/不存在 → None（调用方静默丢弃）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT a.domain_id
+                   FROM kb_artifacts a
+                   WHERE a.artifact_id = %(a)s
+                     AND (a.owner_user_id = %(u)s OR a.visibility = 'public'
+                          OR EXISTS (SELECT 1 FROM kb_artifact_members m
+                                     WHERE m.artifact_id = a.artifact_id
+                                       AND m.user_id = %(u)s))
+                     AND EXISTS (SELECT 1 FROM user_domains ud
+                                 WHERE ud.user_id = %(u)s
+                                   AND ud.domain = a.domain_id)""",
+                {"a": artifact_id, "u": user_id},
+            )
+            row = await cur.fetchone()
+            return str(row["domain_id"]) if row else None
 
     # ---------------------------------------------------------------- 成员
 
@@ -557,6 +602,8 @@ class ArtifactDB:
     async def deprecate(
         self, artifact_id: str, expected_updated_at: Any = None,
     ) -> dict[str, Any]:
+        """停用：draft/published → deprecated。008 起从未发布的草稿也可停用
+        ——删除门禁=必须先停用，若 draft 不达 deprecated 则废稿永远删不掉。"""
         return await self._set_status(
             artifact_id, "deprecated", expected_updated_at,
         )
@@ -564,7 +611,8 @@ class ArtifactDB:
     async def republish(
         self, artifact_id: str, expected_updated_at: Any = None,
     ) -> dict[str, Any]:
-        """deprecated → published（保持 current_revision，不产生新版本）。"""
+        """deprecated → published（保持 current_revision，不产生新版本）；
+        从未发布过（current_revision=0）的停用稿恢复回 draft。"""
         return await self._set_status(
             artifact_id, "published", expected_updated_at,
         )
@@ -573,21 +621,37 @@ class ArtifactDB:
         self, artifact_id: str, target: str, expected_updated_at: Any = None,
     ) -> dict[str, Any]:
         """codex三审 P1-4：事务内 FOR UPDATE 取行 + updated_at 比对后再生效——
-        旧实现裸 UPDATE 无锁内校验（service 前置快检与写之间存在竞态窗口）。"""
-        source = "published" if target == "deprecated" else "deprecated"
+        旧实现裸 UPDATE 无锁内校验（service 前置快检与写之间存在竞态窗口）。
+
+        008 状态机：deprecate 接受 draft/published 双源（废稿也要能停用→删除）；
+        republish 按是否有发布版分流——从未发布回 draft，发布过回 published。"""
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 await self._assert_expected_updated_at(
                     conn, artifact_id, expected_updated_at,
                 )
-                cur = await conn.execute(
-                    """UPDATE kb_artifacts SET status = %s, updated_at = now()
-                       WHERE artifact_id = %s AND status = %s
-                       RETURNING artifact_id, domain_id, kind, title, description,
-                                 usage_note, owner_user_id, status, current_revision,
-                                 draft_open, created_at, updated_at""",
-                    (target, artifact_id, source),
-                )
+                if target == "deprecated":
+                    cur = await conn.execute(
+                        """UPDATE kb_artifacts
+                           SET status = 'deprecated', updated_at = now()
+                           WHERE artifact_id = %s AND status IN ('draft', 'published')
+                           RETURNING artifact_id, domain_id, kind, title, description,
+                                     usage_note, owner_user_id, visibility, status,
+                                     current_revision, draft_open, created_at, updated_at""",
+                        (artifact_id,),
+                    )
+                else:
+                    cur = await conn.execute(
+                        """UPDATE kb_artifacts
+                           SET status = CASE WHEN current_revision > 0
+                                             THEN 'published' ELSE 'draft' END,
+                               updated_at = now()
+                           WHERE artifact_id = %s AND status = 'deprecated'
+                           RETURNING artifact_id, domain_id, kind, title, description,
+                                     usage_note, owner_user_id, visibility, status,
+                                     current_revision, draft_open, created_at, updated_at""",
+                        (artifact_id,),
+                    )
                 row = await cur.fetchone()
                 if row is None:
                     raise ArtifactError("invalid_status")

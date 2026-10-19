@@ -75,7 +75,7 @@ TRUNCATE_TABLES = (
 # 保留白名单（绝不触碰）：control-plane + 存储层 + 审计/观测
 PRESERVED_TABLES = frozenset({
     "kb_users", "kb_folders", "kb_members", "knowledge_bases",
-    "mcp_keys", "mcp_key_open_kbs",
+    "mcp_keys", "mcp_key_open_kbs", "mcp_key_open_artifacts",
     "asset_documents", "asset_storage_objects",
     "agent_llm_attempts", "agent_llm_events", "agent_llm_model_calls",
     "agent_llm_prompt_templates", "agent_llm_requests", "agent_llm_results",

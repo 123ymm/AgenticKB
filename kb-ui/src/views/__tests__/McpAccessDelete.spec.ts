@@ -10,7 +10,13 @@ const ui = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/kb', () => ({ useKbApi: () => api }))
-vi.mock('@/api/proxyClient', () => ({ apiErrorDetail: async () => '失败' }))
+vi.mock('@/api/artifacts', () => ({ useArtifactsApi: () => ({ list: async () => [] }) }))
+vi.mock('@/api/proxyClient', () => ({
+  apiErrorDetail: async () => '失败',
+  createProxyClient: vi.fn(() => ({ get: vi.fn() })),
+  extractOne: vi.fn(),
+  installAuthInterceptors: vi.fn(),
+}))
 vi.mock('@/stores/domain', () => ({
   useDomainStore: () => ({ currentDomain: 'generic', enabledDomains: [], fetchDomains: vi.fn() }),
 }))

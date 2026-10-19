@@ -2,84 +2,92 @@
   <div class="schema-panel">
     <div class="schema-panel__bar">
       <span class="schema-panel__count">{{ activeColumns.length }} 列（active）</span>
-      <label class="schema-panel__check">
-        <input type="checkbox" v-model="includeDropped" @change="onIncludeDropped" />显示已删列
-      </label>
+      <el-switch
+        v-model="includeDropped"
+        size="small"
+        data-test="schema-show-dropped"
+        @change="onIncludeDropped"
+      />
+      <span class="schema-panel__check">显示已删列</span>
       <div v-if="canWrite" class="schema-panel__actions">
         <el-button size="small" data-test="schema-set-pk" @click="openPk">设置主键</el-button>
         <el-button size="small" type="primary" data-test="schema-add-col" @click="openAdd">新建列</el-button>
       </div>
     </div>
 
-    <div class="schema-panel__cards">
-      <div
-        v-for="col in displayedColumns"
-        :key="col.column_id"
-        class="schema-panel__card"
-        :class="{ 'schema-panel__card--dropped': col.status === 'dropped' }"
-      >
-        <div class="schema-panel__card-head">
-          <b class="schema-panel__col-name">{{ col.column_name }}</b>
-          <span class="schema-panel__col-id">{{ col.column_id }}</span>
-          <el-tag size="small" effect="plain" :type="typeTagType(col.column_type)">
-            {{ col.column_type }}
+    <el-table :data="displayedColumns" size="small" row-key="column_id" :row-class-name="rowClass">
+      <el-table-column label="列名" min-width="170">
+        <template #default="{ row }">
+          <el-tooltip :content="`column_id: ${row.column_id}`" placement="top">
+            <span class="schema-panel__col-name">{{ row.column_name }}</span>
+          </el-tooltip>
+          <el-tag v-if="(row.alias ?? []).length" size="small" type="info" effect="plain" class="schema-panel__alias">
+            旧名：{{ (row.alias ?? []).join('、') }}
           </el-tag>
-          <el-tag v-if="col.is_primary_key" size="small" type="danger" effect="dark">主键</el-tag>
-          <el-tag v-if="(col.alias ?? []).length" size="small" type="info" effect="plain">
-            旧名：{{ (col.alias ?? []).join('、') }}
+        </template>
+      </el-table-column>
+      <el-table-column label="类型" width="90">
+        <template #default="{ row }">
+          <el-tag size="small" effect="plain" :type="typeTagType(row.column_type)">
+            {{ typeLabel(row.column_type) }}
           </el-tag>
-          <span v-if="col.status === 'dropped'" class="schema-panel__dropped-text">已删（单调扩展铁律：不物理删）</span>
-        </div>
-        <div v-if="col.column_type === 'enum'" class="schema-panel__enums">
-          <el-tag
-            v-for="v in col.enum_values ?? []"
-            :key="String(v)"
+        </template>
+      </el-table-column>
+      <el-table-column label="主键" width="70" align="center">
+        <template #default="{ row }">
+          <el-tag v-if="row.is_primary_key" size="small" type="danger" effect="dark">主键</el-tag>
+          <span v-else class="schema-panel__muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="索引" width="80" align="center">
+        <template #default="{ row }">
+          <el-switch
+            :key="`idx-${row.column_id}-${indexTick}`"
+            :model-value="row.is_indexed"
             size="small"
-            closable
-            :disable-transitions="true"
-            @close="canWrite && removeEnumValue(col, v)"
-          >{{ v }}</el-tag>
-          <el-input
-            v-if="canWrite"
-            v-model="enumInputs[col.column_id]"
-            size="small"
-            style="width: 110px"
-            placeholder="+ 枚举值"
-            @keyup.enter="addEnumValue(col)"
+            :disabled="!canWrite || row.status === 'dropped'"
+            data-test="schema-index-toggle"
+            @change="toggleIndexed(row, $event as boolean)"
           />
-        </div>
-        <div class="schema-panel__card-foot">
-          <label class="schema-panel__check">
-            索引
-            <!-- 失败回弹：checkbox DOM 已被用户翻转，state 未变不会重渲染——key 强制回同步 -->
-            <input
-              :key="`idx-${col.column_id}-${indexTick}`"
-              type="checkbox"
-              :checked="col.is_indexed"
-              :disabled="!canWrite || col.status === 'dropped'"
-              @change="toggleIndexed(col, ($event.target as HTMLInputElement).checked)"
+        </template>
+      </el-table-column>
+      <el-table-column label="枚举值" min-width="220">
+        <template #default="{ row }">
+          <template v-if="row.column_type === 'enum'">
+            <el-tag
+              v-for="v in row.enum_values ?? []"
+              :key="String(v)"
+              size="small"
+              closable
+              :disable-transitions="true"
+              @close="canWrite && removeEnumValue(row, v)"
+            >{{ v }}</el-tag>
+            <el-input
+              v-if="canWrite && row.status === 'active'"
+              v-model="enumInputs[row.column_id]"
+              size="small"
+              style="width: 120px"
+              placeholder="+ 回车追加"
+              @keyup.enter="addEnumValue(row)"
             />
-          </label>
-          <el-button
-            v-if="canWrite && col.status === 'active'"
-            size="small"
-            text
-            type="primary"
-            data-test="schema-edit-col"
-            @click="openEdit(col)"
-          >编辑</el-button>
-          <el-button
-            v-if="canWrite && col.status === 'active'"
-            size="small"
-            text
-            type="danger"
-            data-test="schema-drop-col"
-            @click="dropColumn(col)"
-          >软删</el-button>
-        </div>
-      </div>
-      <EmptyState v-if="displayedColumns.length === 0" text="尚无列定义（上传 Excel 或手工新建）" />
-    </div>
+            <span v-if="!(row.enum_values ?? []).length" class="schema-panel__muted">（未定义）</span>
+          </template>
+          <span v-else class="schema-panel__muted">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="canWrite" label="操作" width="130" fixed="right">
+        <template #default="{ row }">
+          <template v-if="row.status === 'active'">
+            <el-button size="small" text type="primary" data-test="schema-edit-col" @click="openEdit(row)">编辑</el-button>
+            <el-button size="small" text type="danger" data-test="schema-drop-col" @click="dropColumn(row)">软删</el-button>
+          </template>
+          <span v-else class="schema-panel__dropped-text">已删（保留数据）</span>
+        </template>
+      </el-table-column>
+      <template #empty>
+        <EmptyState text="尚无列定义（上传 Excel 或手工新建）" />
+      </template>
+    </el-table>
 
     <!-- 新建列 -->
     <el-dialog v-model="addVisible" title="新建列" width="480px">
@@ -384,23 +392,29 @@ function typeTagType(value: string): 'primary' | 'success' | 'warning' | 'info' 
   return 'info'
 }
 
+function typeLabel(value: string): string {
+  return COLUMN_TYPES.find(t => t.value === value)?.label ?? value
+}
+
+/** 已删列整行弱化（el-table row-class-name）。 */
+function rowClass({ row }: { row: ArtifactColumn }): string {
+  return row.status === 'dropped' ? 'schema-panel__row-dropped' : ''
+}
+
 defineExpose({ openAdd, submitAdd, openEdit, submitEdit, submitPk, dropColumn })
 </script>
 
 <style scoped>
 .schema-panel { display: flex; flex-direction: column; gap: 10px; }
-.schema-panel__bar { display: flex; align-items: center; gap: 14px; }
+.schema-panel__bar { display: flex; align-items: center; gap: 10px; }
 .schema-panel__count { font-size: 13px; color: var(--kb-text-tertiary); }
-.schema-panel__check { font-size: 12.5px; color: var(--kb-text-tertiary); display: inline-flex; align-items: center; gap: 4px; }
+.schema-panel__check { font-size: 12.5px; color: var(--kb-text-tertiary); }
 .schema-panel__actions { margin-left: auto; display: flex; gap: 8px; }
-.schema-panel__cards { display: flex; flex-direction: column; gap: 8px; }
-.schema-panel__card { border: 1px solid var(--kb-border-light, #e4e7ed); border-radius: 6px; padding: 10px 14px; }
-.schema-panel__card--dropped { opacity: 0.55; background: var(--kb-bg-card, #fafafa); }
-.schema-panel__card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.schema-panel__col-name { font-size: 14px; }
-.schema-panel__col-id { font-size: 12px; color: var(--kb-text-tertiary); }
+.schema-panel__col-name { font-weight: 600; cursor: default; }
+.schema-panel__alias { margin-left: 6px; }
+.schema-panel__muted { color: var(--kb-text-tertiary); }
 .schema-panel__dropped-text { font-size: 12px; color: var(--el-color-danger, #f56c6c); }
-.schema-panel__enums { margin-top: 8px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.schema-panel__card-foot { margin-top: 8px; display: flex; align-items: center; gap: 10px; }
 .schema-panel__pk-hint { font-size: 12.5px; color: var(--kb-text-tertiary); margin: 0 0 8px; }
+/* 已删行弱化（scoped 下 el-table 行类需要 :deep） */
+:deep(.schema-panel__row-dropped) { opacity: 0.55; }
 </style>

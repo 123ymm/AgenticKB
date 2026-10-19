@@ -2,7 +2,7 @@
   <div class="artifact-list">
     <header class="artifact-list__header">
       <div>
-        <p>上传 Excel 建表发布，供 Agent 结构化查询；列表口径=我参与的（管理员见全部）。</p>
+        <p>上传 Excel 建表发布，供 Agent 结构化查询；列表=我参与的 + 本域公开制品（管理员见全部）。</p>
       </div>
       <el-button type="primary" data-test="create-artifact" @click="openCreate">新建制品</el-button>
     </header>
@@ -16,6 +16,13 @@
       <el-table-column label="类型" width="90">
         <template #default="{ row }">
           <el-tag size="small" effect="plain">{{ row.kind === 'wiki' ? 'Wiki' : '表格' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="可见性" width="90">
+        <template #default="{ row }">
+          <el-tag size="small" :type="row.visibility === 'public' ? 'success' : 'info'" effect="plain">
+            {{ row.visibility === 'public' ? '公开' : '私有' }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="100">

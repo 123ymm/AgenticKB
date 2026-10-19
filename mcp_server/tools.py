@@ -209,7 +209,10 @@ def query_artifact(
 ) -> dict:
     """art_ ref + 白名单 DSL：query=None → artifact_card（元信息+列能力）；
     有 query → artifact_rows / artifact_aggregate。三视图上游已带 view 自标识，
-    本层原样透传（与 st_ 族不同：制品按域开放，不收 kb_ids）。"""
+    本层原样透传（与 st_ 族不同：制品按域开放，不收 kb_ids）。
+
+    008：透传 key_id——serving 谓词要求制品落在钥匙显式勾选的开放子集内
+    （public 不自动暴露给 Agent，子集不放大）。"""
     return _post_serving("/api/internal/artifact-query", {
         "artifact_ref": ref,
         "domain": domain,
@@ -217,6 +220,7 @@ def query_artifact(
         # MCP 钥匙均为用户钥匙（验钥响应无 admin 面）——is_admin 恒 false；
         # serving 的 admin 可见性通道只服务网页端，不暴露给 Agent。
         "is_admin": False,
+        "key_id": identity.key_id or None,
         "query": query,
     })
 
@@ -225,11 +229,12 @@ def list_artifacts(
     domain: str, identity: Identity,
     cursor: str | None = None, limit: int = 20,
 ) -> dict:
-    """发现通道：域内已发布且可见的制品说明卡（updated_at DESC keyset 翻页）。"""
+    """发现通道：钥匙开放子集内的制品说明卡（008；updated_at DESC keyset 翻页）。"""
     return _post_serving("/api/internal/artifact-list", {
         "domain": domain,
         "username": identity.username,
         "is_admin": False,  # 同上：MCP 钥匙无 admin 面
+        "key_id": identity.key_id or None,
         "cursor": cursor,
         "limit": limit,
     })

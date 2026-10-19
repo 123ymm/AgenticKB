@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS kb_artifacts (
     description      TEXT NOT NULL DEFAULT '',
     usage_note       TEXT NOT NULL DEFAULT '',
     owner_user_id    TEXT NOT NULL,
+    -- 1.1.15 权限模型（008）：private=仅成员；public=本域全体绑定用户可读。
+    -- public 只放大"读"；写（编辑/发布/成员管理）仍走 members 角色与 owner。
+    visibility       TEXT NOT NULL DEFAULT 'private'
+                     CONSTRAINT ck_kb_artifacts_visibility CHECK (visibility IN ('private','public')),
     status           TEXT NOT NULL DEFAULT 'draft'
                      CONSTRAINT ck_kb_artifacts_status CHECK (status IN ('draft','published','deprecated')),
     current_revision INTEGER NOT NULL DEFAULT 0,
@@ -87,3 +91,15 @@ CREATE TABLE IF NOT EXISTS kb_table_rows (
     updated_by  TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (artifact_id, revision, row_key)
 );
+
+-- 1.1.15 权限模型（008）：钥匙级制品开放子集（对齐 mcp_key_open_kbs 模式）。
+-- public ≠ 自动暴露给 Agent——每把钥匙显式勾选；读时校验开放行仍 ⊆ 钥匙主人
+-- 可见面（子集不放大），制品侧无 FK 惯例，钥匙侧 FK 级联随钥匙删除。
+CREATE TABLE IF NOT EXISTS mcp_key_open_artifacts (
+    key_id      TEXT NOT NULL REFERENCES mcp_keys(id) ON DELETE CASCADE,
+    artifact_id TEXT NOT NULL,
+    granted_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (key_id, artifact_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_key_open_artifacts_artifact
+    ON mcp_key_open_artifacts(artifact_id);

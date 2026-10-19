@@ -145,6 +145,10 @@ class McpKeyService:
             key["domain_bound"] = is_admin or await self._db.can_create_in_domain(
                 user_id=user_id, domain=key["domain"],
             )
+            # 008：列表附带钥匙开放制品集（配置抽屉回显；钥匙 ≤10 把，逐把
+            # 一次查询可接受——与 domain_bound 同趟模式）
+            key["open_artifact_ids"] = await self._db.key_open_artifact_ids(
+                key_id=key["id"])
             if key.get("open_tools"):
                 normalized = normalize_legacy_open_tools(list(key["open_tools"]))
                 if normalized is not None:
@@ -161,6 +165,9 @@ class McpKeyService:
             if normalized is not None:
                 status["open_tools"] = normalized
         status["open_kb_ids"] = await self._db.key_open_kb_ids(key_id=key_id)
+        # 008：钥匙级制品开放子集（配置抽屉用）。
+        status["open_artifact_ids"] = await self._db.key_open_artifact_ids(
+            key_id=key_id)
         # 终审整改：单钥匙响应自带 domain_bound（与 list_keys 同源语义）——
         # update_config 等返回本组装的端点不再让前端把健康钥匙误标「域已解绑」。
         status["domain_bound"] = await self._db.can_create_in_domain(
@@ -264,6 +271,32 @@ class McpKeyService:
             )
         return await self._db.replace_mcp_key_open_kbs(
             key_id=key_id, kb_ids=effective,
+        )
+
+    async def replace_open_artifacts(
+        self, *, user_id: str, key_id: str, artifact_ids: list[str],
+        artifact_db: Any,
+    ) -> list[str]:
+        """全量覆盖钥匙开放制品（008）：**静默剔除**主人当前不可见（被移出
+        成员且非 public / 撤域）或不在钥匙域内的制品——权限收缩是合法演化，
+        不阻塞保存。子集不放大：开放行 ⊆ 主人读可见面；serving 读时再校验
+        一次（防保存后权限继续收缩的窗口）。"""
+        key = await self._require_owned_active(user_id=user_id, key_id=key_id)
+        unique = list(dict.fromkeys(artifact_ids))
+        effective: list[str] = []
+        for artifact_id in unique:
+            domain = await artifact_db.readable_artifact_domain(
+                artifact_id, user_id)
+            if domain is not None and domain == key["domain"]:
+                effective.append(artifact_id)
+        dropped = len(unique) - len(effective)
+        if dropped:
+            logging.getLogger(__name__).info(
+                "replace_open_artifacts: dropped %d stale/invisible artifact(s) "
+                "for key %s (user %s)", dropped, key_id, user_id,
+            )
+        return await self._db.replace_mcp_key_open_artifacts(
+            key_id=key_id, artifact_ids=effective,
         )
 
     async def update_config(

@@ -74,14 +74,15 @@ class FakeArtifactDB:
     async def create_artifact(
         self, *, domain_id: str, kind: str = "table", title: str,
         description: str = "", owner_user_id: str, artifact_id: str | None = None,
-        usage_note: str = "",
+        usage_note: str = "", visibility: str = "private",
     ) -> dict:
         # 默认 id 与真库同规则（art_+hex）——单测试内多次 create 不互踩
         aid = artifact_id or f"art_{uuid.uuid4().hex[:12]}"
         row = {
             "artifact_id": aid, "domain_id": domain_id, "kind": kind,
             "title": title, "description": description, "usage_note": usage_note,
-            "owner_user_id": owner_user_id, "status": "draft",
+            "owner_user_id": owner_user_id, "visibility": visibility,
+            "status": "draft",
             "current_revision": 0, "draft_open": False,
             "created_at": NOW, "updated_at": NOW,
         }
@@ -95,8 +96,25 @@ class FakeArtifactDB:
         art = self.artifacts.get(artifact_id)
         return dict(art) if art else None
 
+    async def readable_artifact_domain(
+        self, artifact_id: str, user_id: str,
+    ) -> str | None:
+        """008 钥匙候选校验桩：成员/owner/public 且域绑定 → domain_id。"""
+        art = self.artifacts.get(artifact_id)
+        if art is None:
+            return None
+        if (user_id, art["domain_id"]) not in self.domain_bindings:
+            return None
+        if art.get("visibility") == "public":
+            return art["domain_id"]
+        members = self.members.get(artifact_id, {})
+        if members.get(user_id) or art.get("owner_user_id") == user_id:
+            return art["domain_id"]
+        return None
+
     async def update_artifact_meta(
-        self, artifact_id: str, *, title=None, description=None, usage_note=None,
+        self, artifact_id: str, *, title=None, description=None,
+        usage_note=None, visibility=None,
     ) -> dict | None:
         art = self.artifacts.get(artifact_id)
         if art is None:
@@ -107,6 +125,8 @@ class FakeArtifactDB:
             art["description"] = description
         if usage_note is not None:
             art["usage_note"] = usage_note
+        if visibility is not None:
+            art["visibility"] = visibility
         self._touch(artifact_id)
         return dict(art)
 
@@ -287,7 +307,8 @@ class FakeArtifactDB:
     async def deprecate(self, artifact_id: str, expected_updated_at=None) -> dict:
         art = self.artifacts[artifact_id]
         self._assert_expected(artifact_id, expected_updated_at)
-        if art["status"] != "published":
+        # 008：draft/published 双源可停用（废稿也要能走 停用→删除 两级确认）
+        if art["status"] not in ("draft", "published"):
             raise ArtifactRepoError("invalid_status")
         art["status"] = "deprecated"
         self._touch(artifact_id)
@@ -298,7 +319,8 @@ class FakeArtifactDB:
         self._assert_expected(artifact_id, expected_updated_at)
         if art["status"] != "deprecated":
             raise ArtifactRepoError("invalid_status")
-        art["status"] = "published"
+        # 008：从未发布过（current_revision=0）恢复回 draft，发布过回 published
+        art["status"] = "published" if art["current_revision"] > 0 else "draft"
         self._touch(artifact_id)
         return dict(art)
 
@@ -657,6 +679,7 @@ async def test_site_admin_bypasses_every_gate() -> None:
     await svc.upsert_member(
         user=admin, artifact_id=AID, member_user_id="u-new", role="viewer",
     )
+    db.artifacts[AID]["status"] = "deprecated"  # 删除门禁：先停用才可删（008）
     await svc.delete_artifact(user=admin, artifact_id=AID)
     assert await db.get_artifact(AID) is None
 
@@ -680,6 +703,7 @@ async def test_domain_admin_manages_own_domain_but_404_cross_domain() -> None:
     await svc.upsert_member(
         user=domadmin, artifact_id=AID, member_user_id="u-new", role="editor",
     )
+    db.artifacts[AID]["status"] = "deprecated"  # 删除门禁：先停用才可删（008）
     await svc.delete_artifact(user=domadmin, artifact_id=AID)
     # 跨域且非成员 → 404（反探测，不是 403）
     with pytest.raises(ArtifactNotFound):
@@ -704,7 +728,84 @@ async def test_owner_full_access() -> None:
         user=owner, artifact_id=AID, member_user_id="u-new", role="viewer",
     )
     await svc.remove_member(user=owner, artifact_id=AID, member_user_id="u-new")
+    db.artifacts[AID]["status"] = "deprecated"  # 删除门禁：先停用才可删（008）
     await svc.delete_artifact(user=owner, artifact_id=AID)
+
+
+# ------------------------------------------------ 008：删除门禁与可见性模型
+
+@pytest.mark.asyncio
+async def test_delete_requires_deprecated_gate() -> None:
+    """删除=级联硬删不可恢复：draft/published 状态一律 409 口径拒绝
+    （artifact_not_deprecated），停用后才放行。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    owner = _user("u-owner")
+    with pytest.raises(InvalidOperation) as ei:
+        await svc.delete_artifact(user=owner, artifact_id=AID)
+    assert str(ei.value) == "artifact_not_deprecated"
+    assert await db.get_artifact(AID) is not None  # 未删
+    db.artifacts[AID]["status"] = "deprecated"
+    await svc.delete_artifact(user=owner, artifact_id=AID)
+    assert await db.get_artifact(AID) is None
+
+
+@pytest.mark.asyncio
+async def test_public_visibility_read_only_for_domain_user() -> None:
+    """008 可见性：private 非成员 404；public 本域绑定用户合成 viewer——
+    可读详情/行，写（编辑/翻转可见性）403；owner 可翻 public/private。"""
+    db = await _seeded_db()
+    svc = ArtifactService(db)
+    stranger = _user("u-stranger")  # 域内绑定（_seeded_db 绑定面）但非成员
+    with pytest.raises(ArtifactNotFound):
+        await svc.get_artifact(user=stranger, artifact_id=AID)
+
+    db.artifacts[AID]["visibility"] = "public"
+    detail = await svc.get_artifact(user=stranger, artifact_id=AID)
+    assert detail["my_role"] == "viewer"
+    # 读面放行（运行态行）
+    assert (await svc.list_rows(user=stranger, artifact_id=AID))["total"] == 2
+    # 写面拒绝：编辑格 / 改元信息（含翻转可见性——owner 专属）
+    with pytest.raises(ArtifactForbidden):
+        await svc.update_cell(
+            user=stranger, artifact_id=AID, row_key="MOP-1",
+            column="L1", value="越权",
+        )
+    with pytest.raises(ArtifactForbidden):
+        await svc.update_meta(
+            user=stranger, artifact_id=AID, fields={"title": "改名"})
+
+    # editor 也不能翻转可见性（治理决策 owner 专属），但可改标题
+    db.members.setdefault(AID, {})["u-editor"] = "editor"
+    editor = _user("u-editor")
+    with pytest.raises(ArtifactForbidden):
+        await svc.update_meta(
+            user=editor, artifact_id=AID, fields={"visibility": "private"})
+    updated = await svc.update_meta(
+        user=editor, artifact_id=AID, fields={"title": "编辑可改名"})
+    assert updated["title"] == "编辑可改名"
+
+    # owner 翻回 private → 非成员立刻 404（读时校验，无清理窗口）
+    owner = _user("u-owner")
+    await svc.update_meta(user=owner, artifact_id=AID,
+                          fields={"visibility": "private"})
+    with pytest.raises(ArtifactNotFound):
+        await svc.get_artifact(user=stranger, artifact_id=AID)
+
+
+@pytest.mark.asyncio
+async def test_readable_artifact_domain_drives_key_candidates() -> None:
+    """钥匙候选=读可见面：public/成员/owner 三来源可读；撤域后即使 public
+    也不可读（与列表/详情口径一致）。"""
+    db = await _seeded_db()
+    assert await db.readable_artifact_domain(AID, "u-owner") == "plant-a"
+    db.artifacts[AID]["visibility"] = "public"
+    assert await db.readable_artifact_domain(AID, "u-stranger") == "plant-a"
+    db.artifacts[AID]["visibility"] = "private"
+    assert await db.readable_artifact_domain(AID, "u-stranger") is None
+    # 撤域：owner 也不可读（域绑定是可见性前置）
+    db.domain_bindings.discard(("u-owner", "plant-a"))
+    assert await db.readable_artifact_domain(AID, "u-owner") is None
 
 
 @pytest.mark.asyncio

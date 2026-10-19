@@ -70,12 +70,14 @@ class ArtifactCreate(BaseModel):
     title: str
     description: str | None = None
     domain_id: str | None = Field(default=None, max_length=128)
+    visibility: str = Field(default="private", pattern="^(private|public)$")
 
 
 class ArtifactMetaPatch(BaseModel):
     title: str | None = None
     description: str | None = None
     usage_note: str | None = None
+    visibility: str | None = Field(default=None, pattern="^(private|public)$")
     expected_updated_at: str | None = None
 
 
@@ -176,6 +178,11 @@ def _map_error(exc: ArtifactError) -> HTTPException:
         return HTTPException(409, {"code": "stale_artifact",
                                    "message": "制品已被他人修改，请刷新后重试"})
     if isinstance(exc, InvalidOperation):
+        if str(exc) == "artifact_not_deprecated":
+            return HTTPException(409, {
+                "code": "artifact_not_deprecated",
+                "message": "必须先停用（deprecate）制品才能删除——删除是级联硬删且不可恢复",
+            })
         return HTTPException(400, str(exc))
     return HTTPException(500, str(exc))
 
@@ -232,6 +239,7 @@ async def create_artifact(
         return await svc.create_artifact(
             user=user, domain_id=domain_id, kind="table",
             title=body.title, description=body.description,
+            visibility=body.visibility,
         )
     except ArtifactError as exc:
         raise _map_error(exc) from None

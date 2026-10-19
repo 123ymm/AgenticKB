@@ -27,12 +27,15 @@ export interface ArtifactCreateRequest {
   title: string
   description?: string
   domain_id?: string
+  visibility?: string
 }
 
 export interface ArtifactMetaPatchRequest {
   title?: string
   description?: string
   usage_note?: string
+  /** 008：owner 专属（后端非 owner 403）。 */
+  visibility?: string
   expected_updated_at?: string
 }
 

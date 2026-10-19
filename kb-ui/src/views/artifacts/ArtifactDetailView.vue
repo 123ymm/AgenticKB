@@ -17,6 +17,9 @@
         <el-tag v-if="artifact?.draft_open" size="small" type="warning" effect="plain">
           draft 开放中
         </el-tag>
+        <el-tag v-if="artifact" size="small" :type="artifact.visibility === 'public' ? 'success' : 'info'">
+          {{ artifact.visibility === 'public' ? '公开' : '私有' }}
+        </el-tag>
       </div>
       <div v-if="artifact && canWrite" class="artifact-detail__actions">
         <el-tooltip
@@ -33,9 +36,27 @@
             >发布</el-button>
           </span>
         </el-tooltip>
-        <el-button v-if="artifact.status === 'published'" @click="deprecateArtifact">停用</el-button>
+        <el-button v-if="artifact.status !== 'deprecated'" @click="deprecateArtifact">停用</el-button>
         <el-button v-if="artifact.status === 'deprecated'" @click="republishArtifact">恢复</el-button>
         <el-button v-if="artifact.draft_open" @click="discardDraftAction">丢弃 draft</el-button>
+        <!-- 008 删除门禁：owner 且已停用才可删（级联硬删不可恢复）；未停用时置灰指路 -->
+        <el-tooltip
+          :content="artifact.status === 'deprecated'
+            ? '级联硬删（行/列/版本/成员），不可恢复——请再次确认'
+            : '必须先停用（deprecate）制品，删除入口才会开放'"
+          placement="bottom"
+        >
+          <span>
+            <el-button
+              v-if="isOwner"
+              type="danger"
+              plain
+              :disabled="artifact.status !== 'deprecated'"
+              data-test="delete-artifact"
+              @click="deleteArtifact"
+            >删除</el-button>
+          </span>
+        </el-tooltip>
       </div>
     </div>
 
@@ -103,7 +124,13 @@
         </div>
 
         <el-table v-loading="rowsLoading" :data="runtimeRows" size="small">
-          <el-table-column prop="row_key" label="行键" min-width="160" show-overflow-tooltip />
+          <el-table-column label="行键" min-width="150">
+            <template #default="{ row }">
+              <el-tooltip :content="row.row_key" placement="top" :disabled="row.row_key === displayRowKey(row)">
+                <span>{{ displayRowKey(row) }}</span>
+              </el-tooltip>
+            </template>
+          </el-table-column>
           <el-table-column
             v-for="col in runtimeColumns"
             :key="col.column_id"
@@ -150,7 +177,7 @@
       </el-tab-pane>
     </el-tabs>
 
-    <!-- 编辑元信息（PATCH：title/description/usage_note + 乐观锁） -->
+    <!-- 编辑元信息（PATCH：title/description/usage_note[/visibility owner] + 乐观锁） -->
     <el-dialog v-model="metaVisible" title="编辑元信息" width="560px">
       <el-form label-width="80px">
         <el-form-item label="标题">
@@ -166,6 +193,16 @@
             :rows="3"
             placeholder="给 Agent 使用者的说明——发布前必填（usage_note 门禁）"
           />
+        </el-form-item>
+        <!-- 008：公开/私有是 owner 专属治理决策（后端 403 兜底，前端同时收敛入口） -->
+        <el-form-item v-if="isOwner" label="可见性">
+          <el-radio-group v-model="metaForm.visibility" data-test="meta-visibility">
+            <el-radio value="private">私有（仅成员可见）</el-radio>
+            <el-radio value="public">公开（本域所有用户可读）</el-radio>
+          </el-radio-group>
+          <div class="artifact-detail__visibility-hint">
+            公开只放大「读」——编辑/发布/成员管理仍走成员角色；Agent 侧还需在 MCP 钥匙里显式开放。
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -190,6 +227,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
@@ -201,11 +239,13 @@ import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
 import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
 import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.vue'
 import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
+import { decodeRowKey } from '@/utils/rowKey'
 import type { ArtifactColumn, ArtifactDetail, ArtifactRow } from '@/types/artifacts'
 
 const props = defineProps<{ artifactId: string }>()
 
 const api = useArtifactsApi()
+const router = useRouter()
 
 const artifact = ref<ArtifactDetail | null>(null)
 const loading = ref(false)
@@ -228,7 +268,7 @@ const rowsPanel = ref<InstanceType<typeof ArtifactRowsPanel> | null>(null)
 // 元信息编辑
 const metaVisible = ref(false)
 const metaSaving = ref(false)
-const metaForm = ref({ title: '', description: '', usage_note: '' })
+const metaForm = ref({ title: '', description: '', usage_note: '', visibility: 'private' })
 
 // 发布
 const publishVisible = ref(false)
@@ -246,6 +286,9 @@ async function reload() {
   loadError.value = ''
   try {
     artifact.value = await api.get(props.artifactId)
+    // 008 UI：viewer（含公开读者）默认落在运行态——设计态对非写者只是空提示
+    if (!loadingFirstTabDone.value && !canWrite.value) activeTab.value = 'runtime'
+    loadingFirstTabDone.value = true
   } catch (error) {
     artifact.value = null
     loadError.value = `加载失败：${await apiErrorDetail(error)}`
@@ -253,6 +296,8 @@ async function reload() {
     loading.value = false
   }
 }
+
+const loadingFirstTabDone = ref(false)
 
 /**
  * 统一刷新（codex二审功能项②）：详情（乐观锁令牌+设计态 schema）+ 运行态
@@ -318,6 +363,7 @@ function openMetaEdit() {
     title: artifact.value.title,
     description: artifact.value.description || '',
     usage_note: artifact.value.usage_note || '',
+    visibility: (artifact.value.visibility as string) || 'private',
   }
   metaVisible.value = true
 }
@@ -335,6 +381,8 @@ async function saveMeta() {
       title,
       description: metaForm.value.description.trim(),
       usage_note: metaForm.value.usage_note.trim(),
+      // 后端对非 owner 改 visibility 一律 403——前端只在 owner 表单露出该字段
+      ...(isOwner.value ? { visibility: metaForm.value.visibility } : {}),
       expected_updated_at: artifact.value.updated_at,
     })
     artifact.value = { ...artifact.value, ...updated }
@@ -344,6 +392,40 @@ async function saveMeta() {
     ElMessage.error(`保存失败：${await apiErrorDetail(error)}`)
   } finally {
     metaSaving.value = false
+  }
+}
+
+/** 删除（008 两级确认第二级）：仅已停用制品可删；输入标题确认后级联硬删。 */
+async function deleteArtifact() {
+  if (!artifact.value) return
+  const title = artifact.value.title
+  let typed: string
+  try {
+    const result = await ElMessageBox.prompt(
+      `此操作将**级联硬删**制品「${title}」的全部行数据、列定义、版本快照与成员，不可恢复。\n请输入制品标题确认：`,
+      '删除知识制品',
+      { type: 'warning', confirmButtonText: '永久删除', confirmButtonClass: 'el-button--danger' },
+    )
+    typed = String(result.value ?? '').trim()
+  } catch {
+    return
+  }
+  if (typed !== title) {
+    ElMessage.warning('输入的标题不一致，已取消删除')
+    return
+  }
+  try {
+    await api.remove(props.artifactId)
+    ElMessage.success('制品已删除')
+    await router.push('/artifacts')
+  } catch (error) {
+    const resp = (error as { response?: { status?: number; data?: { detail?: { code?: string } } } })?.response
+    if (resp?.status === 409 && resp.data?.detail?.code === 'artifact_not_deprecated') {
+      ElMessage.error('必须先停用制品才能删除——已为你刷新状态')
+      await reloadAll()
+    } else {
+      ElMessage.error(`删除失败：${await apiErrorDetail(error)}`)
+    }
   }
 }
 
@@ -405,6 +487,13 @@ function displayValue(value: unknown): string {
   return String(value)
 }
 
+/** 运行态行键展示：有主键 → hex 解码回原文；无主键（uuid）原样。 */
+const runtimeHasPk = computed(() => runtimeColumns.value.some(c => c.is_primary_key))
+
+function displayRowKey(row: ArtifactRow): string {
+  return decodeRowKey(row.row_key, runtimeHasPk.value)
+}
+
 onMounted(reload)
 
 defineExpose({ reloadAll })
@@ -421,5 +510,6 @@ defineExpose({ reloadAll })
 .artifact-detail__meta-bar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
 .artifact-detail__desc-card { flex: 1; max-width: 720px; }
 .artifact-detail__usage-missing { color: var(--el-color-warning); }
+.artifact-detail__visibility-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; line-height: 1.5; }
 .artifact-detail__pager { margin-top: 12px; justify-content: flex-end; }
 </style>

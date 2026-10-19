@@ -31,6 +31,10 @@
       <div class="sidebar__domain">
         <span class="sidebar__domain-dot" />
         <span class="sidebar__domain-name">{{ domainStore.currentDomainInfo?.display_name || '未选择知识域' }}</span>
+        <!-- 平台指南入口沉底（不占导航项）：问号图标 → /help 全书 23 章 -->
+        <router-link to="/help" class="sidebar__help" title="平台指南（帮助文档）" data-test="sidebar-help">
+          <el-icon :size="15"><QuestionFilled /></el-icon>
+        </router-link>
       </div>
       <ReleaseVersion />
     </div>
@@ -42,7 +46,8 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   Monitor, Management, Key,
-  Cpu, Setting, Connection, Files, Share, UserFilled, Tickets, Guide, Grid,
+  Cpu, Setting, Connection, Files, Share, UserFilled, Tickets, Grid,
+  QuestionFilled,
 } from '@element-plus/icons-vue'
 import { useDomainStore } from '@/stores/domain'
 import { useBrandStore, resolveIcon } from '@/stores/brand'
@@ -58,26 +63,26 @@ const auth = useAuthStore()
 // 有图标时显示 <img>；空则回落 logoText 渐变块。
 const logoSrc = computed(() => (brand.icon.trim() ? resolveIcon(brand.icon) : ''))
 
-// 导航项：requiresAdmin 标记管理类项，member 不渲染。
+// 导航项顺序（2026-10-19 用户定稿）：概览→知识库→检索记录→MCP接入→
+// 挖掘范式→检索范式→一张网接入→知识制品→LLM服务→用户管理→系统设置；
+// 帮助不占导航项——沉到左下角问号图标（平台指南全书）。
 // 批次6：独立"检索"菜单下线——检索入口收进知识库详情的"检索" tab（全走检索范式）。
 // 批次8 M0（24 号 §5.10-§5.16）：实体图谱/本体版本/本体图谱三菜单注释下线
 // （研究线代码保留，路由与视图不动；未来启用需重新闭环设计）。
 const ALL_NAV = [
   { path: '/', label: '概览', icon: Monitor, access: 'all' },
   { path: '/kb', label: '知识库', icon: Files, access: 'all' },
-  // 61号批次4：知识制品（表格建表发布，viewer 也有运行态视图）
-  { path: '/artifacts', label: '知识制品', icon: Grid, access: 'all' },
   { path: '/retrieval-records', label: '检索记录', icon: Tickets, access: 'all' },
   { path: '/mcp', label: 'MCP 接入', icon: Key, access: 'all' },
-  // 平台指南（docs/平台指南/ 全书 23 章随前端构建上平台）：所有人可见，排在管理项之前
-  { path: '/help', label: '帮助', icon: Guide, access: 'all' },
-  { path: '/users', label: '用户管理', icon: UserFilled, access: 'domain-users' },
+  { path: '/mining/workflows', label: '挖掘范式', icon: Management, access: 'site-admin' },
+  { path: '/paradigm', label: '检索范式', icon: Connection, access: 'site-admin' },
   // 47 号：一张网接入（管理员：产品文档导入/重同步；KB 侧引用在知识库详情 tab）
   // 一张网图标用 Share（原 Key 与 MCP 接入撞图标）
   { path: '/onenet', label: '一张网接入', icon: Share, access: 'site-admin' },
-  { path: '/mining/workflows', label: '挖掘范式', icon: Management, access: 'site-admin' },
-  { path: '/paradigm', label: '检索范式', icon: Connection, access: 'site-admin' },
+  // 61号批次4：知识制品（表格建表发布，viewer 也有运行态视图）
+  { path: '/artifacts', label: '知识制品', icon: Grid, access: 'all' },
   { path: '/llm', label: 'LLM 服务', icon: Cpu, access: 'site-admin' },
+  { path: '/users', label: '用户管理', icon: UserFilled, access: 'domain-users' },
   { path: '/settings', label: '系统设置', icon: Setting, access: 'site-admin' },
 ]
 
@@ -226,5 +231,21 @@ function isActive(path: string): boolean {
   color: var(--kb-text-tertiary);
   font-size: 12px;
   font-weight: 500;
+}
+
+/* 帮助问号：与域名同行右对齐，hover 提亮 */
+.sidebar__help {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 50%;
+  color: var(--kb-text-tertiary);
+  transition: all var(--kb-duration) var(--kb-ease);
+}
+
+.sidebar__help:hover {
+  color: #e2e8f0;
+  background: var(--kb-bg-sidebar-hover, rgba(148, 163, 184, 0.14));
 }
 </style>

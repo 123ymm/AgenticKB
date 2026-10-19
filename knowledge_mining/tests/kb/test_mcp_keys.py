@@ -265,6 +265,14 @@ class _KeyFakeDb:
     async def key_open_kb_ids(self, *, key_id: str):
         return []
 
+    async def key_open_artifact_ids(self, *, key_id: str):
+        return list(getattr(self, "open_artifacts", {}).get(key_id, []))
+
+    async def replace_mcp_key_open_artifacts(self, *, key_id: str, artifact_ids):
+        self.replaced_artifacts = getattr(self, "replaced_artifacts", [])
+        self.replaced_artifacts.append((key_id, artifact_ids))
+        return artifact_ids
+
 
 def _key_row(**overrides) -> dict:
     row = {"id": "k1", "user_id": "u1", "name": "n", "domain": "generic",
@@ -401,6 +409,37 @@ async def test_replace_open_kbs_drops_invisible_and_dedupes() -> None:
     )
     assert final == ["kb-a", "kb-b"]
     assert db.replaced == [("k1", ["kb-a", "kb-b"])]  # 不可见静默剔除
+
+
+class _StubArtifactDB:
+    """replace_open_artifacts 候选校验桩：artifact_id -> 可读域（None=不可读）。"""
+
+    def __init__(self, readable: dict[str, str | None]) -> None:
+        self.readable = readable
+
+    async def readable_artifact_domain(self, artifact_id: str, user_id: str):
+        return self.readable.get(artifact_id)
+
+
+@pytest.mark.asyncio
+async def test_replace_open_artifacts_subset_no_amplify() -> None:
+    """008 钥匙级制品开放：不可见（私有非成员）/跨域制品静默剔除+去重——
+    开放行 ⊆ 主人读可见面（public 或成员），且必须落在钥匙绑定域内。"""
+    db = _KeyFakeDb(keys={"k1": _key_row()})  # key 域 = generic
+    stub = _StubArtifactDB({
+        "art_pub": "generic",      # public 制品 → 可开
+        "art_member": "generic",   # 成员制品 → 可开
+        "art_private": None,       # 私有且非成员 → 剔除
+        "art_cross": "other-dom",  # 可读但在别的域 → 剔除（钥匙单域铁律）
+    })
+    final = await _svc(db).replace_open_artifacts(
+        user_id="u1", key_id="k1",
+        artifact_ids=["art_pub", "art_private", "art_cross", "art_member",
+                      "art_pub"],
+        artifact_db=stub,  # type: ignore[arg-type]
+    )
+    assert final == ["art_pub", "art_member"]
+    assert db.replaced_artifacts == [("k1", ["art_pub", "art_member"])]
 
 
 @pytest.mark.asyncio

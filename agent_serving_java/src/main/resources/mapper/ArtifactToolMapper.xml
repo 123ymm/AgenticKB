@@ -95,8 +95,18 @@
           AND (
                 #{isAdmin}
                 OR (u.id IS NOT NULL
-                    AND (m.role IS NOT NULL OR a.owner_user_id = u.id))
+                    AND EXISTS (SELECT 1 FROM user_domains ud
+                                WHERE ud.user_id = u.id
+                                  AND ud.domain = a.domain_id)
+                    AND (m.role IS NOT NULL OR a.owner_user_id = u.id
+                         OR a.visibility = 'public'))
           )
+        <if test="keyId != null">
+          AND EXISTS (SELECT 1 FROM mcp_key_open_artifacts oa
+                      JOIN mcp_keys k ON k.id = oa.key_id AND k.status = 'active'
+                      WHERE oa.key_id = #{keyId}
+                        AND oa.artifact_id = a.artifact_id)
+        </if>
     </select>
 
     <!-- ======================= revision 快照 ======================= -->
@@ -360,8 +370,18 @@
           AND (
                 #{isAdmin}
                 OR (u.id IS NOT NULL
-                    AND (m.role IS NOT NULL OR a.owner_user_id = u.id))
+                    AND EXISTS (SELECT 1 FROM user_domains ud
+                                WHERE ud.user_id = u.id
+                                  AND ud.domain = a.domain_id)
+                    AND (m.role IS NOT NULL OR a.owner_user_id = u.id
+                         OR a.visibility = 'public'))
           )
+        <if test="keyId != null">
+            AND EXISTS (SELECT 1 FROM mcp_key_open_artifacts oa
+                        JOIN mcp_keys k ON k.id = oa.key_id AND k.status = 'active'
+                        WHERE oa.key_id = #{keyId}
+                          AND oa.artifact_id = a.artifact_id)
+        </if>
         <if test="afterArtifactId != null">
             AND (a.updated_at &lt; CAST(#{afterUpdatedAt} AS timestamptz)
                  OR (a.updated_at = CAST(#{afterUpdatedAt} AS timestamptz)
