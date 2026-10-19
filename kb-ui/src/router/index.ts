@@ -37,6 +37,17 @@ const router = createRouter({
           component: () => import('@/views/RetrievalRecordsView.vue'),
         },
         {
+          // 平台指南帮助页：/help 默认第 01 章；/help/:chapterId 可收藏可分享（章号即书号）
+          path: 'help',
+          name: 'help',
+          component: () => import('@/views/HelpView.vue'),
+        },
+        {
+          path: 'help/:chapterId',
+          name: 'help-chapter',
+          component: () => import('@/views/HelpView.vue'),
+        },
+        {
           path: 'onenet',
           name: 'onenet-admin',
           component: () => import('@/views/onenet/OnenetAdminView.vue'),

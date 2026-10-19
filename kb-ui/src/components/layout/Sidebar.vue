@@ -42,7 +42,7 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   Monitor, Management, Key,
-  Cpu, Setting, Connection, Files, Share, UserFilled, Tickets,
+  Cpu, Setting, Connection, Files, Share, UserFilled, Tickets, Guide,
 } from '@element-plus/icons-vue'
 import { useDomainStore } from '@/stores/domain'
 import { useBrandStore, resolveIcon } from '@/stores/brand'
@@ -67,6 +67,8 @@ const ALL_NAV = [
   { path: '/kb', label: '知识库', icon: Files, access: 'all' },
   { path: '/retrieval-records', label: '检索记录', icon: Tickets, access: 'all' },
   { path: '/mcp', label: 'MCP 接入', icon: Key, access: 'all' },
+  // 平台指南（docs/平台指南/ 全书 23 章随前端构建上平台）：所有人可见，排在管理项之前
+  { path: '/help', label: '帮助', icon: Guide, access: 'all' },
   { path: '/users', label: '用户管理', icon: UserFilled, access: 'domain-users' },
   // 47 号：一张网接入（管理员：产品文档导入/重同步；KB 侧引用在知识库详情 tab）
   // 一张网图标用 Share（原 Key 与 MCP 接入撞图标）
