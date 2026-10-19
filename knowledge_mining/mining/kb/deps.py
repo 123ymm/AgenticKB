@@ -45,3 +45,23 @@ def get_purge_service(request: Request) -> "Any":
     from knowledge_mining.mining.kb.services.purge_service import PurgeService
     return PurgeService(request.app.state.pg_pool,
                         getattr(request.app.state, "object_store", None))
+
+
+async def get_artifact_db(request: Request) -> "Any":
+    """61号：知识制品六表仓储。"""
+    from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
+    return ArtifactDB(request.app.state.pg_pool)
+
+
+async def get_artifact_service(request: Request) -> "Any":
+    """61号：制品业务层（权限矩阵/生命周期/乐观锁）。"""
+    from knowledge_mining.mining.kb.services.artifact_service import ArtifactService
+    return ArtifactService(await get_artifact_db(request))
+
+
+async def get_artifact_import_service(request: Request) -> "Any":
+    """61号：Excel 三步导入向导（写路径经 ArtifactService 权限门禁）。"""
+    from knowledge_mining.mining.kb.services.artifact_import_service import (
+        ArtifactImportService,
+    )
+    return ArtifactImportService(await get_artifact_db(request))

@@ -72,6 +72,13 @@ EXPORT_TABLES = [
     # 统一 Web/API/MCP 检索与读取记录
     "knowledge_access_records",
     "knowledge_access_record_payloads",
+    # 知识制品（61号表格制品 MVP）：挂 domain 的策展数据，启动链 017 必建
+    "kb_artifacts",
+    "kb_artifact_revisions",
+    "kb_artifact_members",
+    "kb_artifact_batches",
+    "kb_table_columns",
+    "kb_table_rows",
 ]
 
 # 兼容尚未完成 52 号 bootstrap 的测试/旧库；生产收敛库验证要求这些表存在。

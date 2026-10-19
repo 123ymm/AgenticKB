@@ -77,6 +77,18 @@ const router = createRouter({
           props: true,
         },
         {
+          // 61号批次4：知识制品（普通成员可达——viewer 也有运行态视图）
+          path: 'artifacts',
+          name: 'artifacts',
+          component: () => import('@/views/artifacts/ArtifactsListView.vue'),
+        },
+        {
+          path: 'artifacts/:artifactId',
+          name: 'artifact-detail',
+          component: () => import('@/views/artifacts/ArtifactDetailView.vue'),
+          props: true,
+        },
+        {
           path: 'mining/workflows',
           name: 'mining-workflows',
           component: () => import('@/views/mining/WorkflowListView.vue'),

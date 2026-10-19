@@ -2,8 +2,9 @@
 
 两条转发面：
 - mining 内部端点（批次7）：list/upload 等管理浏览类工具；
-- serving 内部端点（批次8 R7/R8）：get_evidence / get_document / inspect_knowledge /
-  navigate_structure / query_structured_asset——带 X-Internal-Auth（密钥 =
+- serving 内部端点（批次8 R7/R8 + 61号批次3）：get_evidence / get_document /
+  inspect_knowledge / navigate_structure / query_structured_asset /
+  query_artifact / list_artifacts——带 X-Internal-Auth（密钥 =
   serving 的 SERVING_INTERNAL_AUTH_SECRET，与 mining 的 internal_verify_secret 相互独立）。
 
 mcp_server 不直连库：身份与资源授权都在上游判定（内部密钥防线 + username 信任 +
@@ -18,7 +19,7 @@ import os
 
 import httpx
 
-from mcp_server.identity import _internal_auth_secret
+from mcp_server.identity import Identity, _internal_auth_secret
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,16 @@ def _post_serving(path: str, payload: dict) -> dict:
 
 
 def _raise_serving_error(resp: httpx.Response) -> None:
-    """把 serving 的稳定错误体 {"error": {code, message, details}} 转成 typed 异常。"""
+    """把 serving 的稳定错误体转成 typed 异常（两种形状，61号批次3 补齐第二种）：
+
+    - StructureToolException（25 号 §7.2）：{"error": {code, message, details}}；
+    - GlobalExceptionHandler 字符串码：{"error": "artifact_not_found", "message": …}
+      （kb_not_found / artifact_not_found 等反探测 404 同族——也是稳定 code，
+      按同口径上抛，否则会以 dict repr 形态漏给 Agent）。
+      例外：401/503 与一切 ≥500（如 internal_error）是基础设施错误（内部密钥
+      失配/未配/服务端真故障，Agent 不可修正）——不进 typed invalid 口径，
+      留给兜底分支按 upstream failed 上抛（61号对抗审查 M1）。
+    """
     try:
         body = resp.json()
         err = body.get("error") if isinstance(body, dict) else None
@@ -118,6 +128,13 @@ def _raise_serving_error(resp: httpx.Response) -> None:
                 str(err.get("message") or err["code"]),
                 err.get("details") if isinstance(err.get("details"), dict) else {},
             )
+        if (
+            isinstance(err, str)
+            and err.strip()
+            and resp.status_code < 500
+            and resp.status_code not in (401, 503)
+        ):
+            raise ServingToolError(err, str(body.get("message") or err))
         detail = str((body or {}).get("detail") or body)[:160]
     except ValueError:
         detail = resp.text[:160]
@@ -181,6 +198,40 @@ def query_structured_asset(
     """st_ asset ref + schema-bound DSL（filter/select/order/aggregate，typed rows）。"""
     return _post_serving("/api/internal/structured-query", {
         "domain": domain, "kb_ids": kb_ids, "username": username, "ref": ref, "query": query,
+    })
+
+
+# ── art_ 制品通道（61号批次3 后半，Task 7 契约） ─────────────────────────
+
+
+def query_artifact(
+    ref: str, query: dict | None, domain: str, identity: Identity,
+) -> dict:
+    """art_ ref + 白名单 DSL：query=None → artifact_card（元信息+列能力）；
+    有 query → artifact_rows / artifact_aggregate。三视图上游已带 view 自标识，
+    本层原样透传（与 st_ 族不同：制品按域开放，不收 kb_ids）。"""
+    return _post_serving("/api/internal/artifact-query", {
+        "artifact_ref": ref,
+        "domain": domain,
+        "username": identity.username,
+        # MCP 钥匙均为用户钥匙（验钥响应无 admin 面）——is_admin 恒 false；
+        # serving 的 admin 可见性通道只服务网页端，不暴露给 Agent。
+        "is_admin": False,
+        "query": query,
+    })
+
+
+def list_artifacts(
+    domain: str, identity: Identity,
+    cursor: str | None = None, limit: int = 20,
+) -> dict:
+    """发现通道：域内已发布且可见的制品说明卡（updated_at DESC keyset 翻页）。"""
+    return _post_serving("/api/internal/artifact-list", {
+        "domain": domain,
+        "username": identity.username,
+        "is_admin": False,  # 同上：MCP 钥匙无 admin 面
+        "cursor": cursor,
+        "limit": limit,
     })
 
 

@@ -32,3 +32,7 @@ migrations:
     path: core/20260930_006_manage_files_rename.sql
     mode: online_expand
     checksum: 2b24c4eb1731f49d24ead309a87198a47477a45007e34aefa68b20c88aca2d9d
+  - id: core/20261016_007_kb_artifacts
+    path: core/20261016_007_kb_artifacts.sql
+    mode: online_expand
+    checksum: dfb0a1671249a41fe5efbe8055859df2352fb8670828e1af96b0535cb09a7793

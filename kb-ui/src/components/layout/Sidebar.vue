@@ -42,7 +42,7 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   Monitor, Management, Key,
-  Cpu, Setting, Connection, Files, Share, UserFilled, Tickets, Guide,
+  Cpu, Setting, Connection, Files, Share, UserFilled, Tickets, Guide, Grid,
 } from '@element-plus/icons-vue'
 import { useDomainStore } from '@/stores/domain'
 import { useBrandStore, resolveIcon } from '@/stores/brand'
@@ -65,6 +65,8 @@ const logoSrc = computed(() => (brand.icon.trim() ? resolveIcon(brand.icon) : ''
 const ALL_NAV = [
   { path: '/', label: '概览', icon: Monitor, access: 'all' },
   { path: '/kb', label: '知识库', icon: Files, access: 'all' },
+  // 61号批次4：知识制品（表格建表发布，viewer 也有运行态视图）
+  { path: '/artifacts', label: '知识制品', icon: Grid, access: 'all' },
   { path: '/retrieval-records', label: '检索记录', icon: Tickets, access: 'all' },
   { path: '/mcp', label: 'MCP 接入', icon: Key, access: 'all' },
   // 平台指南（docs/平台指南/ 全书 23 章随前端构建上平台）：所有人可见，排在管理项之前

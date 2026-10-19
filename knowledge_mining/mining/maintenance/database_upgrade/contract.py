@@ -7,7 +7,7 @@ CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
 # 1.1.14 勘误：加 006 迁移时必须同步刷新本镜像常量（= manifest_checksum）——
 # 漏刷导致 llm_service 启动 fail-closed 校验仍等旧值而拒绝启动
 # （guard: tests/maintenance/test_migration_manifest.py 断言两者相等）。
-CURRENT_SCHEMA_CHECKSUM = "992bf967ede7b18d8f65c7362b7eeb5be62c8f5b5ad6dbfb56cee523b5be4703"
+CURRENT_SCHEMA_CHECKSUM = "e0818f82d67f2e682d4dd1807a20f52e7cd761e68a5f694b0056c3e6507cacb7"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")
@@ -71,14 +71,35 @@ FORMAL_TABLES: frozenset[str] = frozenset({
     "operator_paradigm_version",
     "knowledge_access_records",
     "knowledge_access_record_payloads",
+    "kb_artifacts",
+    "kb_artifact_revisions",
+    "kb_artifact_members",
+    "kb_artifact_batches",
+    "kb_table_columns",
+    "kb_table_rows",
 })
 EXPECTED_FORMAL_TABLES = len(FORMAL_TABLES)
 EXPECTED_PHYSICAL_TABLES = EXPECTED_FORMAL_TABLES + 1
 
 # This release accepts the complete immediately preceding table set: the old
-# Java log exists and the unified ledger does not yet exist.
+# Java log exists and the unified ledger does not yet exist. The kb_* artifact
+# six-table set (61号) is new in this release, so it is subtracted alongside
+# the access-ledger pair when reconstructing the previous release baseline.
 PREVIOUS_RELEASE_TABLES: frozenset[str] = frozenset(
-    (FORMAL_TABLES - {"knowledge_access_records", "knowledge_access_record_payloads"}) | {"serving_query_logs"}
+    (
+        FORMAL_TABLES
+        - {
+            "knowledge_access_records",
+            "knowledge_access_record_payloads",
+            "kb_artifacts",
+            "kb_artifact_revisions",
+            "kb_artifact_members",
+            "kb_artifact_batches",
+            "kb_table_columns",
+            "kb_table_rows",
+        }
+    )
+    | {"serving_query_logs"}
 )
 # Compatibility export for older callers/tests. New cutover source validation
 # uses PREVIOUS_RELEASE_TABLES.
@@ -112,5 +133,5 @@ RETIRED_TABLES: tuple[str, ...] = (
 if len(RETIRED_TABLES) != len(set(RETIRED_TABLES)):  # pragma: no cover - import guard
     raise RuntimeError("RETIRED_TABLES contains duplicates")
 
-if EXPECTED_FORMAL_TABLES != 53:  # pragma: no cover - import guard
-    raise RuntimeError("FORMAL_TABLES must contain exactly 53 names")
+if EXPECTED_FORMAL_TABLES != 59:  # pragma: no cover - import guard
+    raise RuntimeError("FORMAL_TABLES must contain exactly 59 names")

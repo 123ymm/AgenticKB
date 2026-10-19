@@ -62,6 +62,14 @@ TRUNCATE_TABLES = (
     "mining_workflow_versions",
     "operator_paradigm",
     "operator_paradigm_version",
+    # 知识制品（61号）：domain 范围策展数据，随域资产一起清。
+    # 六张表身份列均为 TEXT 引用（无强 FK），不触发 FK 完备性拦截。
+    "kb_artifacts",
+    "kb_artifact_revisions",
+    "kb_artifact_members",
+    "kb_artifact_batches",
+    "kb_table_columns",
+    "kb_table_rows",
 )
 
 # 保留白名单（绝不触碰）：control-plane + 存储层 + 审计/观测
