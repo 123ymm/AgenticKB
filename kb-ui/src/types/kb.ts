@@ -363,6 +363,8 @@ export interface McpKeyItem {
   /** false = 域已解绑，钥匙失效（列表页标红） */
   domain_bound: boolean
   open_kb_ids: string[]
+  /** 008：钥匙显式开放的知识制品（Agent 制品通道只经这里，public 不自动暴露）。 */
+  open_artifact_ids?: string[]
   open_tools: string[] | null
   instructions: string | null
   tool_descriptions: Record<string, string> | null

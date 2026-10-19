@@ -24,7 +24,11 @@
                 v-for="(p, i) in provenanceOf(row)"
                 :key="i"
                 :label="`来源 ${i + 1}`"
-              >{{ describeProvenance(p) }}</el-descriptions-item>
+              >
+                <el-tooltip :content="provenanceTitle(p)" placement="top">
+                  <span>{{ describeProvenance(p) }}</span>
+                </el-tooltip>
+              </el-descriptions-item>
             </el-descriptions>
             <p v-else class="rows-panel__hint">无来源记录（手工编辑或来源未记账）</p>
             <el-tag v-if="hasConflicts(row)" type="danger" size="small">
@@ -33,7 +37,13 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="row_key" label="行键" min-width="160" show-overflow-tooltip fixed="left" />
+      <el-table-column label="行键" min-width="150" fixed="left">
+        <template #default="{ row }">
+          <el-tooltip :content="row.row_key" placement="top" :disabled="row.row_key === displayRowKey(row)">
+            <span class="rows-panel__rowkey">{{ displayRowKey(row) }}</span>
+          </el-tooltip>
+        </template>
+      </el-table-column>
       <el-table-column
         v-for="col in columns"
         :key="col.column_id"
@@ -71,22 +81,18 @@
       @current-change="onPageChange"
     />
 
-    <!-- 编辑行：逐列表单（enum 列=enum_values 下拉） -->
-    <el-dialog v-model="editVisible" title="编辑行" width="560px">
-      <el-form label-width="120px">
+    <!-- 编辑行：按列类型分派控件（008 UI：长文本多行/数字/日期/布尔三态） -->
+    <el-dialog v-model="editVisible" title="编辑行" width="600px">
+      <el-form label-width="130px">
         <el-form-item label="行键">
-          <span>{{ editForm.rowKey }}</span>
+          <span class="rows-panel__rowkey">{{ decodeRowKey(editForm.rowKey, pkColumns.length > 0) }}</span>
         </el-form-item>
         <el-form-item v-for="col in editableColumns" :key="col.column_id" :label="col.column_name">
-          <el-select
-            v-if="isEnumColumn(col)"
-            v-model="editForm.values[col.column_name]"
-            clearable
-            placeholder="（空）"
-          >
-            <el-option v-for="v in col.enum_values ?? []" :key="String(v)" :value="v" :label="String(v)" />
-          </el-select>
-          <el-input v-else :model-value="inputValue(editForm.values[col.column_name])" @update:model-value="editForm.values[col.column_name] = $event" />
+          <CellEditor
+            :column="col"
+            :model-value="editForm.values[col.column_name]"
+            @update:model-value="editForm.values[col.column_name] = $event"
+          />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -143,20 +149,17 @@
       </template>
     </el-dialog>
 
-    <!-- 新增行：按列生成表单，接 POST /table/rows（主键拼接/uuid 由后端定） -->
-    <el-dialog v-model="addVisible" title="新增行" width="560px">
+    <!-- 新增行：按列生成表单（同编辑的类型化控件），接 POST /table/rows -->
+    <el-dialog v-model="addVisible" title="新增行" width="600px">
       <el-alert
         v-if="pkColumns.length"
         type="info"
         :closable="false"
         :title="`主键列（${pkColumns.map(c => c.column_name).join('、')}）必须填写——同键已存在将被拒绝`"
       />
-      <el-form label-width="120px" class="rows-panel__add-form">
+      <el-form label-width="130px" class="rows-panel__add-form">
         <el-form-item v-for="col in editableColumns" :key="col.column_id" :label="col.column_name">
-          <el-select v-if="isEnumColumn(col)" v-model="addForm[col.column_name]" clearable placeholder="（空）">
-            <el-option v-for="v in col.enum_values ?? []" :key="String(v)" :value="v" :label="String(v)" />
-          </el-select>
-          <el-input v-else v-model="addForm[col.column_name]" />
+          <CellEditor :column="col" v-model="addForm[col.column_name]" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -173,6 +176,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
+import CellEditor from '@/components/artifacts/ArtifactCellEditor.vue'
+import { decodeRowKey } from '@/utils/rowKey'
 import type { ArtifactColumn, ArtifactRow } from '@/types/artifacts'
 
 const WHERE_OPS = [
@@ -261,14 +266,15 @@ function isEnumColumn(col: ArtifactColumn): boolean {
   return col.column_type === 'enum'
 }
 
+/** 行键展示：有主键 → hex 解码回原文；无主键（uuid 行）原样。 */
+function displayRowKey(row: ArtifactRow): string {
+  return decodeRowKey(row.row_key, pkColumns.value.length > 0)
+}
+
 function cellText(value: unknown): string {
   if (value === null || value === undefined) return '—'
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
-}
-
-function inputValue(value: unknown): string {
-  return value === null || value === undefined ? '' : String(value)
 }
 
 /** provenance 后端记账为数组（[{batch_id, file_name, sheet_name, row_index}]）。 */
@@ -276,8 +282,13 @@ function provenanceOf(row: ArtifactRow): Array<Record<string, unknown>> {
   return Array.isArray(row.provenance) ? (row.provenance as Array<Record<string, unknown>>) : []
 }
 
+/** 来源账主文案：文件/工作表/行号（人可读）；批次 id 收进 title 提示。 */
 function describeProvenance(p: Record<string, unknown>): string {
-  return `${p.file_name ?? '?'} / ${p.sheet_name ?? '?'} 第 ${p.row_index ?? '?'} 行（批次 ${String(p.batch_id ?? '?').slice(0, 12)}）`
+  return `${p.file_name ?? '?'} / ${p.sheet_name ?? '?'} 第 ${p.row_index ?? '?'} 行`
+}
+
+function provenanceTitle(p: Record<string, unknown>): string {
+  return `批次 ${String(p.batch_id ?? '?')}`
 }
 
 function hasConflicts(row: ArtifactRow): boolean {
@@ -499,6 +510,7 @@ defineExpose({
 .rows-panel__hint { font-size: 12px; color: var(--el-color-warning, #e6a23c); }
 .rows-panel__count { font-size: 12.5px; color: var(--kb-text-tertiary); }
 .rows-panel__expanded { padding: 8px 16px; display: flex; flex-direction: column; gap: 8px; }
+.rows-panel__rowkey { font-family: var(--el-font-family, inherit); cursor: default; }
 .rows-panel__pager { justify-content: flex-end; }
 .rows-panel__conditions { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .rows-panel__cond { display: flex; gap: 6px; align-items: center; width: 100%; }

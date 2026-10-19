@@ -16,6 +16,7 @@ const api = vi.hoisted(() => ({
   rotateMcpKey: vi.fn(),
   revokeMcpKey: vi.fn(),
   putMcpKeyOpenKbs: vi.fn(),
+  putMcpKeyOpenArtifacts: vi.fn(),
 }))
 const ui = vi.hoisted(() => ({
   confirm: vi.fn(), success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn(),
@@ -62,8 +63,9 @@ const KEY = {
 function mountPanel(
   keyItem: McpKeyItem = KEY,
   domainKbs: Array<{ id: string; name: string; document_count: number }> = [],
+  domainArtifacts: Array<{ artifact_id: string; title: string; status: string; visibility?: string }> = [],
 ) {
-  return mount(McpKeyConfigPanel, { props: { keyItem, domainKbs } })
+  return mount(McpKeyConfigPanel, { props: { keyItem, domainKbs, domainArtifacts } })
 }
 
 describe('McpKeyConfigPanel', () => {
@@ -192,5 +194,31 @@ describe('McpKeyConfigPanel', () => {
       instructions: '纯自定义提示词',
       tool_descriptions: {},
     })
+  })
+
+  it('008 开放制品：回显可见子集（幽灵剔除）→ 勾选保存 → 以服务端响应为准', async () => {
+    const key = { ...KEY, open_artifact_ids: ['art-a', 'art-gone'] }
+    const domainArtifacts = [
+      { artifact_id: 'art-a', title: '端口规格表', status: 'published' },
+      { artifact_id: 'art-b', title: 'MOP 责任域', status: 'published', visibility: 'public' },
+    ]
+    const wrapper = mountPanel(key, [], domainArtifacts)
+    await flushPromises()
+
+    // 幽灵剔除：art-gone 已不可见，不进勾选
+    expect(wrapper.vm.selectedArtifacts).toEqual(['art-a'])
+    expect(wrapper.vm.artifactsDirty).toBe(false)
+
+    // 勾上 art-b → dirty → 保存（服务端剔除越权后只落 art-a）→ 回显以响应为准
+    wrapper.vm.selectedArtifacts = ['art-a', 'art-b']
+    expect(wrapper.vm.artifactsDirty).toBe(true)
+    api.putMcpKeyOpenArtifacts.mockResolvedValue({ open_artifact_ids: ['art-a'] })
+    await wrapper.vm.saveOpenArtifacts()
+    await flushPromises()
+
+    expect(api.putMcpKeyOpenArtifacts).toHaveBeenCalledWith('key-1', ['art-a', 'art-b'])
+    expect(wrapper.vm.selectedArtifacts).toEqual(['art-a'])
+    expect(wrapper.vm.artifactsDirty).toBe(false)
+    expect(ui.success).toHaveBeenCalled()
   })
 })

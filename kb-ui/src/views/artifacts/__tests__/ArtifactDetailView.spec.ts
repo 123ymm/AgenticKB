@@ -7,17 +7,27 @@ const state = vi.hoisted(() => ({
     get: vi.fn(),
     listRows: vi.fn(),
     listColumns: vi.fn(),
+    remove: vi.fn(),
   },
   ui: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
 
 vi.mock('@/api/artifacts', () => ({ useArtifactsApi: () => state.api }))
-vi.mock('@/api/proxyClient', () => ({ apiErrorDetail: async () => 'mock-error' }))
+vi.mock('@/api/proxyClient', () => ({
+  apiErrorDetail: async () => 'mock-error',
+  // MembersPanel 经 api/auth 引入的 proxyClient 具名导出（本套件用不到真实实现）
+  installAuthInterceptors: vi.fn(),
+  createProxyClient: vi.fn(() => ({ get: vi.fn() })),
+  extractOne: vi.fn(),
+}))
+vi.mock('@/api/auth', () => ({
+  useAuthApi: () => ({ listDomainUserCandidates: async () => [] }),
+}))
 vi.mock('element-plus', () => ({
   ElMessage: {
     success: state.ui.success, error: state.ui.error, warning: state.ui.warning,
   },
-  ElMessageBox: { confirm: vi.fn() },
+  ElMessageBox: { confirm: vi.fn(), prompt: vi.fn() },
 }))
 
 import ArtifactDetailView from '../ArtifactDetailView.vue'
@@ -131,5 +141,42 @@ describe('artifact detail view', () => {
     expect(state.api.get.mock.calls.length).toBe(2)
     expect(state.api.listColumns.mock.calls.length).toBe(2)
     expect(state.api.listRows.mock.calls.length).toBe(2)
+  })
+
+  it('viewer 默认落在运行态 tab（设计态对非写者只是空提示）', async () => {
+    state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, my_role: 'viewer' })
+    const wrapper = mountDetail()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as DetailVm
+    expect(vm.activeTab).toBe('runtime')
+  })
+
+  it('删除门禁：未停用制品删除按钮置灰；停用后输入标题确认才级联删除', async () => {
+    // published 态：按钮存在（owner）但 disabled
+    const wrapper = mountDetail()
+    await flushPromises()
+    const btn = wrapper.find('[data-test="delete-artifact"]')
+    expect(btn.exists()).toBe(true)
+    expect(btn.attributes('disabled')).toBeDefined()
+
+    // deprecated 态：可点 → 输错标题取消 → 输对标题级联删除并回列表
+    state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, status: 'deprecated' })
+    state.api.remove = vi.fn().mockResolvedValue(undefined)
+    const wrapper2 = mountDetail()
+    await flushPromises()
+    const btn2 = wrapper2.find('[data-test="delete-artifact"]')
+    expect(btn2.attributes('disabled')).toBeUndefined()
+
+    const { ElMessageBox } = await import('element-plus')
+    const prompt = ElMessageBox.prompt as unknown as ReturnType<typeof vi.fn>
+    prompt.mockReset()
+      .mockResolvedValueOnce({ value: '输错的标题' })   // 不一致 → 取消
+      .mockResolvedValueOnce({ value: 'MOP 表' })       // 一致 → 删除
+    await (wrapper2.vm as unknown as { deleteArtifact: () => Promise<void> }).deleteArtifact()
+    expect(state.api.remove).not.toHaveBeenCalled()
+    expect(state.ui.warning).toHaveBeenCalled()
+
+    await (wrapper2.vm as unknown as { deleteArtifact: () => Promise<void> }).deleteArtifact()
+    expect(state.api.remove).toHaveBeenCalledWith('art-1')
   })
 })

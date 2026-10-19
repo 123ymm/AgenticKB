@@ -8,6 +8,8 @@
 export type ArtifactKind = 'table' | 'wiki'
 export type ArtifactStatus = 'draft' | 'published' | 'deprecated'
 export type ArtifactRole = 'owner' | 'editor' | 'viewer'
+/** 008 可见性：private=仅成员；public=本域全体绑定用户可读（写仍走成员角色）。 */
+export type ArtifactVisibility = 'private' | 'public'
 /** 与后端 _VALID_COLUMN_TYPES 对齐（build_mapping / 索引 cast 同口径）。 */
 export type ArtifactColumnType = 'text' | 'enum' | 'int' | 'float' | 'date' | 'bool'
 
@@ -21,12 +23,13 @@ export interface Artifact {
   usage_note: string
   owner_user_id: string
   status: ArtifactStatus
+  visibility?: ArtifactVisibility | string
   current_revision: number
   draft_open: boolean
   created_at: string
   updated_at: string
   /** 列表与详情口径附带（get_artifact 附 my_role；admin 归一 owner）。 */
-  my_role?: ArtifactRole
+  my_role?: ArtifactRole | null
 }
 
 /** GET /{id} = 元信息 + schema + sample_rows（同体展开）。 */
@@ -101,6 +104,9 @@ export interface DiffResult {
 export interface MemberInfo {
   user_id: string
   role: ArtifactRole
+  /** 后端 list_members JOIN 回填（user_id 是内部 id，展示用登录名/显示名）。 */
+  username?: string | null
+  user_name?: string | null
 }
 
 export interface ImportBatch {

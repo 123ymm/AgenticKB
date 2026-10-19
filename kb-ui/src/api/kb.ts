@@ -177,6 +177,16 @@ export function useKbApi() {
       return extractOne<{ open_kb_ids: string[] }>(data)
     },
 
+    /** 全量覆盖该钥匙开放的知识制品（008；空数组=对 Agent 关闭制品通道）。 */
+    async putMcpKeyOpenArtifacts(
+      keyId: string, artifactIds: string[],
+    ): Promise<{ open_artifact_ids: string[] }> {
+      const { data } = await client.put(
+        `/api/kb/users/me/mcp-keys/${keyId}/open-artifacts`,
+        { artifact_ids: artifactIds })
+      return extractOne<{ open_artifact_ids: string[] }>(data)
+    },
+
     /** 钥匙级工具开关 / 提示词 / 工具描述（null=不改；instructions ""=恢复默认）。 */
     async putMcpKeyConfig(keyId: string, body: {
       open_tools?: string[] | null

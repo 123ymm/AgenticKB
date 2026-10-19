@@ -72,6 +72,29 @@
       <el-empty v-if="!domainKbs.length" description="该域没有你能看到的知识库" :image-size="60" />
     </section>
 
+    <!-- 开放的知识制品（008）：Agent 制品通道只经这里——public 也不会自动暴露 -->
+    <section class="mkey-panel__card">
+      <div class="mkey-panel__card-head">
+        <div>
+          <h4 class="mkey-panel__title">开放的知识制品（{{ key.domain }} 域）</h4>
+          <p class="mkey-panel__desc">
+            Agent 通过这把钥匙只能查到勾选的表格制品（art_ 说明卡与行查询）。
+            候选=你在本域能看到的制品（公开+你是成员）；不勾=制品通道对这把钥匙关闭。
+          </p>
+        </div>
+        <el-button size="small" :loading="savingArtifacts" :disabled="readonly || !artifactsDirty" data-test="save-open-artifacts" @click="saveOpenArtifacts">保存</el-button>
+      </div>
+      <el-checkbox-group v-model="selectedArtifacts" class="mkey-panel__kbs" :disabled="readonly">
+        <el-checkbox v-for="a in domainArtifacts" :key="a.artifact_id" :value="a.artifact_id" :label="a.artifact_id">
+          {{ a.title }}
+          <span class="mkey-panel__kb-meta">
+            {{ artifactStatusLabel(a.status) }}{{ a.visibility === 'public' ? ' · 公开' : '' }}
+          </span>
+        </el-checkbox>
+      </el-checkbox-group>
+      <el-empty v-if="!domainArtifacts.length" description="该域没有你能看到的知识制品" :image-size="60" />
+    </section>
+
     <!-- 提示词 -->
     <section class="mkey-panel__card">
       <div class="mkey-panel__card-head">
@@ -186,11 +209,15 @@ const ALL_TOOLS = [
   { name: 'manage_files', label: '管理文件：上传到指定目录 / 替换任意本地文件（zip 自动解压，自动排队挖掘；不提供删除/移动/重命名）' },
 ] as const
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   keyItem: McpKeyItem
   /** 钥匙所属域的可见库清单（父组件按 key.domain 拉取，不跟随页面当前域）。 */
   domainKbs: { id: string; name: string; document_count: number }[]
-}>()
+  /** 钥匙所属域的可见制品清单（008：开放制品候选；缺省=空=段内空态）。 */
+  domainArtifacts?: { artifact_id: string; title: string; status: string; visibility?: string }[]
+}>(), {
+  domainArtifacts: () => [],
+})
 
 const emit = defineEmits<{
   /** 任一配置保存成功后上报最新钥匙行（父组件同步列表）。 */
@@ -229,6 +256,9 @@ const toolOn = ref<Record<string, boolean>>({})
 const savingTools = ref(false)
 const selectedKbs = ref<string[]>([])
 const savingKbs = ref(false)
+// 008：钥匙开放制品集
+const selectedArtifacts = ref<string[]>([])
+const savingArtifacts = ref(false)
 const instructions = ref('')
 const toolDescs = ref<Record<string, string>>({})
 const savingPrompt = ref(false)
@@ -259,6 +289,9 @@ function initFromKey(item: McpKeyItem) {
   // 不让失效 id 混进下一次保存请求（后端也会剔除，这里保证所见即所得）
   const visibleIds = new Set(props.domainKbs.map(k => k.id))
   selectedKbs.value = item.open_kb_ids.filter(id => visibleIds.has(id))
+  // 幽灵 id 剔除同开放库口径（制品被删/转私有/移出成员后自动从勾选消失）
+  const visibleArtIds = new Set(props.domainArtifacts.map(a => a.artifact_id))
+  selectedArtifacts.value = (item.open_artifact_ids ?? []).filter(id => visibleArtIds.has(id))
   promptTouched = false
   // 同钥匙刷新不动 freshKey（会话内一直可见）；只有换钥匙才清
   if (lastKeyId !== item.id) freshKey.value = ''
@@ -266,9 +299,9 @@ function initFromKey(item: McpKeyItem) {
   configFormat.value = 'generic'
 }
 
-// 钥匙行或域库清单变化（父组件刷新列表后传新对象）都重置表单。
+// 钥匙行或域库/域制品清单变化（父组件刷新列表后传新对象）都重置表单。
 // 隐式耦合：若父组件复用同一数组引用（原地改 domainKbs），watch 源不变则不触发重置。
-watch(() => [props.keyItem.id, props.domainKbs], () => initFromKey(props.keyItem), { immediate: true })
+watch(() => [props.keyItem.id, props.domainKbs, props.domainArtifacts], () => initFromKey(props.keyItem), { immediate: true })
 
 onMounted(async () => {
   try {
@@ -279,9 +312,11 @@ onMounted(async () => {
 })
 
 // meta 晚到时按默认预填补齐——仅当用户任何表单都没动过（动过任何一处都不打扰，
-// 否则工具开关/开放库勾选也会被 initFromKey 一并回滚）
+// 否则工具开关/开放库/开放制品勾选也会被 initFromKey 一并回滚）
 watch(meta, () => {
-  if (!promptTouched && !toolsDirty.value && !kbsDirty.value) initFromKey(props.keyItem)
+  if (!promptTouched && !toolsDirty.value && !kbsDirty.value && !artifactsDirty.value) {
+    initFromKey(props.keyItem)
+  }
 })
 
 const configJson = computed(() => {
@@ -316,6 +351,20 @@ const kbsDirty = computed(() => {
   const b = [...(props.keyItem.open_kb_ids ?? [])].sort()
   return JSON.stringify(a) !== JSON.stringify(b)
 })
+
+const artifactsDirty = computed(() => {
+  const a = [...selectedArtifacts.value].sort()
+  // 与回显同口径过滤幽灵 id：仅幽灵差异（制品已不可见）不算脏，不误导保存按钮
+  const visibleIds = new Set(props.domainArtifacts.map(x => x.artifact_id))
+  const b = [...(props.keyItem.open_artifact_ids ?? [])].filter(id => visibleIds.has(id)).sort()
+  return JSON.stringify(a) !== JSON.stringify(b)
+})
+
+function artifactStatusLabel(status: string): string {
+  if (status === 'published') return '已发布'
+  if (status === 'deprecated') return '已停用'
+  return '草稿'
+}
 
 const promptDirty = computed(() => {
   // 生效值 = 已存自定义（非空）否则默认文案；与显示内容比对决定可保存性
@@ -390,6 +439,21 @@ async function saveOpenKbs() {
     ElMessage.error(await apiErrorDetail(e))
   } finally {
     savingKbs.value = false
+  }
+}
+
+/** 008：保存钥匙开放制品（后端静默剔除越权/越域候选，以响应为准回显）。 */
+async function saveOpenArtifacts() {
+  savingArtifacts.value = true
+  try {
+    const r = await kbApi.putMcpKeyOpenArtifacts(props.keyItem.id, selectedArtifacts.value)
+    selectedArtifacts.value = [...r.open_artifact_ids]
+    emit('updated', { ...props.keyItem, open_artifact_ids: r.open_artifact_ids })
+    ElMessage.success('开放制品已更新')
+  } catch (e) {
+    ElMessage.error(await apiErrorDetail(e))
+  } finally {
+    savingArtifacts.value = false
   }
 }
 
@@ -485,6 +549,7 @@ function fmtTime(v?: string | null): string {
 // 暴露出去供断言（与 SettingsView/McpAccessView 同一套路数）。
 defineExpose({
   instructions, toolDescs, freshKey, promptDirty, meta,
+  selectedArtifacts, artifactsDirty, saveOpenArtifacts,
   rotate, savePrompt, restoreDefaults,
 })
 </script>

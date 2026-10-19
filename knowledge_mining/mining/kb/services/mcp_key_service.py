@@ -145,6 +145,10 @@ class McpKeyService:
             key["domain_bound"] = is_admin or await self._db.can_create_in_domain(
                 user_id=user_id, domain=key["domain"],
             )
+            # 008：列表附带钥匙开放制品集（配置抽屉回显；钥匙 ≤10 把，逐把
+            # 一次查询可接受——与 domain_bound 同趟模式）
+            key["open_artifact_ids"] = await self._db.key_open_artifact_ids(
+                key_id=key["id"])
             if key.get("open_tools"):
                 normalized = normalize_legacy_open_tools(list(key["open_tools"]))
                 if normalized is not None:
