@@ -79,6 +79,8 @@ EXPORT_TABLES = [
     "kb_artifact_batches",
     "kb_table_columns",
     "kb_table_rows",
+    # 008：钥匙级制品开放子集（1.1.15 权限模型，017 启动链同建）
+    "mcp_key_open_artifacts",
 ]
 
 # 兼容尚未完成 52 号 bootstrap 的测试/旧库；生产收敛库验证要求这些表存在。

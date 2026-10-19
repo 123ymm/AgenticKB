@@ -7,7 +7,7 @@ CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
 # 1.1.14 勘误：加 006 迁移时必须同步刷新本镜像常量（= manifest_checksum）——
 # 漏刷导致 llm_service 启动 fail-closed 校验仍等旧值而拒绝启动
 # （guard: tests/maintenance/test_migration_manifest.py 断言两者相等）。
-CURRENT_SCHEMA_CHECKSUM = "e0818f82d67f2e682d4dd1807a20f52e7cd761e68a5f694b0056c3e6507cacb7"
+CURRENT_SCHEMA_CHECKSUM = "c819099c543573422c279567c3a2517e1735878f7966fb328bfb4134eb116866"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")
@@ -38,6 +38,7 @@ FORMAL_TABLES: frozenset[str] = frozenset({
     "user_domains",
     "mcp_keys",
     "mcp_key_open_kbs",
+    "mcp_key_open_artifacts",
     "kb_document_refs",
     "kb_purge_tasks",
     "asset_source_batches",
@@ -133,5 +134,5 @@ RETIRED_TABLES: tuple[str, ...] = (
 if len(RETIRED_TABLES) != len(set(RETIRED_TABLES)):  # pragma: no cover - import guard
     raise RuntimeError("RETIRED_TABLES contains duplicates")
 
-if EXPECTED_FORMAL_TABLES != 59:  # pragma: no cover - import guard
-    raise RuntimeError("FORMAL_TABLES must contain exactly 59 names")
+if EXPECTED_FORMAL_TABLES != 60:  # pragma: no cover - import guard
+    raise RuntimeError("FORMAL_TABLES must contain exactly 60 names")

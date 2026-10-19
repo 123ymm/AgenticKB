@@ -34,7 +34,7 @@ public class ServingRuntimeSchemaInitializer implements DomainSchemaEnsurer {
     // mining contract.CURRENT_SCHEMA_CHECKSUM 同源）——漏刷会让 serving 启动
     // fail-closed 校验拒绝就绪。
     private static final String EXPECTED_SCHEMA_CHECKSUM =
-            "e0818f82d67f2e682d4dd1807a20f52e7cd761e68a5f694b0056c3e6507cacb7";
+            "c819099c543573422c279567c3a2517e1735878f7966fb328bfb4134eb116866";
     private static final String EXPECTED_SCHEMA_MARKER =
             "schema/" + EXPECTED_SCHEMA_VERSION;
 
