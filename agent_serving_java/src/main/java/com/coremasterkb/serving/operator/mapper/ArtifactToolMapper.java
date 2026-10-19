@@ -52,14 +52,18 @@ public interface ArtifactToolMapper {
 
     /**
      * 权限谓词（单 SQL）：{@code status='published'} AND {@code domain_id=#{domain}}
-     * AND (isAdmin OR u.id IS NOT NULL AND (成员 OR owner))。username 先经
-     * kb_users JOIN（active + 未清退，对齐 KnowledgeBaseMapper）解析成 u.id——
-     * 成员/owner 判定全部对 u.id，不拿登录名直比 user_id 列（存 uuid hex，C1）。
-     * 空手 = 不存在/无权/已停用/已清退/跨域（同响应）。
+     * AND (isAdmin OR u.id IS NOT NULL AND 域绑定 AND (成员 OR owner OR public))。
+     * username 先经 kb_users JOIN（active + 未清退，对齐 KnowledgeBaseMapper）解析成
+     * u.id——成员/owner 判定全部对 u.id，不拿登录名直比 user_id 列（存 uuid hex，C1）。
+     * 008：① public 制品对本域绑定用户放大读；② 非_admin 路径补 user_domains 域绑定
+     * （对齐 mining 批号⑧——撤域残留成员行不放行）；③ keyId 非空（MCP 钥匙通道）时
+     * 还须落在钥匙显式勾选的开放子集内（子集不放大，public 不自动暴露给 Agent）。
+     * 空手 = 不存在/无权/已停用/已清退/跨域/未开放给该钥匙（同响应）。
      */
     ArtifactVisibleRow selectVisibleArtifact(
             @Param("artifactId") String artifactId, @Param("domain") String domain,
-            @Param("username") String username, @Param("isAdmin") boolean isAdmin);
+            @Param("username") String username, @Param("isAdmin") boolean isAdmin,
+            @Param("keyId") String keyId);
 
     /** 指定 revision 的 schema 快照 + row_count（发布定格，61号 §4.2）。 */
     RevisionRow selectRevision(
@@ -94,12 +98,13 @@ public interface ArtifactToolMapper {
     // ---- 发现通道 ------------------------------------------------------------------
 
     /**
-     * 域内已发布且可见的制品清单（谓词同 {@link #selectVisibleArtifact}），
+     * 域内已发布且可见的制品清单（谓词同 {@link #selectVisibleArtifact}，
+     * 含 008 public/域绑定/钥匙开放子集），
      * (updated_at DESC, artifact_id ASC) 稳定序 + keyset 翻页。
      */
     List<ArtifactSummaryRow> selectArtifactSummaries(
             @Param("domain") String domain, @Param("username") String username,
-            @Param("isAdmin") boolean isAdmin,
+            @Param("isAdmin") boolean isAdmin, @Param("keyId") String keyId,
             @Param("afterUpdatedAt") OffsetDateTime afterUpdatedAt,
             @Param("afterArtifactId") String afterArtifactId,
             @Param("limit") int limit);

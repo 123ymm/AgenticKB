@@ -117,13 +117,19 @@ public class ArtifactQueryService {
      * @throws StructureToolException DSL 校验失败（invalid_ref/unknown_field/
      *         type_mismatch/unsupported_operation/result_too_large）
      */
+    /** web 通道（无钥匙开放集约束——keyId=null）。 */
     public Object query(String artifactRef, JsonNode queryNode, String domain,
                         String username, boolean isAdmin) {
+        return query(artifactRef, queryNode, domain, username, isAdmin, null);
+    }
+
+    public Object query(String artifactRef, JsonNode queryNode, String domain,
+                        String username, boolean isAdmin, String keyId) {
         requireDomain(domain);
         String artifactId = parseRef(artifactRef);
 
         ArtifactVisibleRow artifact = mapper.selectVisibleArtifact(artifactId, domain,
-                username, isAdmin);
+                username, isAdmin, keyId);
         if (artifact == null) {
             // 404 反探测：不存在/非成员/deprecated/跨域同一响应（谓词折叠在 SQL）
             throw new IllegalArgumentException("artifact_not_found");
@@ -173,17 +179,24 @@ public class ArtifactQueryService {
         return rowsMode(artifactRef, spec, criteria, table);
     }
 
-    /**
-     * 发现通道：域内已发布且可见的制品清单（updated_at DESC keyset 翻页）。
-     */
+    /** web 通道（无钥匙开放集约束——keyId=null）。 */
     public ArtifactListResult list(String domain, String username, boolean isAdmin,
                                    String cursor, Integer limit) {
+        return list(domain, username, isAdmin, null, cursor, limit);
+    }
+
+    /**
+     * 发现通道：域内已发布且可见的制品清单（updated_at DESC keyset 翻页）。
+     * keyId 非空 = MCP 钥匙通道——只列钥匙开放子集内的制品（008）。
+     */
+    public ArtifactListResult list(String domain, String username, boolean isAdmin,
+                                   String keyId, String cursor, Integer limit) {
         requireDomain(domain);
         int effective = normalizedLimit(limit);
         ListCursor after = decodeListCursor(cursor);
 
         List<ArtifactSummaryRow> fetched = mapper.selectArtifactSummaries(
-                domain, username, isAdmin,
+                domain, username, isAdmin, keyId,
                 after == null ? null : after.updatedAt(),
                 after == null ? null : after.artifactId(),
                 effective + 1);

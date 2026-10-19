@@ -71,7 +71,7 @@ class ArtifactQueryServiceTest {
         mapper = mock(ArtifactToolMapper.class);
         service = new ArtifactQueryService(mapper);
         // 默认：本域已发布、rev3、成员 alice 可见
-        when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false))
+        when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false, null))
                 .thenReturn(visible(3));
         when(mapper.selectRevision(ID, 3))
                 .thenReturn(new ArtifactToolMapper.RevisionRow(SCHEMA, 120));
@@ -95,7 +95,7 @@ class ArtifactQueryServiceTest {
     @Test
     @DisplayName("is_admin=true 越权面放行（跨域 admin 同放行）——谓词参数 isAdmin 下沉 SQL")
     void adminBypassesMembership() {
-        when(mapper.selectVisibleArtifact(ID, "other", "carol", true))
+        when(mapper.selectVisibleArtifact(ID, "other", "carol", true, null))
                 .thenReturn(new ArtifactToolMapper.ArtifactVisibleRow(
                         ID, "other", "table", 3, "T", "D", "U"));
         when(mapper.selectRevision(ID, 3))
@@ -104,7 +104,7 @@ class ArtifactQueryServiceTest {
         Object out = service.query(REF, null, "other", "carol", true);
 
         assertThat(out).isInstanceOf(ArtifactQueryService.ArtifactCard.class);
-        verify(mapper).selectVisibleArtifact(ID, "other", "carol", true);
+        verify(mapper).selectVisibleArtifact(ID, "other", "carol", true, null);
     }
 
     @Test
@@ -118,7 +118,7 @@ class ArtifactQueryServiceTest {
     @Test
     @DisplayName("deprecated 已停用被谓词滤除（status<>'published' 同折叠）→ artifact_not_found")
     void deprecatedFilteredOut() {
-        when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false)).thenReturn(null);
+        when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false, null)).thenReturn(null);
 
         assertThatThrownBy(() -> service.query(REF, null, DOMAIN, "alice", false))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -131,7 +131,7 @@ class ArtifactQueryServiceTest {
         assertThatThrownBy(() -> service.query(REF, null, "other", "bob", false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("artifact_not_found");
-        verify(mapper).selectVisibleArtifact(ID, "other", "bob", false);
+        verify(mapper).selectVisibleArtifact(ID, "other", "bob", false, null);
     }
 
     @Test
@@ -141,20 +141,36 @@ class ArtifactQueryServiceTest {
         // a.owner_user_id=#{username} 直比会被碰撞串误放行；新口径（XML 契约已钉）
         // 先 JOIN kb_users 再对 u.id 判定，service 侧只保证登录名逐字下沉。
         String uuidShaped = "3f2a1b8c-1111-4222-8333-444455556666";
-        when(mapper.selectVisibleArtifact(ID, DOMAIN, uuidShaped, false))
+        when(mapper.selectVisibleArtifact(ID, DOMAIN, uuidShaped, false, null))
                 .thenReturn(visible(3));
 
         service.query(REF, null, DOMAIN, uuidShaped, false);
 
         // 不翻译、不猜测、不拆解——mapper 收到的就是登录名本身
-        verify(mapper).selectVisibleArtifact(ID, DOMAIN, uuidShaped, false);
+        verify(mapper).selectVisibleArtifact(ID, DOMAIN, uuidShaped, false, null);
 
         // 发现通道同口径：同一登录名原样进入 selectArtifactSummaries
-        when(mapper.selectArtifactSummaries(eq(DOMAIN), eq(uuidShaped), eq(false),
+        when(mapper.selectArtifactSummaries(eq(DOMAIN), eq(uuidShaped), eq(false), eq((String) null),
                 any(), any(), anyInt())).thenReturn(List.of());
         service.list(DOMAIN, uuidShaped, false, null, null);
-        verify(mapper).selectArtifactSummaries(eq(DOMAIN), eq(uuidShaped), eq(false),
+        verify(mapper).selectArtifactSummaries(eq(DOMAIN), eq(uuidShaped), eq(false), eq((String) null),
                 any(), any(), anyInt());
+    }
+
+    @Test
+    @DisplayName("008 钥匙通道：keyId 逐字下沉到两个可见性谓词；web 重载恒 null")
+    void keyIdPassesThroughToVisibilityPredicates() {
+        // MCP 通道：钥匙 id 原样进入谓词（SQL 侧折叠开放子集判定）
+        when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false, "k-mcp-1"))
+                .thenReturn(visible(3));
+        service.query(REF, null, DOMAIN, "alice", false, "k-mcp-1");
+        verify(mapper).selectVisibleArtifact(ID, DOMAIN, "alice", false, "k-mcp-1");
+
+        when(mapper.selectArtifactSummaries(eq(DOMAIN), eq("alice"), eq(false),
+                eq("k-mcp-1"), any(), any(), anyInt())).thenReturn(List.of());
+        service.list(DOMAIN, "alice", false, "k-mcp-1", null, null);
+        verify(mapper).selectArtifactSummaries(eq(DOMAIN), eq("alice"), eq(false),
+                eq("k-mcp-1"), any(), any(), anyInt());
     }
 
     // ---- 三视图形态 ------------------------------------------------------------
@@ -349,7 +365,7 @@ class ArtifactQueryServiceTest {
     @Test
     @DisplayName("rollback 后 status 仍 published：谓词放行、读拨回的 current_revision")
     void rollbackKeepsPublishedAccess() {
-        when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false))
+        when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false, null))
                 .thenReturn(visible(1));
         when(mapper.selectRevision(ID, 1))
                 .thenReturn(new ArtifactToolMapper.RevisionRow(SCHEMA, 80));
@@ -491,7 +507,7 @@ class ArtifactQueryServiceTest {
     void listDiscoveryWithPagination() {
         OffsetDateTime ts1 = OffsetDateTime.parse("2026-10-17T10:00:00+08:00");
         OffsetDateTime ts2 = OffsetDateTime.parse("2026-10-16T09:00:00+08:00");
-        when(mapper.selectArtifactSummaries(DOMAIN, "alice", false, null, null, 51))
+        when(mapper.selectArtifactSummaries(DOMAIN, "alice", false, null, null, null, 51))
                 .thenReturn(List.of(
                         new ArtifactToolMapper.ArtifactSummaryRow(
                                 "aaa", "T1", "d1", "u1", 2, "table", ts1, 10),
@@ -514,7 +530,7 @@ class ArtifactQueryServiceTest {
     @DisplayName("artifact-list：limit+1 探测 has_more，cursor 取最后返回行的 (updated_at,id)")
     void listDiscoveryCursorFromLastRow() {
         OffsetDateTime ts1 = OffsetDateTime.parse("2026-10-17T10:00:00+08:00");
-        when(mapper.selectArtifactSummaries(DOMAIN, "alice", false, null, null, 2))
+        when(mapper.selectArtifactSummaries(DOMAIN, "alice", false, null, null, null, 2))
                 .thenReturn(List.of(
                         new ArtifactToolMapper.ArtifactSummaryRow(
                                 "aaa", "T1", "d1", "u1", 2, "table", ts1, 10),
@@ -533,7 +549,7 @@ class ArtifactQueryServiceTest {
 
         // 下一页以解码出的 keyset 参数下沉
         service.list(DOMAIN, "alice", false, out.cursor(), 1);
-        verify(mapper).selectArtifactSummaries(DOMAIN, "alice", false, dec.updatedAt(),
+        verify(mapper).selectArtifactSummaries(DOMAIN, "alice", false, null, dec.updatedAt(),
                 dec.artifactId(), 2);
     }
 

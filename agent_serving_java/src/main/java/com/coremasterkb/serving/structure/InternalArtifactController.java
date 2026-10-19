@@ -63,7 +63,8 @@ public class InternalArtifactController {
 
     /**
      * art_ ref 制品查询。body: {artifact_ref, query{select/where/order_by/limit/
-     * cursor/aggregate}|null, domain, username, is_admin}——query 缺省 = 卡片视图。
+     * cursor/aggregate}|null, domain, username, is_admin, key_id?}——query 缺省 =
+     * 卡片视图；key_id 非空 = MCP 钥匙通道（008：须在钥匙开放子集内）。
      */
     @PostMapping("/artifact-query")
     public ResponseEntity<?> artifactQuery(
@@ -73,12 +74,16 @@ public class InternalArtifactController {
             String artifactRef = requiredText(body, "artifact_ref", "artifact_ref 必填");
             Object result = artifactService.query(artifactRef, body.get("query"),
                     text(body, "domain"), text(body, "username"),
-                    body.path("is_admin").asBoolean(false));
+                    body.path("is_admin").asBoolean(false),
+                    text(body, "key_id"));
             return ResponseEntity.ok(assembleQueryView(artifactRef, result));
         });
     }
 
-    /** 发现通道。body: {domain, username, is_admin, cursor?, limit?} */
+    /**
+     * 发现通道。body: {domain, username, is_admin, key_id?, cursor?, limit?}——
+     * key_id 非空时只列钥匙开放子集内的制品（008）。
+     */
     @PostMapping("/artifact-list")
     public ResponseEntity<?> artifactList(
             @RequestBody JsonNode body,
@@ -87,6 +92,7 @@ public class InternalArtifactController {
             ArtifactListResult result = artifactService.list(
                     text(body, "domain"), text(body, "username"),
                     body.path("is_admin").asBoolean(false),
+                    text(body, "key_id"),
                     text(body, "cursor"), intOrNull(body.get("limit")));
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("view", "artifacts");

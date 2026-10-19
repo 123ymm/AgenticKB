@@ -101,6 +101,8 @@ def test_query_artifact_forwards_dsl_contract(monkeypatch, calls):
         "domain": "cloud_core_network",
         "username": "alice",
         "is_admin": False,
+        # 008：钥匙 id 下沉——serving 谓词折叠开放子集判定（子集不放大）
+        "key_id": "key-1",
         "query": DSL,
     }
     assert out["view"] == "artifact_rows"
@@ -136,6 +138,7 @@ def test_list_artifacts_forwards_contract(monkeypatch, calls):
         "domain": "cloud_core_network",
         "username": "alice",
         "is_admin": False,
+        "key_id": "key-1",  # 008：发现通道同样限钥匙开放子集
         "cursor": "Y3Vyc29y",
         "limit": 20,
     }
@@ -326,7 +329,7 @@ def test_browse_top_appends_artifacts_section(monkeypatch, calls):
     body = json.loads(calls[0].content)
     assert body == {
         "domain": "cloud_core_network", "username": "alice",
-        "is_admin": False, "cursor": None, "limit": 20,
+        "is_admin": False, "key_id": "key-1", "cursor": None, "limit": 20,
     }
 
 
