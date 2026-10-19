@@ -29,7 +29,7 @@ ROLE_DESIGN = ("owner", "editor")
 ROLE_OWNER_ONLY = ("owner",)
 
 #: 允许直接 PATCH 的元信息字段白名单。
-_META_FIELDS = {"title", "description", "usage_note"}
+_META_FIELDS = {"title", "description", "usage_note", "visibility"}
 
 _MAX_TITLE_LENGTH = 200
 
@@ -246,7 +246,13 @@ class ArtifactService:
         if role is None and artifact.get("owner_user_id") == _uid(user):
             role = "owner"
         if role is None:
-            raise ArtifactNotFound(artifact_id)
+            if artifact.get("visibility") == "public":
+                # 008 权限模型：public 对本域绑定用户放大"读"——非成员按
+                # viewer 合成角色（写端点 ROLE_DESIGN / ROLE_OWNER_ONLY 的
+                # allowed 校验自然拒绝，public 只放大读不放大写）。
+                role = "viewer"
+            else:
+                raise ArtifactNotFound(artifact_id)
         if allowed and role not in allowed and role not in ("admin", "domain_admin"):
             raise ArtifactForbidden(artifact_id)
         return artifact, role
@@ -256,11 +262,14 @@ class ArtifactService:
     async def create_artifact(
         self, *, user: dict[str, Any], domain_id: str, kind: str = "table",
         title: str, description: str | None = None,
+        visibility: str = "private",
     ) -> dict[str, Any]:
         if not domain_id or not str(domain_id).strip():
             raise InvalidOperation("invalid_domain")
         if kind not in ("table", "wiki"):
             raise InvalidOperation("invalid_kind")
+        if visibility not in ("private", "public"):
+            raise InvalidOperation("invalid_visibility")
         if not isinstance(title, str):
             raise InvalidOperation("invalid_title")
         cleaned = title.strip()
@@ -272,6 +281,7 @@ class ArtifactService:
             return await self._db.create_artifact(
                 domain_id=str(domain_id).strip(), kind=kind, title=cleaned,
                 description=description or "", owner_user_id=_uid(user),
+                visibility=visibility,
             )
         except ArtifactRepoError as exc:
             raise _translate(exc) from exc
@@ -307,7 +317,7 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str,
         fields: dict[str, Any], expected_updated_at: Any = None,
     ) -> dict[str, Any]:
-        artifact, _ = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
+        artifact, role = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
         _check_freshness(artifact, expected_updated_at)
         provided = {k: v for k, v in fields.items() if k in _META_FIELDS}
         if "title" in provided:
@@ -316,6 +326,13 @@ class ArtifactService:
                     or len(title.strip()) > _MAX_TITLE_LENGTH:
                 raise InvalidOperation("invalid_title")
             provided["title"] = title.strip()
+        if "visibility" in provided:
+            # 008：公开/私有是治理决策——owner（含 admin 旁路角色）专属，
+            # editor 不可翻转。
+            if role not in ("owner", "admin", "domain_admin"):
+                raise ArtifactForbidden(artifact_id)
+            if provided["visibility"] not in ("private", "public"):
+                raise InvalidOperation("invalid_visibility")
         try:
             updated = await self._db.update_artifact_meta(artifact_id, **provided)
         except ArtifactRepoError as exc:
@@ -327,7 +344,11 @@ class ArtifactService:
     async def delete_artifact(
         self, *, user: dict[str, Any], artifact_id: str,
     ) -> None:
-        await self._assert_role(user, artifact_id, *ROLE_OWNER_ONLY)
+        artifact, _ = await self._assert_role(user, artifact_id, *ROLE_OWNER_ONLY)
+        if artifact.get("status") != "deprecated":
+            # 硬删两级确认的第一级：先停用（deprecate）再删——防止误删在线
+            # 制品；停用是可恢复的缓冲动作，删除不可恢复。
+            raise InvalidOperation("artifact_not_deprecated")
         await self._db.delete_artifact(artifact_id)
 
     # -------------------------------------------------------------- 成员

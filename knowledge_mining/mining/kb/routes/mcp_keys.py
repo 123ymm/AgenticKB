@@ -31,6 +31,8 @@ from knowledge_mining.mining.kb.services.mcp_key_service import (
     McpKeyError,
     McpKeyService,
 )
+from knowledge_mining.mining.kb.deps import get_artifact_db
+from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
 
 router = APIRouter(prefix="/api/kb/users/me/mcp-keys", tags=["kb-mcp-keys"])
 
@@ -206,6 +208,30 @@ async def put_my_key_open_kbs(
     except McpKeyError as exc:
         raise _http_error(exc) from None
     return {"open_kb_ids": final}
+
+
+# PUT body：全量覆盖该钥匙开放的知识制品（008）；空数组=清空（Agent 侧
+# 制品通道对这把钥匙关闭）。候选=主人可见面（public+成员），子集不放大。
+class OpenArtifactsBody(BaseModel):
+    artifact_ids: list[str]
+
+
+@router.put("/{key_id}/open-artifacts")
+async def put_my_key_open_artifacts(
+    key_id: str,
+    body: OpenArtifactsBody,
+    user: dict[str, Any] = Depends(current_user),
+    svc: McpKeyService = Depends(_get_service),
+    adb: ArtifactDB = Depends(get_artifact_db),
+) -> dict[str, Any]:
+    try:
+        final = await svc.replace_open_artifacts(
+            user_id=user["id"], key_id=key_id,
+            artifact_ids=body.artifact_ids, artifact_db=adb,
+        )
+    except McpKeyError as exc:
+        raise _http_error(exc) from None
+    return {"open_artifact_ids": final}
 
 
 # 工具开关 / 提示词 / 工具描述。None = 不改；instructions "" = 恢复默认。

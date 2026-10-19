@@ -1955,6 +1955,51 @@ WITH latest AS (
             )
             return [r["kb_id"] for r in await cur.fetchall()]
 
+    async def key_open_artifact_ids(self, *, key_id: str) -> list[str]:
+        """钥匙当前勾选的开放制品（008）。制品硬删已级联清行，这里只做
+        存在性+同域过滤（与 open_kbs 口径对齐）；主人可见面收缩（转私有/
+        移出成员）由 serving 读时 JOIN 判定，不在列表层拦截。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT o.artifact_id FROM mcp_key_open_artifacts o
+                   JOIN kb_artifacts a ON a.artifact_id = o.artifact_id
+                   WHERE o.key_id = %s
+                     AND a.domain_id = (SELECT domain FROM mcp_keys WHERE id = %s)
+                   ORDER BY o.granted_at""",
+                (key_id, key_id),
+            )
+            return [r["artifact_id"] for r in await cur.fetchall()]
+
+    async def replace_mcp_key_open_artifacts(
+        self, *, key_id: str, artifact_ids: list[str],
+    ) -> list[str]:
+        """全量覆盖钥匙的开放制品勾选（008）。域防线在 SQL 层（越域制品静默
+        丢弃）；「主人可见面」防线在调用方（McpKeyService.replace_open_artifacts
+        逐个 readable_artifact_domain 校验）。前置条件同 replace_mcp_key_open_kbs。"""
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM mcp_key_open_artifacts WHERE key_id = %s",
+                    (key_id,),
+                )
+                await conn.execute(
+                    """INSERT INTO mcp_key_open_artifacts (key_id, artifact_id)
+                       SELECT %(kid)s, a.artifact_id FROM kb_artifacts a
+                       WHERE a.artifact_id = ANY(%(arts)s)
+                         AND a.domain_id = (SELECT domain FROM mcp_keys WHERE id = %(kid)s)
+                       ON CONFLICT DO NOTHING""",
+                    {"kid": key_id, "arts": list(artifact_ids)},
+                )
+            cur = await conn.execute(
+                """SELECT o.artifact_id FROM mcp_key_open_artifacts o
+                   JOIN kb_artifacts a ON a.artifact_id = o.artifact_id
+                   WHERE o.key_id = %s
+                     AND a.domain_id = (SELECT domain FROM mcp_keys WHERE id = %s)
+                   ORDER BY o.granted_at""",
+                (key_id, key_id),
+            )
+            return [r["artifact_id"] for r in await cur.fetchall()]
+
     async def update_mcp_key_config(
         self, *, key_id: str, open_tools: list[str] | None,
         instructions: str | None, tool_descriptions: dict[str, str] | None,

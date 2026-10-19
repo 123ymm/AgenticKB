@@ -130,6 +130,14 @@ async def test_create_list_detail_patch_delete(env):
     )
     assert r.status_code == 200 and r.json()["title"] == "MOP 表"
 
+    # 删除门禁（008）：draft 态直接删 → 409 artifact_not_deprecated；
+    # 停用后放行（owner 硬删）。
+    r = await env.client.delete(f"/api/artifacts/{aid}")
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "artifact_not_deprecated"
+    assert await env.db.get_artifact(aid) is not None
+    r = await env.client.post(f"/api/artifacts/{aid}/deprecate")
+    assert r.status_code == 200
     r = await env.client.delete(f"/api/artifacts/{aid}")
     assert r.status_code == 200
     assert await env.db.get_artifact(aid) is None
