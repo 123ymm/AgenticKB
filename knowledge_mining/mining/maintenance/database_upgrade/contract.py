@@ -84,8 +84,9 @@ EXPECTED_PHYSICAL_TABLES = EXPECTED_FORMAL_TABLES + 1
 
 # This release accepts the complete immediately preceding table set: the old
 # Java log exists and the unified ledger does not yet exist. The kb_* artifact
-# six-table set (61号) is new in this release, so it is subtracted alongside
-# the access-ledger pair when reconstructing the previous release baseline.
+# six-table set (61号) plus the key-open-artifacts table (008) are new in this
+# release, so they are subtracted alongside the access-ledger pair when
+# reconstructing the previous release baseline.
 PREVIOUS_RELEASE_TABLES: frozenset[str] = frozenset(
     (
         FORMAL_TABLES
@@ -98,6 +99,7 @@ PREVIOUS_RELEASE_TABLES: frozenset[str] = frozenset(
             "kb_artifact_batches",
             "kb_table_columns",
             "kb_table_rows",
+            "mcp_key_open_artifacts",
         }
     )
     | {"serving_query_logs"}
