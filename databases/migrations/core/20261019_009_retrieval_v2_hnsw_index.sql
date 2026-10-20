@@ -71,6 +71,16 @@ BEGIN
     END IF;
 END $$;
 
+-- 内网 1.1.15 首次 apply 实测坑（2026-10-20）：PG 容器（fastgpt/pgvector 镜像）
+-- 沿用 Docker 默认 ShmSize=64MB；PG15 并行建索引把共享排序区放动态共享内存，
+-- 容量按 maintenance_work_mem 总量申请（实测一次要 ~509MB），/dev/shm 装不下即
+-- 报 "could not resize shared memory segment ... No space left on device"
+-- （字面像磁盘满，实为容器共享内存不足——排查时先看 docker inspect ShmSize，
+-- 不要去清磁盘）。串行构建走后端本地内存 + 临时文件，不依赖 /dev/shm；
+-- 40 万×1024 维串行预计分钟级，部署窗口可接受。运维如需并行提速：给 PG 容器
+-- --shm-size>=1G 重建后，可在维护窗口自行去掉本行（本迁移已在库上的除外）。
+SET max_parallel_maintenance_workers = 0;
+
 SET maintenance_work_mem = '512MB';
 
 CREATE INDEX IF NOT EXISTS idx_are_v2_vec_hnsw

@@ -339,3 +339,7 @@ def test_hnsw_migration_targets_formal_table_with_guards() -> None:
     assert "vector(1024)" in sql
     # 自愈：同名无效/漂移索引先 DROP 再重建（失败的 CONCURRENTLY 残留）
     assert "drop index public.idx_are_v2_vec_hnsw" in sql
+    # 2026-10-20 内网实测坑：PG 容器默认 ShmSize=64MB，PG15 并行建索引的共享
+    # 排序区按 maintenance_work_mem 申请动态共享内存（/dev/shm）会 ENOSPC——
+    # 必须串行建索引（后端本地内存+临时文件，不依赖 /dev/shm）。
+    assert "set max_parallel_maintenance_workers = 0" in sql

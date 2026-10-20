@@ -8,7 +8,9 @@ CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
 # 漏刷导致 llm_service 启动 fail-closed 校验仍等旧值而拒绝启动
 # （guard: tests/maintenance/test_migration_manifest.py 断言两者相等）。
 # 1.1.15 资产包替换：加 009（v2 向量 HNSW 索引）后刷新。
-CURRENT_SCHEMA_CHECKSUM = "60d075feee1ddb371233fbd3b8b46ab99f102aef83bad459f8125ff9a7281561"
+# 2026-10-20 三次替换：009 修订（串行建索引，绕开 PG 容器 64MB /dev/shm——
+# 并行建索引的共享排序区按 maintenance_work_mem 申请动态共享内存会 ENOSPC）。
+CURRENT_SCHEMA_CHECKSUM = "11742f3e4fb2cd49ac839ddade1ce1ff41563554441b4c472596245b67de78c6"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")
