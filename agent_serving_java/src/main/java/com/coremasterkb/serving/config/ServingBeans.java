@@ -55,15 +55,25 @@ public class ServingBeans {
     private static final long CONTROL_FETCH_BACKOFF_MS = 2_000;
 
     /**
-     * 009（1.1.15 性能修复）配套：每个池连接建立时打开 pgvector 迭代索引扫描。
-     * dense 检索（searchDenseV2）永远带 snapshot_id IN 过滤——pgvector 0.8+
-     * 该 GUC 默认 off，不打开则带过滤查询走不了 HNSW（idx_are_v2_vec_hnsw 白建）。
-     * strict_order 保证 ORDER BY 距离 LIMIT 的候选窗语义精确；迁移 009 已把
-     * pgvector <0.8 挡在部署门外，此处 SET 不会遇到未知 GUC。DomainPoolManager
-     * 的域池同用此常量。
+     * 009（1.1.15 性能修复）配套 + 2026-10-20 内网实测修订：每连接会话参数。
+     *
+     * <p>① ef_search=600：单趟图导航的搜索宽度。默认 40 撑不满候选窗
+     * （candidateBudget 500），600 一趟取够且实测 97ms 级（55 万向量）。</p>
+     *
+     * <p>② plan_cache_mode=force_custom_plan：检索 SQL 是重参数形态（1 向量 +
+     * 上千快照 + LIMIT 均为预编译参数），通用计划下选择率估歪会让规划器放弃
+     * idx_are_v2_vec_hnsw 改走全表扫（内网实测 23~35 秒/次）；定制规划按真实
+     * 参数值估算，实测稳定走索引。两个 GUC 用单条 set_config 语句设置——
+     * Hikari connectionInitSql 走扩展协议，多语句拼接会被 PG 拒绝。</p>
+     *
+     * <p>2026-10-20 勘误：本常量曾设 hnsw.iterative_scan=strict_order——在
+     * 内网 pgvector 0.8.0 上实测为性能毒药（开关打开时规划器弃索引选全表扫、
+     * 即便选中索引迭代实现本身也慢；关闭后 97ms）。已移除；待内网升级
+     * pgvector ≥0.8.1 后可评估恢复。DomainPoolManager 的域池同用此常量。</p>
      */
     public static final String PG_SESSION_INIT_SQL =
-            "SET hnsw.iterative_scan = strict_order";
+            "SELECT set_config('hnsw.ef_search', '600', false), "
+                    + "set_config('plan_cache_mode', 'force_custom_plan', false)";
 
     // -------------------------------------------------------------------------
     // DataSource configuration (DataSourceAutoConfiguration is excluded)

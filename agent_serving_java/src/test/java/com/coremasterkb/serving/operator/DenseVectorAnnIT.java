@@ -42,9 +42,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * </ol>
  *
  * <p>40 万规模的真实执行计划选择（planner 是否选索引）属于内网基准验收；
- * 本 IT 只锁"路径存在 + 语义正确"。连接池经 ServingBeans 的
- * connection-init-sql 已 SET hnsw.iterative_scan=strict_order——若测试库
- * pgvector &lt; 0.8，池初始化失败 → 用例按不可达优雅跳过。</p>
+ * 本 IT 只锁"路径存在 + 语义正确"。连接池经 ServingBeans 的 connection-init-sql
+ * 已 SET hnsw.ef_search=600 + plan_cache_mode=force_custom_plan（2026-10-20
+ * 修订：iterative_scan=strict_order 在 pgvector 0.8.0 实测为性能毒药已移除）。</p>
  */
 @SpringBootTest(classes = AgentServingApplication.class)
 @ActiveProfiles("test-pg")
@@ -111,8 +111,8 @@ class DenseVectorAnnIT {
                         + "LIMIT 200";
 
         // 强制旋钮用 enable_sort（不是 enable_seqscan）：禁掉 Sort 后唯一能提供
-        // 距离序的路径就是 hnsw 迭代扫描——若 SQL 回退成 DISTINCT ON 全量形态、
-        // 或索引缺失/iterative_scan 未开，此断言失败。默认旋钮下小表选精确扫是
+        // 距离序的路径就是 hnsw 索引扫描——若 SQL 回退成 DISTINCT ON 全量形态、
+        // 或索引缺失，此断言失败。默认旋钮下小表选精确扫是
         // planner 正常成本判断（本 IT 数据量小），40 万规模的成本翻转属内网验收。
         StringBuilder plan = new StringBuilder();
         try (Connection conn = dataSource.getConnection();
