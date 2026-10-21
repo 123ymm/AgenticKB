@@ -38,7 +38,7 @@ class _Cursor:
         return list(self._rows)
 
 
-# pg_indexes 默认返回（= 全部 REQUIRED_INDEXES 的合格定义；末行为 009 的 HNSW）
+# pg_indexes 默认返回（= 全部 REQUIRED_INDEXES 的合格定义；末两行为 009/010 的 HNSW）
 _DEFAULT_INDEX_ROWS: list[tuple[str, str]] = [
     ("idx_user_domains_domain", "CREATE INDEX idx_user_domains_domain ON user_domains (domain)"),
     ("idx_mcp_keys_user", "CREATE INDEX idx_mcp_keys_user ON mcp_keys (user_id)"),
@@ -50,6 +50,7 @@ _DEFAULT_INDEX_ROWS: list[tuple[str, str]] = [
     ("idx_knowledge_access_status_time", "CREATE INDEX idx_knowledge_access_status_time ON knowledge_access_records (status, occurred_at DESC)"),
     ("idx_knowledge_access_kb_ids", "CREATE INDEX idx_knowledge_access_kb_ids ON knowledge_access_records USING GIN (kb_ids)"),
     ("idx_are_v2_vec_hnsw", "CREATE INDEX idx_are_v2_vec_hnsw ON public.asset_retrieval_embeddings_v2 USING hnsw (embedding_vector_vec vector_cosine_ops)"),
+    ("idx_wiki_units_hnsw", "CREATE INDEX idx_wiki_units_hnsw ON public.kb_wiki_page_units USING hnsw (embedding vector_cosine_ops)"),
 ]
 
 
