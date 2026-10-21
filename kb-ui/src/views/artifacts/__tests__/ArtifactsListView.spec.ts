@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import type { VueWrapper } from '@vue/test-utils'
 
@@ -29,14 +30,28 @@ import ArtifactsListView from '../ArtifactsListView.vue'
 
 interface ListVm {
   artifacts: unknown[]
-  form: { title: string; description: string; domainId: string }
+  form: { title: string; description: string; domainId: string; kind: string }
+  createVisible: boolean
+  openCreate: () => void
   createArtifact: () => Promise<void>
   statusTagType: (status: string) => 'info' | 'success' | 'danger'
   statusLabel: (status: string) => string
 }
 
+// vitest 链路无 unplugin-vue-components：模板里的 el-radio-group 是未解析的
+// 原生元素，v-model 事件无法经组件通道驱动——注册最小具名桩让 resolveComponent
+// 命中（shallowMount 再包自动桩，data-test 随 attrs 透传到桩根元素）。
+const ElRadioGroupStub = {
+  name: 'ElRadioGroup',
+  props: { modelValue: { type: String, default: '' } },
+  emits: ['update:modelValue'],
+  template: '<div class="el-radio-group"><slot /></div>',
+}
+
 function mountList(): VueWrapper {
-  return shallowMount(ArtifactsListView)
+  return shallowMount(ArtifactsListView, {
+    global: { components: { ElRadioGroup: ElRadioGroupStub } },
+  })
 }
 
 const artifacts = [
@@ -106,16 +121,46 @@ describe('artifacts list view', () => {
     await flushPromises()
     const vm = wrapper.vm as unknown as ListVm
 
-    vm.form = { title: '  新制品  ', description: ' 说明 ', domainId: 'plant-a' }
+    vm.form = { title: '  新制品  ', description: ' 说明 ', domainId: 'plant-a', kind: 'table' }
     await vm.createArtifact()
 
-    // codex二审功能项③：create payload 显式带当前域（不再依赖后端绑定域兜底）
+    // codex二审功能项③：create payload 显式带当前域（不再依赖后端绑定域兜底）；
+    // 类型默认 table（不选 radio 时的缺省请求体口径）
     expect(state.api.create).toHaveBeenCalledWith({
-      title: '新制品', description: '说明', domain_id: 'plant-a',
+      title: '新制品', description: '说明', domain_id: 'plant-a', kind: 'table',
     })
     expect(state.router.push).toHaveBeenCalledWith({
       name: 'artifact-detail', params: { artifactId: 'art_new' },
     })
+  })
+
+  it('sends kind=wiki when the Wiki type is picked in the create dialog', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ListVm
+
+    // 打开对话框：openCreate 重置表单（kind 回到默认 table）
+    vm.openCreate()
+    await nextTick()
+    expect(vm.createVisible).toBe(true)
+    expect(vm.form.kind).toBe('table')
+
+    // shallowMount 下 el-radio-group 为桩（data-test 透传）——经桩 emit
+    // update:modelValue 模拟选择 wiki（v-model 回写 form.kind）
+    const radioGroup = wrapper.findComponent('[data-test="create-artifact-kind"]')
+    expect(radioGroup.exists()).toBe(true)
+    // CSS 选择器重载的返回类型是 WrapperLike（可能命中原生元素）——此处已由
+    // mountList 注册具名桩，断言存在后收窄为 VueWrapper 走组件事件通道
+    ;(radioGroup as unknown as VueWrapper).vm.$emit('update:modelValue', 'wiki')
+    await nextTick()
+    expect(vm.form.kind).toBe('wiki')
+
+    vm.form.title = '割接 Wiki 手册'
+    await vm.createArtifact()
+
+    expect(state.api.create).toHaveBeenCalledWith(expect.objectContaining({
+      title: '割接 Wiki 手册', domain_id: 'plant-a', kind: 'wiki',
+    }))
   })
 
   it('blocks creation when the target domain is unknown', async () => {
@@ -124,7 +169,7 @@ describe('artifacts list view', () => {
     await flushPromises()
     const vm = wrapper.vm as unknown as ListVm
 
-    vm.form = { title: '无域制品', description: '', domainId: '' }
+    vm.form = { title: '无域制品', description: '', domainId: '', kind: 'table' }
     await vm.createArtifact()
 
     expect(state.ui.warning).toHaveBeenCalledWith(expect.stringContaining('归属知识域'))
@@ -137,7 +182,7 @@ describe('artifacts list view', () => {
     await flushPromises()
     const vm = wrapper.vm as unknown as ListVm
 
-    vm.form = { title: '   ', description: '', domainId: 'plant-a' }
+    vm.form = { title: '   ', description: '', domainId: 'plant-a', kind: 'table' }
     await vm.createArtifact()
     expect(state.ui.warning).toHaveBeenCalled()
     expect(state.api.create).not.toHaveBeenCalled()
@@ -145,7 +190,7 @@ describe('artifacts list view', () => {
     state.api.create.mockRejectedValueOnce({
       response: { status: 422, data: { detail: 'domain_id_required: x' } },
     })
-    vm.form = { title: '无域制品', description: '', domainId: 'plant-a' }
+    vm.form = { title: '无域制品', description: '', domainId: 'plant-a', kind: 'table' }
     await vm.createArtifact()
     expect(state.router.push).not.toHaveBeenCalled()
     expect(state.ui.error).toHaveBeenCalled()

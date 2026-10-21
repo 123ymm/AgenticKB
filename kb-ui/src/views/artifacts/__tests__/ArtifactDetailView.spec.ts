@@ -104,6 +104,26 @@ describe('artifact detail view', () => {
     expect(vm.runtimeColumns.map(c => c.column_name)).not.toContain('草稿新列')
   })
 
+  it('wiki 制品：切运行态不触发表格接口，双页签显示占位守卫', async () => {
+    state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, kind: 'wiki' })
+    const wrapper = mountDetail()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as DetailVm
+
+    vm.activeTab = 'runtime'
+    await flushPromises()
+
+    // wiki 占位守卫：运行态 tab 不拉表格列/行（说明卡照常，无 API 死调用）
+    expect(state.api.listColumns).not.toHaveBeenCalled()
+    expect(state.api.listRows).not.toHaveBeenCalled()
+
+    // 双页签占位文案（tab-pane 桩渲染全部插槽，两处 EmptyState 同时在树中）
+    const placeholders = wrapper.findAllComponents({ name: 'EmptyState' })
+      .map(c => c.props('text') || c.attributes('text'))
+    expect(placeholders).toContain('Wiki 设计面板随下个批次开放；版本与成员见对应页签。')
+    expect(placeholders).toContain('Wiki 阅读视图随下个批次开放。')
+  })
+
   it('refetches detail, runtime schema and rows after a rollback (versions panel changed)', async () => {
     const wrapper = mountDetail()
     await flushPromises()

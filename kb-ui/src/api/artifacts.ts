@@ -11,6 +11,7 @@ import type {
   Artifact,
   ArtifactColumn,
   ArtifactDetail,
+  ArtifactKind,
   ArtifactRole,
   ArtifactRowsPage,
   DiffResult,
@@ -28,6 +29,8 @@ export interface ArtifactCreateRequest {
   description?: string
   domain_id?: string
   visibility?: string
+  /** wiki 制品（60号四形态）：创建时声明，缺省 table（后端 Literal 默认）。 */
+  kind?: ArtifactKind
 }
 
 export interface ArtifactMetaPatchRequest {

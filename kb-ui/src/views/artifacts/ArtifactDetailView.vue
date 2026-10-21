@@ -77,7 +77,13 @@
     <el-tabs v-if="artifact" v-model="activeTab" class="artifact-detail__tabs">
       <!-- ── 设计态：导入向导 / 列定义 / 行编辑三面板（owner+editor；viewer 无设计态）── -->
       <el-tab-pane label="设计态" name="design">
-        <template v-if="canWrite">
+        <!-- wiki 占位守卫（60号）：编译/编辑面板随下个批次开放；文案角色中立——
+             viewer 不能管成员/回滚版本，只指向对应页签 -->
+        <EmptyState
+          v-if="artifact.kind === 'wiki'"
+          text="Wiki 设计面板随下个批次开放；版本与成员见对应页签。"
+        />
+        <template v-else-if="canWrite">
           <ArtifactImportWizard
             :artifact-id="artifactId"
             :active="activeTab === 'design'"
@@ -123,36 +129,43 @@
           <el-button data-test="edit-meta" @click="openMetaEdit">编辑元信息</el-button>
         </div>
 
-        <el-table v-loading="rowsLoading" :data="runtimeRows" size="small">
-          <el-table-column label="行键" min-width="150">
-            <template #default="{ row }">
-              <el-tooltip :content="row.row_key" placement="top" :disabled="row.row_key === displayRowKey(row)">
-                <span>{{ displayRowKey(row) }}</span>
-              </el-tooltip>
-            </template>
-          </el-table-column>
-          <el-table-column
-            v-for="col in runtimeColumns"
-            :key="col.column_id"
-            :label="col.column_name"
-            min-width="130"
-            show-overflow-tooltip
-          >
-            <template #default="{ row }">{{ displayValue(row.data[col.column_name]) }}</template>
-          </el-table-column>
-          <template #empty>
-            <EmptyState text="暂无已发布数据（发布后在运行态可见）" />
-          </template>
-        </el-table>
-        <el-pagination
-          v-if="rowsTotal > rowsPageSize"
-          class="artifact-detail__pager"
-          layout="total, prev, pager, next"
-          :total="rowsTotal"
-          :page-size="rowsPageSize"
-          :current-page="rowsPage"
-          @current-change="onRowsPageChange"
+        <!-- wiki 占位守卫（60号）：阅读视图随下个批次开放，说明卡/元信息编辑保留 -->
+        <EmptyState
+          v-if="artifact.kind === 'wiki'"
+          text="Wiki 阅读视图随下个批次开放。"
         />
+        <template v-else>
+          <el-table v-loading="rowsLoading" :data="runtimeRows" size="small">
+            <el-table-column label="行键" min-width="150">
+              <template #default="{ row }">
+                <el-tooltip :content="row.row_key" placement="top" :disabled="row.row_key === displayRowKey(row)">
+                  <span>{{ displayRowKey(row) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column
+              v-for="col in runtimeColumns"
+              :key="col.column_id"
+              :label="col.column_name"
+              min-width="130"
+              show-overflow-tooltip
+            >
+              <template #default="{ row }">{{ displayValue(row.data[col.column_name]) }}</template>
+            </el-table-column>
+            <template #empty>
+              <EmptyState text="暂无已发布数据（发布后在运行态可见）" />
+            </template>
+          </el-table>
+          <el-pagination
+            v-if="rowsTotal > rowsPageSize"
+            class="artifact-detail__pager"
+            layout="total, prev, pager, next"
+            :total="rowsTotal"
+            :page-size="rowsPageSize"
+            :current-page="rowsPage"
+            @current-change="onRowsPageChange"
+          />
+        </template>
       </el-tab-pane>
 
       <!-- ── 成员：成员管理仅 owner（后端 ROLE_OWNER_ONLY）── -->
@@ -349,7 +362,10 @@ function loadRuntimeData() {
 }
 
 watch(activeTab, (tab) => {
-  if (tab === 'runtime' && !runtimeLoaded.value) loadRuntimeData()
+  // wiki 占位守卫：无表格运行态，不触发 table 列/行懒加载
+  if (tab === 'runtime' && !runtimeLoaded.value && artifact.value?.kind !== 'wiki') {
+    loadRuntimeData()
+  }
 })
 
 function onRowsPageChange(page: number) {
