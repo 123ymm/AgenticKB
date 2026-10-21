@@ -366,3 +366,20 @@ git commit -m "feat(ui): 制品创建对话框类型选择（表格/Wiki）+详�
 | 3 | 编译管线：sources 绑定管理+脏标记、聚类→目录→写作→链接质量（LLM 异步）、origin 保护、编译向导 | 从库语料一键产 wiki |
 | 4 | Java ArtifactWikiSearchService（dense/keyword/fusion 同构）+ internal 端点 + MCP art_ kind 分流 + jar 纯源码构建 | Agent 检索/读取 wiki |
 | 5 | E2E 验收：三通道检索、引用规范校验、重跑稳定性、origin 保护回归 | 63号 §七 验收全过 |
+
+---
+
+## 批次1 完成记录（2026-10-21，终审定稿）
+
+**提交链**（worktree-wiki-artifact-mvp，基于 24c43d4）：a77d1e8 docs → 8cbafe9 迁移010+启动链018+pg_schema → f40d41d 十处登记+三镜像（校验和 `a40aa97d…`）→ 2e7d988 路由kind → d967804 前端。门禁全过：Python 全量 2037 passed 与 merge-base 基线 test-ID 级零新增失败；MCP 165；Java 484；前端 558+build 0 错。审查链：每任务规格+质量两审，4 轮修复迭代（守卫口径对齐009/索引换kb侧/列序对齐/守卫测试泛化+四补/422定位断言/viewer文案中立+DetailView测试）。
+
+**与计划的偏差（均已审）**：来源绑定索引 `(artifact_id)`→`(kb_id)`（UNIQUE 已覆盖前者）；maintenance_work_mem 512MB（对齐009）；radio 用 `value=`（EP 2.14 约定）。
+
+### 批次2-5 接手注意事项（终审移交）
+
+1. **硬删级联缺口（批次2必做）**：`db_artifacts.py:200-226` delete_artifact 显式级联清单不含新四表——不补则 wiki 制品硬删留孤儿（含 HNSW unit 行）。KB 清退/重挖时按 `kb_id` 清 `kb_artifact_sources`（`idx_kb_artifact_sources_kb` 为此而建，批次3接线）。
+2. **发布事务归一（批次2）**：publish 链路 kind 盲——wiki 空壳填了 usage_note 可发布成 row_count=0 空版本（不产脏数据，窗口期可接受）。批次2 要么先按 kind 拦，要么直接接管统一发布事务（pages/links 快照+units 投影+向量异步）；容忍可能已存在的空 revision。
+3. **JSONB 契约未定**：batches.details（wiki_compile 载荷）、sources.scope/fingerprint（脏标记结构）形状归批次2/3 定义；`sql_import` 枚举已预登，表格 P2 加通道不得再动 CHECK。
+4. **占位守卫拆除点（批次2）**：`ArtifactDetailView.vue` 两处 EmptyState（:80-84/:131-135）+ watch 守卫（:365）+ spec 断言文案；`KIND_CREATE_HINTS` 是 Record，新 kind 时 TS 强制补文案。
+5. **消费侧空读（批次4）**：MCP art_ 与 Java serving 均 kind 盲——wiki 制品经 Agent 读得空表不报错；wiki 向量查询沿用 009 结案经验（ANN 改写+force_custom_plan），量起来后 872c445 预热情闸门口径同样适用 idx_wiki_units_hnsw。
+6. **发版提醒（1.1.16）**：Java 常量变了，jar 必须随包重build（纯源码构建+zipfile 校验铁律）；010 的 pgvector≥0.8 门禁与 009 同条件，1.1.15 存量库已满足，无新增 deploy 前置。

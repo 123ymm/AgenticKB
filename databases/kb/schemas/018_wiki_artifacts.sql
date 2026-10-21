@@ -1,8 +1,9 @@
 -- 018（63号批次1）：wiki 制品底座四张表（fresh install 路径；②③④ 与存量库
 -- 版本化迁移 core/20261021_010_wiki_artifacts 同文，改表必须双改并刷新镜像校验和）。
 -- batches 通道通用化（迁移 ① 段）折在 017，不进本文件。
--- vector 扩展由启动链首文件 002_asset_core 的 CREATE EXTENSION IF NOT EXISTS vector
--- 保证已装（013 亦重复声明），本文件不重复创建。
+-- vector 扩展由链内先装的 _RETRIEVAL_ASSETS_V2_DDL（asset_core/schemas/
+-- 013_retrieval_assets_v2_staging.sql 的 CREATE EXTENSION IF NOT EXISTS vector）
+-- 保证已装，本文件不重复创建。
 -- 身份列故意无 FK（对齐 kb 表惯例：跨表身份用 TEXT 引用，不建强外键）。
 
 -- ---------- ② 来源绑定（通用） ----------
