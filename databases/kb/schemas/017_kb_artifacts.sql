@@ -45,16 +45,21 @@ CREATE TABLE IF NOT EXISTS kb_artifact_members (
 );
 CREATE INDEX IF NOT EXISTS idx_kb_artifact_members_user ON kb_artifact_members(user_id);
 
+-- batches 通道通用化（63号批次1，与迁移 010 ① 段同文）：channel 枚举建全
+-- （sql_import 为表格类 P2 预留位）；details jsonb 装通道专属细节，
+-- file_name/sheet_name 保留（存量 upload 批次兼容）。details 置表尾——与
+-- 010 的 ALTER ADD COLUMN 追加位一致，消除 fresh 库/迁移库列序漂移。
 CREATE TABLE IF NOT EXISTS kb_artifact_batches (
     batch_id    TEXT PRIMARY KEY,
     artifact_id TEXT NOT NULL,
     channel     TEXT NOT NULL DEFAULT 'upload'
-                CONSTRAINT ck_kb_artifact_batches_channel CHECK (channel IN ('upload','kb_import')),
+                CONSTRAINT ck_kb_artifact_batches_channel CHECK (channel IN ('upload','kb_import','wiki_compile','sql_import')),
     file_name   TEXT NOT NULL DEFAULT '',
     sheet_name  TEXT NOT NULL DEFAULT '',
     row_count   INTEGER NOT NULL DEFAULT 0,
     created_by  TEXT NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    details     JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 CREATE INDEX IF NOT EXISTS idx_kb_artifact_batches_artifact ON kb_artifact_batches(artifact_id);
 
