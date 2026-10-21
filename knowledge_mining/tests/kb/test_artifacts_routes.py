@@ -155,6 +155,35 @@ async def test_create_requires_domain_grant(env):
     assert r.status_code == 403
 
 
+# ------------------------------------------------------------- kind 放开
+
+async def test_create_artifact_wiki_kind(env):
+    """wiki 制品创建（路由层透传 kind；service/db 61号已支持）。"""
+    r = await env.client.post("/api/artifacts", json={
+        "title": "云核命令Wiki", "domain_id": DOMAIN, "kind": "wiki",
+    })
+    assert r.status_code == 201, r.text
+    assert r.json()["kind"] == "wiki"
+
+
+async def test_create_artifact_invalid_kind_rejected(env):
+    """非法 kind 在 pydantic Literal 层即被拦截（422），不进 service。"""
+    r = await env.client.post("/api/artifacts", json={
+        "title": "x", "domain_id": DOMAIN, "kind": "graph",
+    })
+    assert r.status_code == 422  # pydantic Literal 层拦截
+    assert r.json()["detail"][0]["loc"] == ["body", "kind"]  # 定位到 kind 字段
+
+
+async def test_create_artifact_default_kind_is_table(env):
+    """不传 kind 的既有调用方零破坏——默认仍为 table。"""
+    r = await env.client.post("/api/artifacts", json={
+        "title": "y", "domain_id": DOMAIN,
+    })
+    assert r.status_code == 201, r.text
+    assert r.json()["kind"] == "table"
+
+
 # ------------------------------------------------------- 向导全链（核心）
 
 async def test_wizard_upload_preview_import_publish_rows(env):

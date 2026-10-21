@@ -15,7 +15,7 @@ import（plan 支持两种形态：build_mapping 产物，或
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from fastapi import (
@@ -71,6 +71,7 @@ class ArtifactCreate(BaseModel):
     description: str | None = None
     domain_id: str | None = Field(default=None, max_length=128)
     visibility: str = Field(default="private", pattern="^(private|public)$")
+    kind: Literal["table", "wiki"] = "table"
 
 
 class ArtifactMetaPatch(BaseModel):
@@ -237,7 +238,7 @@ async def create_artifact(
         raise HTTPException(403, f"domain_not_bound:{domain_id}")
     try:
         return await svc.create_artifact(
-            user=user, domain_id=domain_id, kind="table",
+            user=user, domain_id=domain_id, kind=body.kind,
             title=body.title, description=body.description,
             visibility=body.visibility,
         )
