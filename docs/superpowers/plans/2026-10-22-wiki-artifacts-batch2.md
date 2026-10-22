@@ -6,7 +6,7 @@
 
 **Architecture:** DB 层新增 `db_wiki.py`（WikiDB，专有三表+来源表数据访问，发布/回滚/discard/ensure_draft 的 wiki 事务镜像 db_artifacts.py 同名方法）；`ArtifactService` 在 publish/rollback/discard/diff 四处插入 kind 分支点（注入 WikiLifecycle 协作者，表格路径一行不改）；新 `WikiService` 管页面 CRUD（origin 规则+专页 frontmatter 校验+链接重算）与发布后置（units 投影+embedding 异步）；路由 `routes/wiki.py` 挂 `/api/artifacts/{id}/wiki/*`；前端 WikiEditorPanel/WikiReaderPanel 拆掉占位守卫。
 
-**Tech Stack:** FastAPI + asyncpg(dict_row) + PostgreSQL(pgvector) + Vue3 + Element Plus + marked/DOMPurify（已装，依赖冻结）。
+**Tech Stack:** FastAPI + psycopg(AsyncConnectionPool, dict_row) + PostgreSQL(pgvector) + Vue3 + Element Plus + marked/DOMPurify（已装，依赖冻结）。
 
 **设计依据:** `docs/下一阶段/63-Wiki类知识制品MVP设计-与表格制品逐层对照-2026-10-21.md` §三（发布事务对照表）、§3.1/3.2（改名口径/origin 保护）、§5.3（切片口径）、§5.6（检索入口清单 REST 部分）、§六（前端对照）。DDL 已在批次1落地（`databases/kb/schemas/018_wiki_artifacts.sql` + 迁移010，本批次**零 DDL 改动**）。
 
@@ -70,13 +70,13 @@ cd kb-ui && npm test && npm run build                     # 前端单测 + 类�
 - `chunk_page_for_units(title, body_md) -> list[tuple[unit_key, content_text]]`：≤2000 字 → [(page_key, title+"\n\n"+body)]；超长按 H2（`^## `）分节 → page_key#s1..#sN（文档序 1 起）；分节后单节仍 >2000 按段落硬切；每块内容前置 `# {title}` 与节标题行（63号 §5.3：块文本前置页标题上下文）
 
 **diff：**
-- `diff_draft_vs_current(artifact_id) -> dict`：rev0 pages vs current_revision pages 按 page_key 对齐；added=rev0 有 current 无；removed=反向；changed=title/body_md/frontmatter/page_type/origin 任一不同（origin 翻 manual 也算 changed——是真实待发布变更）。**返回键与 `db_artifacts.diff_draft_vs_current` L1387-1392 完全同名**（`added/removed/changed` 三键，各为 {count, samples} 形态——以实际代码为准逐字对齐，样本=page_key 列表，上限对齐 `_DIFF_SAMPLE_LIMIT`）
+- `diff_draft_vs_current(artifact_id) -> dict`：rev0 pages vs current_revision pages 按 page_key 对齐；added=rev0 有 current 无；removed=反向；changed=title/body_md/frontmatter/page_type/origin 任一不同（origin 翻 manual 也算 changed——是真实待发布变更）。**返回键与 `db_artifacts.diff_draft_vs_current` L1387-1392 完全同名**：`added/removed`（page_key 列表）+ `changed`（{page_key, ...变更描述} 字典列表）+ `added_count/removed_count/changed_count` 三平键——六平键逐字对齐实际代码，样本上限 `_DIFF_SAMPLE_LIMIT`
 
 **units 投影（63号 §5.1：发布事务的后置投影，轻量同步）：**
 - `project_units(artifact_id, revision) -> int`：DELETE 该 (artifact_id,revision) 既有 units → 逐页 `chunk_page_for_units` INSERT（embed_status='pending'）→ 返回单元数
 - `units_status(artifact_id, revision) -> dict`：{total,done,failed,pending}
 - `list_pending_units(artifact_id, revision, limit=32)`
-- `update_unit_embeddings(artifact_id, revision, unit_keys, vectors)`：写 embedding + embed_status='done'。**vector 参数走文本字面量绑定**（`'[' + ','.join(map(str, vec)) + ']'::vector`，照抄挖掘侧 `retrieval_projection/repositories_pg.py:163` `_vec_literal` 口径——asyncpg 无 pgvector 适配器，直接传 list 会炸）
+- `update_unit_embeddings(artifact_id, revision, unit_keys, vectors)`：写 embedding + embed_status='done'。**vector 参数走文本字面量绑定**（`'[' + ','.join(map(str, vec)) + ']'::vector`，照抄挖掘侧 `retrieval_projection/repositories_pg.py:163` `_vec_literal` 口径——psycopg 未注册 pgvector 适配器（依赖冻结不引入 pgvector 包），直接传 list 会炸）
 - `mark_units_failed(artifact_id, revision, unit_keys)`
 
 **生命周期事务（镜像 db_artifacts 同名方法，逐步骤同构）：**
@@ -141,14 +141,15 @@ class WikiLifecycle:
     async def publish(self, user, art_row, *, change_summary, expected_updated_at) -> dict:
         # wdb.publish 事务 → 事务提交后：project_units(revision) + _spawn_embed(artifact_id, revision)
         # 返回 {revision, row_count=page_count, diff: wdb.diff_draft_vs_current(...) 提交前取}
-    async def rollback_to(self, user, art_row, revision): ...   # 权限/新鲜度由 ArtifactService 前置完成，这里只调 wdb
-    async def discard(self, user, art_row): ...
+    async def rollback_to(self, user, art_row, revision, *, expected_updated_at=None): ...
+        # 权限/新鲜度由 ArtifactService 前置完成；expected_updated_at 透传给 wdb 做事务内 FOR UPDATE 权威比对
+    async def discard(self, user, art_row, *, expected_updated_at=None): ...   # 同上透传
     async def diff(self, artifact_id) -> dict: ...
 ```
 
 **embedding 后置（63号 §5.1：共享 llm_service 基建）：**
-- `_spawn_embed(artifact_id, revision)`：`asyncio.create_task(asyncio.to_thread(self._embed_units, artifact_id, revision))`——**阻塞体全部在线程里跑**（LlmTaskClient 同步阻塞，直接在协程里调会冻住整个 mining 事件循环最长 900s）；模块级 in-flight 集合 `_EMBED_INFLIGHT: set[tuple[str,int]]` 防重入（发起时加入、finally 移除）
-- `_embed_units`（同步函数，跑在 worker 线程）：循环 `list_pending_units(limit=32)` → `task_client.submit_embedding(texts, max_attempts=3, idempotency_key=f"wiki-unit:v1:{artifact_id}:{revision}:" + sha256("\x1f".join(content_texts))[:24])` → `wait_for_tasks` → `update_unit_embeddings`。**幂等键含 artifact_id+revision+内容哈希**（unit_key 不含版本，跨版本撞键会让 llm_service 命中旧任务拒绝复用→新版单元 failed/向量陈旧；内容哈希口径照抄挖掘 `infra/embedding.py:145-155` `_batch_key`）。**失败语义**：llm_service 报真终态失败（重试耗尽）→ `mark_units_failed`；**超时/瞬时异常 → 保持 pending**（下次发布或 status 愈合重试，pending 是可重试态、failed 不自动重试）；整体异常 → 日志，**永不向上抛**
+- `_spawn_embed(artifact_id, revision)`：`asyncio.create_task(self._embed_units(artifact_id, revision))`；模块级 in-flight 集合 `_EMBED_INFLIGHT: set[tuple[str,int]]` 防重入（发起时加入、finally 移除）
+- `_embed_units`（**async 协程——数据库调用（list_pending_units/update_unit_embeddings/mark_units_failed）留在主 loop**（psycopg AsyncConnectionPool 有 loop 亲和性，跨线程调用直接炸）；**仅三处 LlmTaskClient 同步阻塞调用单独下线程**：`task_id = await asyncio.to_thread(self._task_client.submit_embedding, ...)`、`entries = await asyncio.to_thread(self._task_client.wait_for_tasks, [task_id])`——LlmTaskClient 是 httpx.Client+time.sleep 的同步客户端，直接在协程里调会冻住整个 mining 事件循环最长 900s）：循环 `list_pending_units(limit=32)` → submit_embedding(texts, max_attempts=3, idempotency_key=f"wiki-unit:v1:{artifact_id}:{revision}:" + sha256("\x1f".join(content_texts))[:24]) → wait_for_tasks → `update_unit_embeddings`。**幂等键含 artifact_id+revision+内容哈希**（unit_key 不含版本，跨版本撞键会让 llm_service 命中旧任务拒绝复用→新版单元 failed/向量陈旧；内容哈希口径照抄挖掘 `infra/embedding.py:145-155` `_batch_key`）。**失败语义**：llm_service 报真终态失败（重试耗尽）→ `mark_units_failed`；**超时/瞬时异常 → 保持 pending**（下次发布或 status 愈合重试，pending 是可重试态、failed 不自动重试）；整体异常 → 日志，**永不向上抛**
 - **重启自愈**：`GET /wiki/status` 时若 pending>0 且 (artifact_id,current_rev) 不在 in-flight → 顺手 `_spawn_embed`（幂等键保证 llm_service 侧不重复计费）
 
 ### WikiService（页面编辑编排）
@@ -203,7 +204,7 @@ class WikiService:
 
 **锚点：** 组件挂载模式照 `ArtifactRowsPanel.vue`（props {artifactId,canWrite,expectedUpdatedAt,draftOpen} + emits changed + defineExpose(load)；DetailView :87-109 传法）；API 方法风格照 artifacts.ts:197-296（createProxyClient 已有）；乐观锁令牌 = `artifact.updated_at` 放请求体/query（DetailView :97 传法）。
 
-**类型：** `WikiPageMeta{page_key,title,page_type,origin,ordinal,flags,updated_at,updated_by}`、`WikiPage extends WikiPageMeta + frontmatter/body_md/provenance`、`WikiLink{from_page,to_page,anchor_text,status}`、`WikiUnitsStatus{total,done,failed,pending}`。page_type/origin 字面量联合对齐后端枚举。
+**类型：** `WikiPageMeta{page_key,title,page_type,origin,ordinal,flags,aliases,updated_at,updated_by}`（**aliases: string[]**——后端 list_pages 已回传，阅读器链接解析依赖）、`WikiPage extends WikiPageMeta + frontmatter/body_md/provenance`、`WikiLink{from_page,to_page,anchor_text,status}`、`WikiUnitsStatus{total,done,failed,pending}`。page_type/origin 字面量联合对齐后端枚举。
 
 **API 方法：** `listWikiPages/getWikiPage/upsertWikiPage/deleteWikiPage/listWikiLinks/getWikiStatus`（URL 对齐 Task 3 路由表）。**page_key 走 URL path 时一律 hex 编码**（`encodePageKey`：UTF-8 → hex，工具函数放 `src/utils/markdown.ts` 同级或 api 模块内导出；后端路由收 hex 解码——网关铁律）。DELETE 的 expected_updated_at 随 **body**（对齐表格 deleteRow :294-300 模式）。
 
