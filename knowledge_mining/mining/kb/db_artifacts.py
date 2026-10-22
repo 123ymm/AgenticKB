@@ -1489,7 +1489,7 @@ class ArtifactDB:
         self, artifact_id: str, *, channel: str, file_name: str,
         sheet_name: str, row_count: int, created_by: str,
     ) -> dict[str, Any]:
-        if channel not in ("upload", "kb_import"):
+        if channel not in ("upload", "kb_import", "wiki_compile"):
             raise ArtifactError("invalid_channel")
         batch_id = f"bat_{uuid.uuid4().hex}"
         async with self._pool.connection() as conn:

@@ -101,7 +101,10 @@ async def get_wiki_db(request: Request) -> "Any":
 
 
 async def get_wiki_service(request: Request) -> "Any":
-    """63号：wiki 页面编辑编排（权限复用 ArtifactService；lifecycle 同实例）。"""
+    """63号：wiki 页面编辑编排（权限复用 ArtifactService；lifecycle 同实例）。
+    批次3：加注入编译取材域 CompileInputsDB（sources/指纹/批次——来源绑定三
+    端点与编译管线数据源）。"""
+    from knowledge_mining.mining.kb.db_compile_inputs import CompileInputsDB
     from knowledge_mining.mining.kb.services.artifact_service import ArtifactService
     from knowledge_mining.mining.kb.services.wiki_service import WikiService
     return WikiService(
@@ -109,6 +112,7 @@ async def get_wiki_service(request: Request) -> "Any":
                                          wiki=_wiki_lifecycle(request)),
         wdb=await get_wiki_db(request),
         lifecycle=_wiki_lifecycle(request),
+        inputs_db=CompileInputsDB(request.app.state.pg_pool),
     )
 
 

@@ -1,6 +1,7 @@
 """Wiki 制品 REST 路由 —— /api/artifacts/{artifact_id}/wiki/*（63号 §5.5）。
 
-六端点：pages 清单 / page 单页读·改·删 / links 出入边 / status units 进度。
+九端点：pages 清单 / page 单页读·改·删 / links 出入边 / status units 进度 /
+sources 来源绑定三端点（批次3：GET/PUT/DELETE——绑定 kb 目录 + 脏标记观测）。
 业务与权限全部在 WikiService（见 services/wiki_service.py）。
 
 网关铁律：page_key 走 URL path 一律 UTF-8 hex 传输（raw path 含 % 即 400）——
@@ -54,6 +55,19 @@ class WikiPageDeleteReq(BaseModel):
     expected_updated_at: str | None = None
 
 
+class WikiSourcePut(BaseModel):
+    """PUT 绑定来源（批次3）：kb_id（TEXT id，全 ASCII）；directories 空数组=
+    全库（scope 契约见批次3 决策6）；expected_updated_at 乐观锁令牌——绑定写
+    推进令牌（touch），编辑器持有的旧令牌随后保存会 409，属预期失效。"""
+    kb_id: str = Field(min_length=1, max_length=200)
+    directories: list[str] = Field(default_factory=list)
+    expected_updated_at: str | None = None
+
+
+class WikiSourceDeleteReq(BaseModel):
+    expected_updated_at: str | None = None
+
+
 # ---------------------------------------------------------------- helpers
 
 #: WikiError.code → HTTP 状态（"invalid_frontmatter:字段" 按前缀归并）。
@@ -63,12 +77,14 @@ class WikiPageDeleteReq(BaseModel):
 _WIKI_HTTP_STATUS: dict[str, int] = {
     "page_not_found": 404,
     "artifact_not_found": 404,
+    "source_not_found": 404,
     "stale_artifact": 409,
     "page_key_conflict": 409,
     "invalid_page_key": 422,
     "invalid_page_type": 422,
     "invalid_frontmatter": 422,
     "invalid_title": 422,
+    "invalid_scope": 422,
 }
 
 #: 409 信封文案（对齐 routes/artifacts 的 {code, message} 形态）。
@@ -209,5 +225,57 @@ async def wiki_status(
 ):
     try:
         return await svc.status(user=user, artifact_id=artifact_id)
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------- 来源绑定（63号批次3 Task 1）
+# kb_id 是 TEXT id（全 ASCII），走 path 无网关编码问题（区别于需 hex 的
+# page_key）；DELETE 锁令牌随 body（对齐 WikiPageDeleteReq 模式）。
+
+@router.get("/{artifact_id}/wiki/sources")
+async def list_sources(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_wiki_service),
+):
+    try:
+        return {"sources": await svc.list_sources(
+            user=user, artifact_id=artifact_id)}
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+@router.put("/{artifact_id}/wiki/sources")
+async def put_source(
+    artifact_id: str,
+    body: WikiSourcePut,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_wiki_service),
+):
+    try:
+        return await svc.upsert_source(
+            user=user, artifact_id=artifact_id, kb_id=body.kb_id,
+            directories=body.directories,
+            expected_updated_at=body.expected_updated_at,
+        )
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+@router.delete("/{artifact_id}/wiki/sources/{kb_id}")
+async def delete_source(
+    artifact_id: str,
+    kb_id: str,
+    body: WikiSourceDeleteReq | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_wiki_service),
+):
+    try:
+        await svc.delete_source(
+            user=user, artifact_id=artifact_id, kb_id=kb_id,
+            expected_updated_at=(body or WikiSourceDeleteReq()).expected_updated_at,
+        )
+        return {"deleted": True}
     except (ArtifactError, WikiError) as exc:
         raise _map_error(exc) from None

@@ -25,6 +25,7 @@ if os.environ.get("KB_RUN_POSTGRES_ACCEPTANCE") != "1":
 
 from knowledge_mining.mining.kb.db import KbDB  # noqa: E402
 from knowledge_mining.mining.kb.db_artifacts import ArtifactDB  # noqa: E402
+from knowledge_mining.mining.kb.db_compile_inputs import CompileInputsDB  # noqa: E402
 from knowledge_mining.mining.kb.db_wiki import (  # noqa: E402
     WikiDB,
     WikiError,
@@ -412,3 +413,210 @@ async def test_diff_six_keys(async_pool) -> None:
     assert changed["改动页"] == ["title"]
     assert changed["保留页"] == ["origin"]  # 翻 manual/machine 也算 changed
     assert set(d) == set(_EMPTY_DIFF)  # 六平键同名同构
+
+
+# --------------------------------------------- 来源绑定（63号批次3 Task 1）
+
+async def _seed_kb_doc(async_pool) -> tuple[KbDB, str, str]:
+    """编译取材夹具：kb + 文档（用户/库名随机，测试间不互踩）。
+    返回 (kbdb, kb_id, document_id)。"""
+    kbdb = KbDB(async_pool)
+    owner = await kbdb.create_user(username=f"wiki-src-{uuid.uuid4().hex[:8]}")
+    # create_kb 校验 owner 域绑定（_lock_user_domain_access）——create_user
+    # 不自动绑域，须显式 bind_domain
+    await kbdb.bind_domain(user_id=owner["id"], domain="plant-a")
+    kb = await kbdb.create_kb(
+        domain="plant-a", name=f"指纹库{uuid.uuid4().hex[:6]}",
+        owner_id=owner["id"])
+    doc = await kbdb.insert_document_identity(
+        domain="plant-a", kb_id=kb["id"], document_key=f"doc:/{kb['id']}/a.md",
+        document_name="a.md", storage_path=f"/tmp/{kb['id']}/a.md",
+        directory_path="")
+    return kbdb, kb["id"], doc["id"]
+
+
+async def _seed_build(
+    async_pool, *, kb_id: str, document_id: str, units: int,
+    created_at: str = "2026-10-22T00:00:00+00:00",
+    selection_status: str = "active",
+) -> str:
+    """直插一份 validated build + 文档快照 + N 个 v2 检索单元（夹具形态照
+    test_stats_queries._build_snapshot；units 走 asset_retrieval_units_v2——
+    编译取材只读 L1 v2 产出，旧 asset_retrieval_units 不计）。返回 snapshot_id。"""
+    snap_id, build_id = uuid.uuid4().hex, uuid.uuid4().hex
+    async with async_pool.connection() as conn:
+        await conn.execute(
+            """INSERT INTO asset_document_snapshots
+               (id, domain, normalized_content_hash, raw_content_hash,
+                mime_type, created_at)
+               VALUES (%s, 'plant-a', %s, %s, 'text/markdown', %s)""",
+            (snap_id, uuid.uuid4().hex, uuid.uuid4().hex, created_at))
+        await conn.execute(
+            """INSERT INTO asset_builds
+               (id, build_code, status, build_mode, domain, kb_id, created_at)
+               VALUES (%s, %s, 'validated', 'full', 'plant-a', %s, %s)""",
+            (build_id, f"build-{build_id[:8]}", kb_id, created_at))
+        await conn.execute(
+            """INSERT INTO asset_build_document_snapshots
+               (build_id, document_id, document_snapshot_id, selection_status,
+                reason)
+               VALUES (%s, %s, %s, %s, 'add')""",
+            (build_id, document_id, snap_id, selection_status))
+        for i in range(units):
+            await conn.execute(
+                """INSERT INTO asset_retrieval_units_v2
+                   (representation_id, snapshot_id, representation_type,
+                    content_type, content_text, target_type, target_ref,
+                    canonical_evidence_id)
+                   VALUES (%s, %s, 'raw_text', 'text/plain', %s,
+                           'raw_segment', %s, %s)""",
+                (f"ru-{snap_id[:16]}-{i}", snap_id, f"单元{i}",
+                 f"seg-{i}", f"ev-{i}"))
+    return snap_id
+
+
+async def test_sources_crud_soft_delete_revival_fingerprint(
+    async_pool,
+) -> None:
+    """sources 往返：upsert 落库/复活（软删后重绑同库 status 回 active、指纹
+    保留）；软删后 list 不可见、二次软删 False；update_fingerprint 覆写且
+    不存在的绑定 False；绑定写推进乐观锁令牌（touch 同事务）；stale 令牌
+    权威比对拒绝且整体回滚。"""
+    kbdb = KbDB(async_pool)
+    adb = ArtifactDB(async_pool)
+    inputs = CompileInputsDB(async_pool)
+    owner = await kbdb.create_user(username=f"wiki-src-{uuid.uuid4().hex[:8]}")
+    art = await adb.create_artifact(
+        domain_id="plant-a", kind="wiki", title="绑定 Wiki",
+        owner_user_id=owner["id"])
+    aid = art["artifact_id"]
+    assert await inputs.list_sources(aid) == []
+
+    row = await inputs.upsert_source(
+        aid, "kb-alpha", scope={"directories": ["方案/云核"]},
+        created_by=owner["id"])
+    assert row["status"] == "active"
+    assert row["scope"] == {"directories": ["方案/云核"]}
+    assert row["fingerprint"] == {}
+    # 绑定写推进令牌（touch 同事务，upsert 返回后立即可见）
+    assert (await adb.get_artifact(aid))["updated_at"] != art["updated_at"]
+
+    # stale 令牌 → 事务内权威比对拒绝（先于写入，不落行）
+    with pytest.raises(WikiError) as ei:
+        await inputs.upsert_source(
+            aid, "kb-beta", scope={"directories": []}, created_by=owner["id"],
+            expected_updated_at="2000-01-01T00:00:00+00:00")
+    assert ei.value.code == "stale_artifact"
+    assert await inputs.list_sources(aid) == []
+
+    await inputs.upsert_source(
+        aid, "kb-beta", scope={"directories": []}, created_by=owner["id"])
+    listed = await inputs.list_sources(aid)
+    assert [r["kb_id"] for r in listed] == ["kb-alpha", "kb-beta"]
+
+    assert await inputs.update_fingerprint(
+        aid, "kb-alpha",
+        {"snapshots": [{"snapshot_id": "s1", "unit_count": 3}],
+         "computed_at": "2026-10-22T00:00:00+00:00"}) is True
+    by_kb = {r["kb_id"]: r for r in await inputs.list_sources(aid)}
+    assert by_kb["kb-alpha"]["fingerprint"]["snapshots"][0]["unit_count"] == 3
+    assert await inputs.update_fingerprint(aid, "kb-missing", {}) is False
+
+    # 软删：list 不可见、二次软删 False；复活：重绑同库回 active、指纹保留
+    assert await inputs.delete_source(aid, "kb-alpha") is True
+    assert await inputs.delete_source(aid, "kb-alpha") is False
+    assert [r["kb_id"] for r in await inputs.list_sources(aid)] == ["kb-beta"]
+    revived = await inputs.upsert_source(
+        aid, "kb-alpha", scope={"directories": []}, created_by=owner["id"])
+    assert revived["status"] == "active"
+    assert revived["fingerprint"]["snapshots"][0]["unit_count"] == 3
+
+
+async def test_current_fingerprint_current_snapshot_semantics(
+    async_pool,
+) -> None:
+    """current_fingerprint：单 kb 当前快照口径（_CURRENT_SNAPSHOT_CTE 同构）
+    ——每 active 快照一条 + COUNT(units_v2)；重挖取最新 build 快照（旧快照
+    不累加）；撤回（removed）后无当前快照；无任何 build 的空库 snapshots=[]
+    ；kb_snapshot_unit_count = Σ。"""
+    inputs = CompileInputsDB(async_pool)
+    _, kb_id, doc_id = await _seed_kb_doc(async_pool)
+    snap1 = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_id, units=3)
+
+    fp = await inputs.current_fingerprint(kb_id)
+    assert fp["snapshots"] == [{"snapshot_id": snap1, "unit_count": 3}]
+    assert "computed_at" in fp
+    assert await inputs.kb_snapshot_unit_count(kb_id) == 3
+
+    # 重挖：更晚的 validated build 换新快照、单元 5 条 → 只见新快照（不累加）
+    snap2 = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_id, units=5,
+        created_at="2026-10-22T01:00:00+00:00")
+    fp2 = await inputs.current_fingerprint(kb_id)
+    assert fp2["snapshots"] == [{"snapshot_id": snap2, "unit_count": 5}]
+    assert await inputs.kb_snapshot_unit_count(kb_id) == 5
+
+    # 撤回（最新 build 的 selection_status='removed'）→ 无当前快照
+    await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_id, units=7,
+        created_at="2026-10-22T02:00:00+00:00", selection_status="removed")
+    fp3 = await inputs.current_fingerprint(kb_id)
+    assert fp3["snapshots"] == []
+    assert await inputs.kb_snapshot_unit_count(kb_id) == 0
+
+    # 无任何 build 的空库 → snapshots=[]
+    _, empty_kb, _ = await _seed_kb_doc(async_pool)
+    assert (await inputs.current_fingerprint(empty_kb))["snapshots"] == []
+    assert await inputs.kb_snapshot_unit_count(empty_kb) == 0
+
+
+async def test_update_batch_details_merge_and_latest_compile_batch(
+    async_pool,
+) -> None:
+    """details 增量合并铁律（批次3 决策1）：两次 patch 叠加不丢键（非全量
+    覆盖）；latest_compile_batch 含 details 列、只认 wiki_compile 通道、
+    created_at DESC 取最新；不存在的批次/制品 → False/None。"""
+    kbdb = KbDB(async_pool)
+    adb = ArtifactDB(async_pool)
+    inputs = CompileInputsDB(async_pool)
+    owner = await kbdb.create_user(username=f"wiki-bat-{uuid.uuid4().hex[:8]}")
+    art = await adb.create_artifact(
+        domain_id="plant-a", kind="wiki", title="编译 Wiki",
+        owner_user_id=owner["id"])
+    aid = art["artifact_id"]
+
+    # create_batch 白名单已放行 wiki_compile（file_name/sheet_name 列 NOT
+    # NULL DEFAULT ''——空串占位；Task 3 编译调用方再做通道适配）
+    b1 = await adb.create_batch(
+        aid, channel="wiki_compile", file_name="", sheet_name="",
+        row_count=0, created_by=owner["id"])
+    assert await inputs.update_batch_details(
+        b1["batch_id"],
+        {"state": "preparing", "progress": {"batch": 1, "total": 8}}) is True
+    assert await inputs.update_batch_details(
+        b1["batch_id"],
+        {"state": "awaiting_toc", "toc": [{"section_title": "概述"}]}) is True
+
+    latest = await inputs.latest_compile_batch(aid)
+    assert latest is not None and latest["batch_id"] == b1["batch_id"]
+    assert latest["channel"] == "wiki_compile"
+    # 两次 patch 叠加：progress 键未被第二次 patch 丢掉（增量合并语义）
+    assert latest["details"]["state"] == "awaiting_toc"
+    assert latest["details"]["progress"] == {"batch": 1, "total": 8}
+    assert latest["details"]["toc"] == [{"section_title": "概述"}]
+
+    # upload 批次不入 latest_compile_batch；新 wiki_compile 批成为最新
+    await adb.create_batch(
+        aid, channel="upload", file_name="a.xlsx", sheet_name="S1",
+        row_count=1, created_by=owner["id"])
+    b2 = await adb.create_batch(
+        aid, channel="wiki_compile", file_name="", sheet_name="",
+        row_count=12, created_by=owner["id"])
+    latest2 = await inputs.latest_compile_batch(aid)
+    assert latest2 is not None and latest2["batch_id"] == b2["batch_id"]
+    assert latest2["row_count"] == 12 and latest2["details"] == {}
+
+    assert await inputs.latest_compile_batch("art_missing") is None
+    assert await inputs.update_batch_details(
+        "bat_missing", {"state": "failed"}) is False

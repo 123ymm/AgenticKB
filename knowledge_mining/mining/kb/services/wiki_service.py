@@ -103,6 +103,38 @@ def _extract_vectors(entry: dict[str, Any]) -> list[list[float]] | None:
     return vectors
 
 
+# ------------------------------------------------------------ 来源绑定纯函数
+
+def _snapshot_signature(fingerprint: Any) -> set[tuple[str, int]] | None:
+    """指纹 → (snapshot_id, unit_count) 集（顺序无关）；无 snapshots 键
+    （从未编译，DDL 缺省 '{}'）→ None（dirty 判定恒脏哨兵）。"""
+    snaps = None
+    if isinstance(fingerprint, dict):
+        snaps = fingerprint.get("snapshots")
+    if not isinstance(snaps, list):
+        return None
+    signature: set[tuple[str, int]] = set()
+    for snap in snaps:
+        if not isinstance(snap, dict) or snap.get("snapshot_id") is None:
+            continue
+        try:
+            count = int(snap.get("unit_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        signature.add((str(snap["snapshot_id"]), count))
+    return signature
+
+
+def _is_source_dirty(stored: Any, current: Any) -> bool:
+    """脏标记（63号批次3）：stored 指纹从未编译（无 snapshots 键）→ True；
+    否则与当前快照集（集合序无关）不一致 → True（「来源已变化，建议重新
+    编译」横幅数据源）。"""
+    stored_signature = _snapshot_signature(stored)
+    if stored_signature is None:
+        return True
+    return stored_signature != _snapshot_signature(current)
+
+
 # ------------------------------------------------------------ lifecycle
 
 class WikiLifecycle:
@@ -288,10 +320,14 @@ class WikiService:
     404 / viewer 不见设计态 403），乐观锁与 ensure_draft 用 wiki 专有链。"""
 
     def __init__(self, artifact_service: Any, wdb: Any,
-                 lifecycle: WikiLifecycle) -> None:
+                 lifecycle: WikiLifecycle, inputs_db: Any = None) -> None:
         self._artifacts = artifact_service
         self._wdb = wdb
         self._lifecycle = lifecycle
+        # 批次3：编译取材域（sources/指纹/批次）——sources 三方法数据源。
+        # 缺省 None 兼容性保留（对齐 ArtifactService(wiki=None) 先例——
+        # 批次2 测试/表格-only 构造不受影响；sources 端点只在 deps 装配后可用）。
+        self._inputs = inputs_db
 
     # ------------------------------------------------------ 前置/校验
 
@@ -523,3 +559,82 @@ class WikiService:
         if units.get("pending", 0) > 0 and (artifact_id, rev) not in _EMBED_INFLIGHT:
             self._lifecycle._spawn_embed(artifact_id, rev)
         return {"revision": rev, "units": units}
+
+    # ------------------------------------------------------ 来源绑定（批次3）
+
+    async def list_sources(
+        self, user: dict[str, Any], artifact_id: str,
+    ) -> list[dict[str, Any]]:
+        """绑定列表（ROLE_RUNTIME_READ——批次3 MVP 口径：制品成员即协作者，
+        看得到绑定行）。每行附：
+        - dirty：fingerprint 与 current_fingerprint 的快照集不一致或从未编译
+          → True（_is_source_dirty）；
+        - kb_title/unreadable：kb 可读判定（KbDB.is_visible 谓词）通过才给
+          标题，否则 kb_title=None + unreadable=True（绑定行仍可见，只隐库
+          元数据——绑定后失去读权的行不整行消失）。"""
+        await self._artifacts._assert_role(user, artifact_id, *ROLE_RUNTIME_READ)
+        rows = await self._inputs.list_sources(artifact_id)
+        kb_ids = sorted({str(r["kb_id"]) for r in rows})
+        titles = await self._inputs.kb_titles(kb_ids)
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            kb_id = str(row["kb_id"])
+            current = await self._inputs.current_fingerprint(kb_id)
+            readable = await self._inputs.kb_readable(kb_id, str(user["id"]))
+            out.append({
+                "kb_id": kb_id,
+                "scope": row.get("scope") or {},
+                "fingerprint": row.get("fingerprint") or {},
+                "status": row.get("status"),
+                "created_by": row.get("created_by"),
+                "created_at": row.get("created_at"),
+                "dirty": _is_source_dirty(row.get("fingerprint"), current),
+                "kb_title": (titles.get(kb_id) if readable else None),
+                "unreadable": not readable,
+            })
+        return out
+
+    async def upsert_source(
+        self, user: dict[str, Any], artifact_id: str, kb_id: str,
+        directories: list[str], *, expected_updated_at: Any = None,
+    ) -> dict[str, Any]:
+        """绑定/更新来源（ROLE_DESIGN + 新鲜度前置；不走 ensure_draft——绑定
+        不是页写，不该触发 current→rev0 检出）：scope={"directories": [...]}
+        落库（空数组=全库，批次3 决策6）。kb 可读校验（KbDB.is_visible），
+        不可读 → ArtifactNotFound（404 反探测——防探测绑定他人私有库）。
+        权威乐观锁比对 + touch 同事务在 CompileInputsDB.upsert_source（绑定
+        变更须失效编辑器令牌）。返回绑定行。"""
+        artifact, _ = await self._artifacts._assert_role(
+            user, artifact_id, *ROLE_DESIGN)
+        _check_freshness(artifact, expected_updated_at)
+        # scope 契约（决策6）：directories 必须是字符串数组且无空串（纯空白
+        # 视同空串拒收；元素 strip 归一后落库）
+        if not isinstance(directories, list) or not all(
+                isinstance(d, str) and d.strip() for d in directories):
+            raise WikiError("invalid_scope")
+        kb_id = str(kb_id).strip()
+        if not kb_id:
+            raise WikiError("invalid_scope")
+        if not await self._inputs.kb_readable(kb_id, str(user["id"])):
+            raise ArtifactNotFound(kb_id)
+        return await self._inputs.upsert_source(
+            artifact_id, kb_id,
+            scope={"directories": [d.strip() for d in directories]},
+            created_by=str(user["id"]),
+            expected_updated_at=_expected_dt(expected_updated_at),
+        )
+
+    async def delete_source(
+        self, user: dict[str, Any], artifact_id: str, kb_id: str, *,
+        expected_updated_at: Any = None,
+    ) -> None:
+        """解绑（软删——绑定历史/指纹保留供复活；ROLE_DESIGN + 新鲜度同
+        upsert 前置）。无 active 绑定 → source_not_found。"""
+        artifact, _ = await self._artifacts._assert_role(
+            user, artifact_id, *ROLE_DESIGN)
+        _check_freshness(artifact, expected_updated_at)
+        hit = await self._inputs.delete_source(
+            artifact_id, str(kb_id),
+            expected_updated_at=_expected_dt(expected_updated_at))
+        if not hit:
+            raise WikiError("source_not_found")
