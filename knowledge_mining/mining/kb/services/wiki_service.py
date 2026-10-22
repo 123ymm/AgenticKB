@@ -30,6 +30,11 @@ from knowledge_mining.mining.kb.db_wiki import (
     compute_page_edges,
     normalize_page_key,
 )
+# 批次3决策7：发布前确定性校验（单向下依赖——wiki_compile_service 不回引
+# 本模块，无环）。
+from knowledge_mining.mining.kb.services.wiki_compile_service import (
+    validate_pages_for_publish,
+)
 from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactError,
     ArtifactNotFound,
@@ -160,12 +165,22 @@ class WikiLifecycle:
         self, user: dict[str, Any], art_row: dict[str, Any], *,
         change_summary: str, expected_updated_at: Any = None,
     ) -> dict[str, Any]:
-        """发布：diff 在事务前取（发布后 rev0 已清，六平键变全零）→ wdb.publish
-        事务（门禁/GREATEST 版本号/pages+links 复制/清 rev0/拨指针）→ 提交后
-        units 投影 + embedding 异步拉起（投影失败不回滚发布，只记日志）。
-        返回 {revision, row_count=page_count, diff 三计数}（表格 publish 同形）。"""
+        """发布：diff 在事务前取（发布后 rev0 已清，六平键变全零）→ 批次3
+        决策7 发布校验（rev0 全页确定性校验：blocking 阻断；warnings 随响应
+        携带）→ wdb.publish 事务（门禁/GREATEST 版本号/pages+links 复制/清
+        rev0/拨指针）→ 提交后 units 投影 + embedding 异步拉起（投影失败不
+        回滚发布，只记日志）。返回 {revision, row_count=page_count, diff 三
+        计数, warnings}（表格 publish 同形——其路径不经本协作者，不受校验
+        影响）。"""
         artifact_id = str(art_row["artifact_id"])
         diff = await self._wdb.diff_draft_vs_current(artifact_id)
+        # 决策7：发布前校验（在事务外——失败零副作用；InvalidOperation 带
+        # 详情后缀由 routes/artifacts._map_error 特判 409）。
+        blocking, warnings = await validate_pages_for_publish(
+            self._wdb, artifact_id)
+        if blocking:
+            raise InvalidOperation(
+                "publish_validation_failed:" + "; ".join(blocking[:10]))
         try:
             result = await self._wdb.publish(
                 artifact_id, change_summary=change_summary,
@@ -190,6 +205,7 @@ class WikiLifecycle:
                 "removed_count": diff["removed_count"],
                 "changed_count": diff["changed_count"],
             },
+            "warnings": warnings,
         }
 
     async def rollback_to(

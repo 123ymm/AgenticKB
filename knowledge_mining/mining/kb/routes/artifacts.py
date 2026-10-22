@@ -184,6 +184,16 @@ def _map_error(exc: ArtifactError) -> HTTPException:
                 "code": "artifact_not_deprecated",
                 "message": "必须先停用（deprecate）制品才能删除——删除是级联硬删且不可恢复",
             })
+        if str(exc).startswith("publish_validation_failed"):
+            # 63号批次3决策7：wiki 发布校验阻断（rev0 页 provenance 缺失/
+            # 悬空引用）——同 wiki_no_pages 状态冲突族 409；详情（页键+原因）
+            # 在 message 中携带（结构化账在页 flags/status 端点）。仅 kind=wiki
+            # 走 WikiLifecycle，表格路径永不产生该码。
+            detail = str(exc).split(":", 1)[1] if ":" in str(exc) else ""
+            return HTTPException(409, {
+                "code": "publish_validation_failed",
+                "message": "发布校验未通过（机器页来源账/引用悬空）：" + detail,
+            })
         if str(exc) == "wiki_no_pages":
             # 63号批次2 wiki 发布门禁（rev0 零页）：状态冲突族，与
             # no_pending_changes 同为发布门禁 409；表格路径永不产生该码。

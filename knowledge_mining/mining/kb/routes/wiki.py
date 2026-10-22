@@ -1,8 +1,10 @@
 """Wiki 制品 REST 路由 —— /api/artifacts/{artifact_id}/wiki/*（63号 §5.5）。
 
-九端点：pages 清单 / page 单页读·改·删 / links 出入边 / status units 进度 /
-sources 来源绑定三端点（批次3：GET/PUT/DELETE——绑定 kb 目录 + 脏标记观测）。
-业务与权限全部在 WikiService（见 services/wiki_service.py）。
+十三端点：pages 清单 / page 单页读·改·删 / links 出入边 / status units 进度 /
+sources 来源绑定三端点（批次3：GET/PUT/DELETE——绑定 kb 目录 + 脏标记观测）/
+compile 编译四端点（批次3 Task 3：启动/进度/目录确认/取消——业务在
+CompileService，见 services/wiki_compile_service.py）。
+业务与权限全部在服务层。
 
 网关铁律：page_key 走 URL path 一律 UTF-8 hex 传输（raw path 含 % 即 400）——
 路由收 hex 先 decode_page_key（非法 hex → 422 invalid_page_key）；links 的
@@ -21,7 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from knowledge_mining.mining.kb.auth import current_user
 from knowledge_mining.mining.kb.db_wiki import WikiError, decode_page_key
-from knowledge_mining.mining.kb.deps import get_wiki_service
+from knowledge_mining.mining.kb.deps import get_compile_service, get_wiki_service
 from knowledge_mining.mining.kb.routes.artifacts import (
     _map_error as _map_artifact_error,
 )
@@ -77,6 +79,38 @@ class WikiSourceDeleteReq(BaseModel):
     expected_updated_at: str | None = None
 
 
+class WikiCompileStartReq(BaseModel):
+    """POST 编译启动（批次3 Task 3）：expected_updated_at 乐观锁快检（编译
+    页写在事务内自行推进令牌——start 后前端须刷新制品详情）。"""
+    expected_updated_at: str | None = None
+
+
+class WikiTocPageHint(BaseModel):
+    """确认目录的页提示（用户可编辑增删）。cluster_ids 是提示性来源簇，
+    指向不存在簇 → 该页无取材（引用校验兜底）。"""
+    title: str = Field(min_length=1, max_length=200)
+    cluster_ids: list[str] = Field(default_factory=list)
+    page_type: str = "topic"
+
+
+class WikiTocSection(BaseModel):
+    section_title: str = Field(min_length=1, max_length=200)
+    page_hints: list[WikiTocPageHint] = Field(default_factory=list)
+
+
+class WikiCompileTocReq(BaseModel):
+    """POST 目录确认：toc 为用户（前端目录树编辑后）完整版本；展开页数
+    >200 → 422 too_many_pages。"""
+    toc: list[WikiTocSection]
+    expected_updated_at: str | None = None
+
+
+class WikiCompileCancelReq(BaseModel):
+    """POST 取消：expected_updated_at 不参与校验（取消是安全操作，且编译
+    页写持续推令牌——校验必假阳性；字段保留对齐其余编译端点信封）。"""
+    expected_updated_at: str | None = None
+
+
 # ---------------------------------------------------------------- helpers
 
 #: WikiError.code → HTTP 状态（"invalid_frontmatter:字段" 按前缀归并）。
@@ -87,13 +121,20 @@ _WIKI_HTTP_STATUS: dict[str, int] = {
     "page_not_found": 404,
     "artifact_not_found": 404,
     "source_not_found": 404,
+    "compile_not_found": 404,
     "stale_artifact": 409,
     "page_key_conflict": 409,
+    "compile_in_progress": 409,
+    "invalid_compile_state": 409,
     "invalid_page_key": 422,
     "invalid_page_type": 422,
     "invalid_frontmatter": 422,
     "invalid_title": 422,
     "invalid_scope": 422,
+    "invalid_toc": 422,
+    "no_sources": 422,
+    "too_many_units": 422,
+    "too_many_pages": 422,
 }
 
 #: 409 信封文案（对齐 routes/artifacts 的 {code, message} 形态）。
@@ -101,6 +142,14 @@ _WIKI_MESSAGES: dict[str, str] = {
     "stale_artifact": "制品已被他人修改，请刷新后重试",
     "page_key_conflict": "目标 page_key 已被其他页占用——改名=新页+旧页删，"
                          "请先处理占用页",
+    "compile_in_progress": "该制品已有编译在飞（preparing/awaiting_toc/"
+                           "writing），请先等待或取消",
+    "invalid_compile_state": "编译状态不允许该操作（如确认目录仅限 "
+                             "awaiting_toc 态）",
+    "no_sources": "未绑定任何知识库来源，请先在来源面板绑定",
+    "too_many_units": "绑定范围内检索单元超上限（30000），请收窄目录范围",
+    "too_many_pages": "确认目录展开页数超上限（200），请删减后再确认",
+    "invalid_toc": "目录结构不合法（需非空节列表，每节含 title 非空页提示）",
 }
 
 
@@ -286,5 +335,73 @@ async def delete_source(
             expected_updated_at=(body or WikiSourceDeleteReq()).expected_updated_at,
         )
         return {"deleted": True}
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------- 编译管线（63号批次3 Task 3）
+# 全部 design 角色（status 亦然——编译过程含未发布内容，runtime 不可见）。
+
+@router.post("/{artifact_id}/wiki/compile")
+async def start_compile(
+    artifact_id: str,
+    body: WikiCompileStartReq | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_compile_service),
+):
+    """启动编译（守卫事务查在飞/量级护栏/建批 → 后台 prepare）。返回
+    {batch_id, state}。"""
+    try:
+        return await svc.start(
+            user=user, artifact_id=artifact_id,
+            expected_updated_at=(body or WikiCompileStartReq()).expected_updated_at,
+        )
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+@router.get("/{artifact_id}/wiki/compile/status")
+async def compile_status(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_compile_service),
+):
+    """编译进度：{batch_id, state, progress, stats, conflicts, toc(
+    awaiting_toc 时), error}。"""
+    try:
+        return await svc.status(user=user, artifact_id=artifact_id)
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/wiki/compile/toc")
+async def confirm_toc(
+    artifact_id: str,
+    body: WikiCompileTocReq,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_compile_service),
+):
+    """确认（可编辑）目录 → writing。返回 {state}。"""
+    try:
+        return await svc.confirm_toc(
+            user=user, artifact_id=artifact_id,
+            toc=[section.model_dump() for section in body.toc],
+            expected_updated_at=body.expected_updated_at,
+        )
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/wiki/compile/cancel")
+async def cancel_compile(
+    artifact_id: str,
+    body: WikiCompileCancelReq | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_compile_service),
+):
+    """取消在飞编译（awaiting_toc 即时生效；writing 批边界停止）。返回
+    {state}。"""
+    try:
+        return await svc.cancel(user=user, artifact_id=artifact_id)
     except (ArtifactError, WikiError) as exc:
         raise _map_error(exc) from None

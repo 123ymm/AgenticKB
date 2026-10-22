@@ -372,18 +372,151 @@ class CompileInputsDB:
 
     async def update_batch_details(
         self, batch_id: str, patch: dict[str, Any],
+        *, guard_states: list[str] | None = None,
     ) -> bool:
         """编译状态机增量合并写（批次3 决策1 铁律）：details || patch——后台
         任务 / confirm_toc / cancel 并发写者只动自己的键，禁全量覆盖（COALESCE
-        兜底迁移库 details 为 NULL 的旧行）。批次不存在 → False。"""
+        兜底迁移库 details 为 NULL 的旧行）。
+
+        guard_states（T3）：状态守卫——details 当前 state 不在白名单则不写
+        （rowcount=0 → False）。决策1 并发口径：state 迁移写（awaiting_toc/
+        failed/completed）必须带守卫，被 cancel 抢先则不覆写；progress/stats
+        等数据键写不带守卫（后台任务是 writing 阶段唯一写者，残留无害）。
+        批次不存在 → False。"""
+        guard = ""
+        params: dict[str, Any] = {"patch": _json(patch)}
+        if guard_states is not None:
+            guard = " AND details->>'state' = ANY(%(gs)s::text[])"
+            params["gs"] = [str(s) for s in guard_states]
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """UPDATE kb_artifact_batches
                    SET details = COALESCE(details, '{}'::jsonb) || %(patch)s::jsonb
-                   WHERE batch_id = %s""",
-                (_json(patch), batch_id),
+                   WHERE batch_id = %(b)s""" + guard,
+                {**params, "b": batch_id},
             )
             return int(cur.rowcount or 0) > 0
+
+    async def complete_batch(
+        self, batch_id: str, patch: dict[str, Any], *, row_count: int,
+    ) -> bool:
+        """完结写（T3）：守卫 state='writing' + details 合并 + row_count 三者
+        原子同笔——被 cancel 抢先（state 已 cancelled）则整体不落（False），
+        row_count 不残留误导。守卫固定 'writing'：completed 只能从 writing
+        迁入（决策1）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """UPDATE kb_artifact_batches
+                   SET details = COALESCE(details, '{}'::jsonb) || %(patch)s::jsonb,
+                       row_count = %(rc)s
+                   WHERE batch_id = %(b)s
+                     AND details->>'state' = 'writing'""",
+                {"patch": _json(patch), "rc": int(row_count), "b": batch_id},
+            )
+            return int(cur.rowcount or 0) > 0
+
+    async def try_start_guard(
+        self, artifact_id: str, created_by: str, *, max_units: int,
+    ) -> dict[str, Any]:
+        """编译 start 串行化门（批次3 决策1 + Task 3 裁定）：单事务
+        ``pg_advisory_xact_lock(hashtext(artifact_id))`` 内依次——
+
+        ① 查最新 wiki_compile 批次，state ∈ preparing/awaiting_toc/writing
+           （在飞）→ 原样返回该行（service 翻 409 compile_in_progress）；
+        ② 查 active 源；无源 → 返回空 sources（service 翻 422 no_sources，
+           **不建批**——不留孤儿批次行）；
+        ③ Σ 各源 scope 内单元数（口径同 current_fingerprint 的 CTE/LATERAL/
+           FILTER 常量——同一连接内联执行，免嵌套取池）超 max_units → 返回
+           unit_total（service 翻 422 too_many_units，同样不建批）；
+        ④ INSERT 新批次（channel=wiki_compile，file_name/sheet_name 空串——
+           NOT NULL DEFAULT '' 列的显式放行口径，对齐 db_artifacts.create_batch
+           的 wiki_compile 分支）。
+
+        返回 ``{"in_flight": 行|None, "batch": 新行|None, "sources": [...],
+        "unit_total": int}``——service 只做翻译不做判定，判定语义全部留在
+        本方法（锁内原子）。"""
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%(a)s))",
+                    {"a": artifact_id},
+                )
+                cur = await conn.execute(
+                    """SELECT batch_id, artifact_id, channel, file_name,
+                              sheet_name, row_count, created_by, created_at,
+                              details
+                       FROM kb_artifact_batches
+                       WHERE artifact_id = %s AND channel = 'wiki_compile'
+                       ORDER BY created_at DESC, batch_id DESC
+                       LIMIT 1""",
+                    (artifact_id,),
+                )
+                row = await cur.fetchone()
+                if row is not None:
+                    details = row["details"] or {}
+                    if str(details.get("state") or "") in (
+                            "preparing", "awaiting_toc", "writing"):
+                        return {"in_flight": dict(row), "batch": None,
+                                "sources": [], "unit_total": 0}
+                cur = await conn.execute(
+                    """SELECT id, artifact_id, kb_id, scope, status
+                       FROM kb_artifact_sources
+                       WHERE artifact_id = %s AND status = 'active'
+                       ORDER BY created_at, kb_id""",
+                    (artifact_id,),
+                )
+                sources = [dict(r) for r in await cur.fetchall()]
+                if not sources:
+                    return {"in_flight": None, "batch": None,
+                            "sources": [], "unit_total": 0}
+                unit_total = 0
+                for src in sources:
+                    dirs = self._norm_dirs(
+                        (src.get("scope") or {}).get("directories") or [])
+                    unit_total += await self._scope_unit_count_in_conn(
+                        conn, str(src["kb_id"]), dirs)
+                if unit_total > int(max_units):
+                    return {"in_flight": None, "batch": None,
+                            "sources": sources, "unit_total": unit_total}
+                cur = await conn.execute(
+                    """INSERT INTO kb_artifact_batches
+                       (batch_id, artifact_id, channel, file_name, sheet_name,
+                        row_count, created_by)
+                       VALUES (%(bid)s, %(a)s, 'wiki_compile', '', '', 0, %(u)s)
+                       RETURNING batch_id, artifact_id, channel, file_name,
+                                 sheet_name, row_count, created_by, created_at""",
+                    {"bid": f"bat_{uuid.uuid4().hex}", "a": artifact_id,
+                     "u": created_by},
+                )
+                batch = dict(await cur.fetchone())  # type: ignore[arg-type]
+        return {"in_flight": None, "batch": batch,
+                "sources": sources, "unit_total": unit_total}
+
+    async def _scope_unit_count_in_conn(
+        self, conn: Any, kb_id: str, dirs: list[str],
+    ) -> int:
+        """单源 scope 内检索单元总数（guard 事务内联版——与 current_fingerprint
+        的计数子查询同形态共用 CTE/LATERAL/FILTER 常量，零取池）。"""
+        params: dict[str, Any] = {"kb": kb_id}
+        if dirs:
+            params["dirs"] = dirs
+            count_sql = f"""(
+                    SELECT COUNT(*)
+                    FROM asset_retrieval_units_v2 u
+                    JOIN LATERAL ({_DIR_PATH_LATERAL}) dp ON TRUE
+                    WHERE u.snapshot_id = cur.document_snapshot_id
+                      AND {_DIR_FILTER})"""
+        else:
+            count_sql = """(
+                    SELECT COUNT(*)
+                    FROM asset_retrieval_units_v2 u
+                    WHERE u.snapshot_id = cur.document_snapshot_id)"""
+        cur = await conn.execute(
+            f"""{_CURRENT_SNAPSHOT_CTE}
+                SELECT COALESCE(SUM({count_sql}), 0) AS n FROM cur""",
+            params,
+        )
+        return int((await cur.fetchone())["n"])  # type: ignore[index]
 
     async def latest_compile_batch(
         self, artifact_id: str,

@@ -116,6 +116,50 @@ async def get_wiki_service(request: Request) -> "Any":
     )
 
 
+# --------------------------------------------------- wiki 编译（63号批次3 Task 3）
+
+#: LLMServiceAsyncGenerationClient 模块级单例（内部持 LlmTaskClient 的
+#: httpx.Client 连接池——每请求新建泄漏；同步阻塞 execute，编译服务内以
+#: asyncio.to_thread 调用）。
+_GENERATION_CLIENT_SINGLETON: "Any" = None
+
+
+def _get_generation_client() -> "Any":
+    global _GENERATION_CLIENT_SINGLETON
+    if _GENERATION_CLIENT_SINGLETON is None:
+        from knowledge_mining.mining.infra.mining_config import MiningConfig
+        from knowledge_mining.mining.retrieval_projection.llm_generation import (
+            LLMServiceAsyncGenerationClient,
+        )
+        # 构造参数逐字段取自 MiningConfig 的 llm_async_* 域（chat 等待用
+        # llm_async_chat_wait_timeout——页写作单次调用语义，非 embedding 批
+        # 量的 llm_async_wait_timeout）。
+        cfg = MiningConfig()
+        _GENERATION_CLIENT_SINGLETON = LLMServiceAsyncGenerationClient(
+            base_url=cfg.llm_service_url,
+            poll_interval=cfg.llm_async_poll_interval,
+            wait_timeout=cfg.llm_async_chat_wait_timeout,
+            max_attempts=cfg.llm_async_max_attempts,
+        )
+    return _GENERATION_CLIENT_SINGLETON
+
+
+async def get_compile_service(request: Request) -> "Any":
+    """63号批次3：编译管线编排（CompileService）。wiki_service 复用
+    get_wiki_service 装配（CompileService 持有它做 ROLE_DESIGN 前置与全量
+    链接重算——wdb/inputs_db 各自轻构造，无共享可变态）。"""
+    from knowledge_mining.mining.kb.db_compile_inputs import CompileInputsDB
+    from knowledge_mining.mining.kb.services.wiki_compile_service import (
+        CompileService,
+    )
+    return CompileService(
+        wdb=await get_wiki_db(request),
+        inputs_db=CompileInputsDB(request.app.state.pg_pool),
+        generation_client=_get_generation_client(),
+        wiki_service=await get_wiki_service(request),
+    )
+
+
 async def get_artifact_import_service(request: Request) -> "Any":
     """61号：Excel 三步导入向导（写路径经 ArtifactService 权限门禁）。"""
     from knowledge_mining.mining.kb.services.artifact_import_service import (
