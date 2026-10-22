@@ -225,6 +225,29 @@ export interface WikiStatus {
   units: WikiUnitsStatus
 }
 
+// ── Wiki 检索（63号批次4：web 搜索框 → mining 转发 serving 三通道）──
+
+/** 三通道检索单条命中（serving wiki_search 视图 results 项，snake_case 透传）。 */
+export interface WikiSearchHit {
+  page_key: string
+  title: string
+  unit_key: string
+  snippet: string
+  /** 融合/单通道得分（排序依据，前端不展示）。 */
+  score: number
+  channels: string[]
+}
+
+/** GET /wiki/search 返回体：serving wiki_search 视图原样透传。 */
+export interface WikiSearchResult {
+  view?: string
+  artifact_ref?: string
+  revision: number
+  /** 向量通道降级留痕（dense 无可用向量该通道空，关键词/融合照常返回）。 */
+  degraded_dense: boolean
+  results: WikiSearchHit[]
+}
+
 // ── Wiki 编译管线（63号批次3：sources 三端点 + compile 四端点）──
 
 /**

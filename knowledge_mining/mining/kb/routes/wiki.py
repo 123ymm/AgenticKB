@@ -1,6 +1,8 @@
 """Wiki 制品 REST 路由 —— /api/artifacts/{artifact_id}/wiki/*（63号 §5.5）。
 
-十三端点：pages 清单 / page 单页读·改·删 / links 出入边 / status units 进度 /
+十四端点：pages 清单 / page 单页读·改·删 / links 出入边 / status units 进度 /
+search 三通道检索转发（批次4 Task 4：ROLE_RUNTIME_READ 前置 → httpx 转发
+serving internal /artifact-wiki-search，响应原样透传）/
 sources 来源绑定三端点（批次3：GET/PUT/DELETE——绑定 kb 目录 + 脏标记观测）/
 compile 编译四端点（批次3 Task 3：启动/进度/目录确认/取消——业务在
 CompileService，见 services/wiki_compile_service.py）。
@@ -23,7 +25,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from knowledge_mining.mining.kb.auth import current_user
 from knowledge_mining.mining.kb.db_wiki import WikiError, decode_page_key
-from knowledge_mining.mining.kb.deps import get_compile_service, get_wiki_service
+from knowledge_mining.mining.kb.deps import (
+    get_compile_service,
+    get_wiki_search_client,
+    get_wiki_service,
+)
 from knowledge_mining.mining.kb.routes.artifacts import (
     _map_error as _map_artifact_error,
 )
@@ -133,9 +139,15 @@ _WIKI_HTTP_STATUS: dict[str, int] = {
     "invalid_title": 422,
     "invalid_scope": 422,
     "invalid_toc": 422,
+    "invalid_query": 422,
     "no_sources": 422,
     "too_many_units": 422,
     "too_many_pages": 422,
+    # 批次4 Task 4：serving 转发故障族——网关类基础设施错误统一 502
+    # （WikiSearchClient 状态翻译产出，见 kb/wiki_search_client.py）。
+    "serving_unavailable": 502,
+    "serving_timeout": 502,
+    "serving_error": 502,
 }
 
 #: 409/404 信封文案（对齐 routes/artifacts 的 {code, message} 形态；审查 F5
@@ -155,6 +167,12 @@ _WIKI_MESSAGES: dict[str, str] = {
                       "请收窄目录范围",
     "too_many_pages": "确认目录展开页数超上限（200），请删减后再确认",
     "invalid_toc": "目录结构不合法（需非空节列表，每节含 title 非空页提示）",
+    # 批次4 Task 4：检索转发族文案（invalid_query 与 serving isBlank 同口径；
+    # 502 三码为 serving 侧故障的网关化中文提示）。
+    "invalid_query": "检索参数非法：q 不能为空白，mode 仅支持 fusion/dense/keyword",
+    "serving_unavailable": "检索服务暂不可用（内部通道未配置或网络不可达），请稍后重试",
+    "serving_timeout": "检索服务响应超时，请稍后重试",
+    "serving_error": "检索服务内部错误，请稍后重试",
 }
 
 
@@ -288,6 +306,33 @@ async def wiki_status(
 ):
     try:
         return await svc.status(user=user, artifact_id=artifact_id)
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------- 检索转发（63号批次4 Task 4）
+# web 阅读器搜索框专用：ROLE_RUNTIME_READ（viewer 可搜；非成员 404 反探测
+# 在 mining 侧即拦）→ httpx 转发 serving internal 三通道检索
+# （dense ANN/keyword/fusion，业务整段在 Java ArtifactWikiSearchService）。
+# 响应 serving wiki_search 视图原样透传；serving 故障族 → 502（码表见上）。
+
+@router.get("/{artifact_id}/wiki/search")
+async def wiki_search(
+    artifact_id: str,
+    q: str = Query(min_length=1),
+    mode: Literal["fusion", "dense", "keyword"] = Query(default="fusion"),
+    top_k: int = Query(default=10, ge=1, le=50),
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_wiki_service),
+    forward: Any = Depends(get_wiki_search_client),
+):
+    """wiki 三通道检索转发（不做缓存）。响应
+    {view, revision, degraded_dense, results:[{page_key,title,unit_key,
+    snippet,score,channels}]}——serving 契约 snake_case 原样。"""
+    try:
+        return await svc.search(
+            user=user, artifact_id=artifact_id, q=q, mode=mode,
+            top_k=top_k, forward=forward)
     except (ArtifactError, WikiError) as exc:
         raise _map_error(exc) from None
 

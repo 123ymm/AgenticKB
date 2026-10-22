@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
     listWikiPages: vi.fn(),
     getWikiPage: vi.fn(),
     listWikiLinks: vi.fn(),
+    searchWiki: vi.fn(),
   },
   ui: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
   clipboard: { writeText: vi.fn() },
@@ -23,13 +24,21 @@ vi.mock('element-plus', () => ({
 
 import WikiReaderPanel from '../WikiReaderPanel.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import type { WikiLink, WikiPage, WikiPageMeta } from '@/types/artifacts'
+import type {
+  WikiLink,
+  WikiPage,
+  WikiPageMeta,
+  WikiSearchHit,
+  WikiSearchResult,
+} from '@/types/artifacts'
 
 interface ReaderVm {
   sortedPages: WikiPageMeta[]
   selectedKey: string
   outLinks: WikiLink[]
   inLinks: WikiLink[]
+  searchQuery: string
+  runSearch: () => Promise<void>
   reload: () => Promise<void>
 }
 
@@ -81,6 +90,8 @@ beforeEach(() => {
   state.api.listWikiLinks.mockReset().mockImplementation(
     (_id: string, params?: { direction?: 'out' | 'in' }) =>
       Promise.resolve(params?.direction === 'out' ? outLinks : inLinks))
+  state.api.searchWiki.mockReset().mockResolvedValue(
+    { revision: 1, degraded_dense: false, results: [] })
   state.ui.success.mockReset()
   state.ui.error.mockReset()
   state.ui.warning.mockReset()
@@ -219,5 +230,136 @@ describe('WikiReaderPanel', () => {
     expect(state.api.listWikiPages).toHaveBeenCalledTimes(2)
     // 当前选中页（glossary-mop）在 reload 后被重新加载
     expect(state.api.getWikiPage).toHaveBeenLastCalledWith('art-1', 'glossary-mop', { draft: false })
+  })
+})
+
+// ── 检索（63号批次4：搜索框 → mining 转发 serving 三通道）──
+
+/** 检索命中样例：page_key 直配已发布页 + 未命中页各一条。 */
+const searchHits: WikiSearchHit[] = [
+  { page_key: 'home', title: '首页', unit_key: 'u-1',
+    snippet: '首页正文的相关片段……', score: 0.91, channels: ['wiki_dense'] },
+  { page_key: 'ghost', title: '已删页', unit_key: 'u-2',
+    snippet: '第二条片段', score: 0.4, channels: ['wiki_keyword'] },
+]
+
+function resultOf(hits: WikiSearchHit[], degraded = false): WikiSearchResult {
+  return { view: 'wiki_search', revision: 3, degraded_dense: degraded, results: hits }
+}
+
+describe('WikiReaderPanel 检索（批次4）', () => {
+  it('回车/按钮提交：默认参数 searchWiki(id, {q}) + 结果渲染（title/snippet，不显示 score）', async () => {
+    state.api.searchWiki.mockResolvedValueOnce(resultOf(searchHits))
+    const wrapper = mountReader()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ReaderVm
+
+    vm.searchQuery = '首页'
+    await vm.runSearch()
+    await flushPromises()
+
+    // 默认 fusion（后端缺省）——前端只带 q，不带 mode/top_k
+    expect(state.api.searchWiki).toHaveBeenCalledWith('art-1', { q: '首页' })
+    const hits = wrapper.findAll('[data-test="wiki-reader-search-hit"]')
+    expect(hits).toHaveLength(2)
+    expect(hits[0].text()).toContain('首页')
+    expect(hits[0].text()).toContain('首页正文的相关片段')
+    expect(hits[0].text()).not.toContain('0.91')   // score 不展示
+    // 零命中提示不出现
+    expect(wrapper.find('[data-test="wiki-reader-search-none"]').exists()).toBe(false)
+  })
+
+  it('点击结果跳页：命中已发布页 → 加载目标页；未命中页 → warning 提示不加载', async () => {
+    state.api.searchWiki.mockResolvedValueOnce(resultOf(searchHits))
+    const wrapper = mountReader()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ReaderVm
+    vm.searchQuery = '首页'
+    await vm.runSearch()
+    await flushPromises()
+
+    const hits = wrapper.findAll('[data-test="wiki-reader-search-hit"]')
+    await hits[0].trigger('click')
+    await flushPromises()
+    expect(state.api.getWikiPage).toHaveBeenLastCalledWith('art-1', 'home', { draft: false })
+
+    await hits[1].trigger('click')
+    await flushPromises()
+    expect(state.ui.warning).toHaveBeenCalledWith('目标页面未发布')
+    expect(state.api.getWikiPage).toHaveBeenLastCalledWith('art-1', 'home', { draft: false })
+  })
+
+  it('请求序号防护：连续提交时迟到旧响应不覆盖新结果', async () => {
+    let resolveFirst!: (value: WikiSearchResult) => void
+    state.api.searchWiki
+      .mockImplementationOnce(() => new Promise<WikiSearchResult>(resolve => {
+        resolveFirst = resolve
+      }))
+      .mockResolvedValueOnce(resultOf([searchHits[1]]))   // 新提交=已删页一条
+    const wrapper = mountReader()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ReaderVm
+
+    vm.searchQuery = '第一次'
+    const first = vm.runSearch()
+    vm.searchQuery = '第二次'
+    const second = vm.runSearch()
+    resolveFirst(resultOf([searchHits[0]]))   // 旧请求迟到返回（首页那条）
+    await first
+    await second
+    await flushPromises()
+
+    const hits = wrapper.findAll('[data-test="wiki-reader-search-hit"]')
+    expect(hits).toHaveLength(1)
+    expect(hits[0].text()).toContain('已删页')      // 新结果胜出
+    expect(hits[0].text()).not.toContain('首页正文') // 旧结果被丢弃
+    expect(state.api.searchWiki).toHaveBeenNthCalledWith(1, 'art-1', { q: '第一次' })
+    expect(state.api.searchWiki).toHaveBeenNthCalledWith(2, 'art-1', { q: '第二次' })
+  })
+
+  it('清空输入 → 作废在飞请求并清空结果与零命中提示', async () => {
+    state.api.searchWiki.mockResolvedValueOnce(resultOf(searchHits))
+    const wrapper = mountReader()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ReaderVm
+    vm.searchQuery = '首页'
+    await vm.runSearch()
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="wiki-reader-search-hit"]')).toHaveLength(2)
+
+    vm.searchQuery = ''   // 清空触发 watcher
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="wiki-reader-search-hit"]')).toHaveLength(0)
+    expect(wrapper.find('[data-test="wiki-reader-search-none"]').exists()).toBe(false)
+  })
+
+  it('degraded_dense=true → 向量降级提示；零命中 → 无匹配结果提示', async () => {
+    state.api.searchWiki.mockResolvedValueOnce(resultOf([], true))
+    const wrapper = mountReader()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ReaderVm
+
+    vm.searchQuery = '不存在的内容'
+    await vm.runSearch()
+    await flushPromises()
+
+    expect(state.ui.warning).toHaveBeenCalledWith(expect.stringContaining('向量'))
+    expect(wrapper.findAll('[data-test="wiki-reader-search-hit"]')).toHaveLength(0)
+    expect(wrapper.find('[data-test="wiki-reader-search-none"]').text()).toContain('无匹配结果')
+  })
+
+  it('检索失败 → 错误提示且不渲染结果', async () => {
+    state.api.searchWiki.mockRejectedValueOnce(new Error('boom'))
+    const wrapper = mountReader()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ReaderVm
+
+    vm.searchQuery = '首页'
+    await vm.runSearch()
+    await flushPromises()
+
+    expect(state.ui.error).toHaveBeenCalledWith(expect.stringContaining('检索失败'))
+    expect(wrapper.findAll('[data-test="wiki-reader-search-hit"]')).toHaveLength(0)
+    expect(wrapper.find('[data-test="wiki-reader-search-none"]').exists()).toBe(false)
   })
 })

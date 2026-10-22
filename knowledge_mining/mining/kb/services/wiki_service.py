@@ -46,6 +46,7 @@ from knowledge_mining.mining.kb.services.artifact_service import (
     ROLE_RUNTIME_READ,
     _check_freshness,
     _expected_dt,
+    _uid,
 )
 from knowledge_mining.mining.infra.llm_task_client import LlmTaskClient, LlmTaskError
 
@@ -580,6 +581,35 @@ class WikiService:
         if units.get("pending", 0) > 0 and (artifact_id, rev) not in _EMBED_INFLIGHT:
             self._lifecycle._spawn_embed(artifact_id, rev)
         return {"revision": rev, "units": units}
+
+    # ------------------------------------------- 运行态检索转发（63号批次4 Task 4）
+
+    async def search(
+        self, *, user: dict[str, Any], artifact_id: str, q: str,
+        mode: str = "fusion", top_k: int = 10, forward: Any = None,
+    ) -> dict[str, Any]:
+        """web 阅读器搜索框转发编排：ROLE_RUNTIME_READ 前置（viewer 可搜；
+        非成员 404 反探测在 mining 侧即拦）→ serving internal 三通道检索
+        （dense ANN/keyword/fusion，业务整段在 Java 侧）响应原样透传。
+
+        domain 取 _assert_role 返回的制品行 domain_id（零额外查询）；
+        username 取会话用户名（serving 按普通成员谓词复核——is_admin/key_id
+        由转发客户端定死 False/None，任务定稿口径）；不做缓存（MVP）。
+        """
+        if not isinstance(q, str) or not q.strip():
+            # 与 serving isBlank 校验同口径提前拦（省一次网络往返）→ 422
+            raise WikiError("invalid_query")
+        artifact, _ = await self._artifacts._assert_role(
+            user, artifact_id, *ROLE_RUNTIME_READ)
+        if forward is None:
+            # 防御：deps 装配恒注入转发客户端；旧式直造 WikiService 的调用方
+            # 不触达本方法——真到此分支按 serving 不可用口径，不裸抛异常
+            raise WikiError("serving_unavailable")
+        return await forward.search(
+            artifact_ref=artifact_id, q=q, mode=mode, top_k=top_k,
+            domain=str(artifact["domain_id"]),
+            username=str(user.get("username") or _uid(user)),
+        )
 
     # ------------------------------------------------------ 来源绑定（批次3）
 

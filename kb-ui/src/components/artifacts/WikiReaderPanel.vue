@@ -10,6 +10,48 @@
     <!-- 三栏：左目录 / 中渲染页 / 右上下文（窄屏 media query 纵向堆叠，不引新依赖） -->
     <template v-else>
       <aside class="wiki-reader__toc">
+        <!-- 检索区（批次4）：目录侧栏顶部——回车/按钮触发，结果渲染在侧栏；
+             点击结果按 page_key 跳页（goToKey 复用：alias 兜底+未命中提示） -->
+        <div class="wiki-reader__search">
+          <el-input
+            v-model="searchQuery"
+            size="small"
+            clearable
+            placeholder="搜索 Wiki 内容"
+            data-test="wiki-reader-search-input"
+            @keyup.enter="runSearch"
+          >
+            <template #append>
+              <el-button
+                :loading="searchLoading"
+                data-test="wiki-reader-search-btn"
+                @click="runSearch"
+              >搜索</el-button>
+            </template>
+          </el-input>
+          <div
+            v-if="searchResults.length"
+            class="wiki-reader__search-list"
+            data-test="wiki-reader-search-list"
+          >
+            <button
+              v-for="(hit, index) in searchResults"
+              :key="`${hit.unit_key}-${index}`"
+              type="button"
+              class="wiki-reader__search-hit"
+              data-test="wiki-reader-search-hit"
+              @click="goToKey(hit.page_key)"
+            >
+              <span class="wiki-reader__search-hit-title">{{ hit.title || hit.page_key }}</span>
+              <span class="wiki-reader__search-hit-snippet">{{ hit.snippet }}</span>
+            </button>
+          </div>
+          <p
+            v-else-if="searchDone"
+            class="wiki-reader__search-none"
+            data-test="wiki-reader-search-none"
+          >无匹配结果</p>
+        </div>
         <div class="wiki-reader__toc-head">目录 · 共 {{ sortedPages.length }} 页</div>
         <div class="wiki-reader__toc-body">
           <button
@@ -115,13 +157,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { extractWikiNavTarget, extractWikiSrcUnit, renderWikiMarkdown } from '@/utils/markdown'
-import type { WikiLink, WikiPage, WikiPageMeta, WikiPageType } from '@/types/artifacts'
+import type { WikiLink, WikiPage, WikiPageMeta, WikiPageType, WikiSearchHit } from '@/types/artifacts'
 
 /** 四页型徽标表（63号 §4.3）——与 WikiEditorPanel 同表（纯展示映射，两处独立维护）。 */
 const PAGE_TYPES = [
@@ -151,6 +193,16 @@ const selectedKey = ref('')
 const page = ref<WikiPage | null>(null)
 const outLinks = ref<WikiLink[]>([])
 const inLinks = ref<WikiLink[]>([])
+
+// ── 检索（63号批次4：搜索框 → mining 转发 serving 三通道，fusion 默认）──
+const searchQuery = ref('')
+const searchResults = ref<WikiSearchHit[]>([])
+const searchLoading = ref(false)
+/** 最近一次搜索已完成（零命中时显示"无匹配结果"提示）。 */
+const searchDone = ref(false)
+/** 请求序号防护（CompilePanel epoch 同款坑）：连续提交时迟到旧响应
+ * 一律丢弃不落地（发起时捕获旧值，落地前比对）。 */
+let searchEpoch = 0
 
 const sortedPages = computed(() =>
   [...pages.value].sort((a, b) => a.ordinal - b.ordinal || a.page_key.localeCompare(b.page_key)))
@@ -231,6 +283,53 @@ async function loadLinks(pageKey: string): Promise<void> {
     }
   }
 }
+
+/** 提交检索（回车/按钮共用）：空输入=清空；迟到旧响应（epoch 不匹配）
+ * 丢弃不落地。score 不展示——结果即排序后的命中清单。 */
+async function runSearch(): Promise<void> {
+  const query = searchQuery.value.trim()
+  if (!query) {
+    resetSearch()
+    return
+  }
+  const epoch = ++searchEpoch
+  searchLoading.value = true
+  try {
+    const res = await api.searchWiki(props.artifactId, { q: query })
+    if (epoch !== searchEpoch) return
+    searchResults.value = res.results ?? []
+    searchDone.value = true
+    if (res.degraded_dense) {
+      ElMessage.warning('向量检索暂不可用，结果基于关键词匹配')
+    }
+  } catch (error) {
+    if (epoch !== searchEpoch) return
+    searchResults.value = []
+    searchDone.value = false
+    ElMessage.error(`检索失败：${await apiErrorDetail(error)}`)
+  } finally {
+    if (epoch === searchEpoch) searchLoading.value = false
+  }
+}
+
+/** 作废在飞检索并清空状态（清空输入/切换制品共用；幂等）。 */
+function resetSearch(): void {
+  searchEpoch += 1
+  searchLoading.value = false
+  searchResults.value = []
+  searchDone.value = false
+}
+
+/** 清空输入=清结果（el-input clearable 图标与手输删空都走此处）。 */
+watch(searchQuery, (value) => {
+  if (!value) resetSearch()
+})
+
+/** 制品切换（路由复用组件不重挂）→ 检索状态整体重置（旧制品慢响应不落地）。 */
+watch(() => props.artifactId, () => {
+  searchQuery.value = ''
+  resetSearch()
+})
 
 /** 正文点击委托：双链 → 切页；溯源角标 → 复制切片 ID；其余点击不拦截。 */
 function onContentClick(event: MouseEvent): void {
@@ -314,6 +413,30 @@ defineExpose({ reload: loadPages })
 <style scoped>
 .wiki-reader { display: flex; gap: 14px; min-height: 420px; }
 .wiki-reader__toc { width: 240px; flex-shrink: 0; }
+/* 检索区（批次4）：目录侧栏顶部；结果列表限高滚动不挤压目录 */
+.wiki-reader__search { margin-bottom: 10px; }
+.wiki-reader__search-list {
+  display: flex; flex-direction: column; gap: 4px; margin-top: 8px;
+  max-height: 280px; overflow-y: auto;
+}
+.wiki-reader__search-hit {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 5px 8px; border: 1px solid transparent; border-radius: 6px;
+  background: none; cursor: pointer; text-align: left;
+}
+.wiki-reader__search-hit:hover { background: var(--el-fill-color-light, #f5f7fa); }
+.wiki-reader__search-hit-title {
+  font-size: 12.5px; color: var(--kb-text-primary, inherit);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wiki-reader__search-hit-snippet {
+  font-size: 12px; color: var(--kb-text-tertiary);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.wiki-reader__search-none {
+  margin: 6px 0 0; font-size: 12px; color: var(--kb-text-tertiary);
+}
 .wiki-reader__toc-head {
   font-size: 12.5px; color: var(--kb-text-tertiary); margin-bottom: 8px;
 }

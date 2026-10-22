@@ -27,6 +27,7 @@ import type {
   WikiPage,
   WikiPageMeta,
   WikiPageType,
+  WikiSearchResult,
   WikiSource,
   WikiStatus,
   WikiTocSection,
@@ -386,6 +387,17 @@ export function useArtifactsApi() {
     /** units embedding 进度（运行态信息，viewer+ 可读）。 */
     async getWikiStatus(artifactId: string): Promise<WikiStatus> {
       const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/status`)
+      return data
+    },
+
+    /** wiki 三通道检索（63号批次4）：mining 转发 serving internal——响应为
+     * wiki_search 视图原样透传（revision/degraded_dense/results）；mode 默认
+     * fusion（后端），top_k 默认 10；serving 故障族后端翻 502 中文信封。 */
+    async searchWiki(
+      artifactId: string,
+      params: { q: string; mode?: 'fusion' | 'dense' | 'keyword'; top_k?: number },
+    ): Promise<WikiSearchResult> {
+      const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/search`, { params })
       return data
     },
 

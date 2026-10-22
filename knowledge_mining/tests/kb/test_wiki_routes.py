@@ -1,6 +1,8 @@
 """Wiki 制品 REST 路由 —— httpx ASGI + 真实 WikiService/生命周期 + fake 三件套
 （不碰真库）。六端点全打：权限矩阵（viewer 写 403 / draft 不可见 / 404 反探测）/
 hex path 中文往返 / 422 定位断言 / 409 锁令牌 / links 明文 query / status。
+批次4 Task 4 追加：search 检索转发（FakeForward 桩——viewer 透传/非成员
+404 即拦/空白 422/serving 故障族 502/404 透传）。
 """
 from __future__ import annotations
 
@@ -13,8 +15,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from knowledge_mining.mining.kb.auth import current_user
-from knowledge_mining.mining.kb.db_wiki import encode_page_key
-from knowledge_mining.mining.kb.deps import get_wiki_service
+from knowledge_mining.mining.kb.db_wiki import WikiError, encode_page_key
+from knowledge_mining.mining.kb.deps import get_wiki_search_client, get_wiki_service
 from knowledge_mining.mining.kb.routes.wiki import router as wiki_router
 from knowledge_mining.mining.kb.services.artifact_service import ArtifactService
 from knowledge_mining.mining.kb.services.wiki_service import (
@@ -349,3 +351,129 @@ async def test_status_endpoint(env):
     body = r.json()
     assert body["revision"] == 1
     assert body["units"]["total"] == 1 and body["units"]["done"] == 1
+
+
+# ------------------------------------------------------------ 检索转发（批次4 Task 4）
+
+class FakeForward:
+    """转发客户端桩：记录调用参数（domain/username 口径断言）；可注入预设
+    响应或 WikiError（serving 故障族翻译链路用）。"""
+
+    def __init__(self, response: dict | None = None,
+                 error: WikiError | None = None) -> None:
+        self.calls: list[dict] = []
+        self._response = response
+        self._error = error
+
+    async def search(self, *, artifact_ref: str, q: str, mode: str,
+                     top_k: int, domain: str, username: str,
+                     timeout: float = 15.0) -> dict:
+        self.calls.append({
+            "artifact_ref": artifact_ref, "q": q, "mode": mode,
+            "top_k": top_k, "domain": domain, "username": username,
+        })
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+def _search_payload() -> dict:
+    """serving wiki_search 视图样例（snake_case 契约）。"""
+    return {
+        "view": "wiki_search", "artifact_ref": WID, "revision": 1,
+        "degraded_dense": False,
+        "results": [
+            {"page_key": "核心网-术语", "title": "核心网 术语", "unit_key": "u1",
+             "snippet": "MOP 是移动对外门户……", "score": 0.9,
+             "channels": ["wiki_dense", "wiki_keyword"]},
+        ],
+    }
+
+
+async def test_search_viewer_passthrough_and_forward_body(env):
+    """viewer（runtime read）可搜：转发 body 的 domain=制品行 domain_id /
+    username=会话用户名（is_admin/key_id 由真实客户端定死，路由测试桩不含）；
+    serving 响应原样透传。"""
+    fake = FakeForward(response=_search_payload())
+    env.app.dependency_overrides[get_wiki_search_client] = lambda: fake
+    env.holder["user"] = _user("u-viewer")
+
+    r = await env.client.get(
+        f"/api/artifacts/{WID}/wiki/search",
+        params={"q": "核心网", "mode": "dense", "top_k": 5})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["view"] == "wiki_search"
+    assert body["results"][0]["page_key"] == "核心网-术语"
+    # 默认参数：mode/top_k 缺省 fusion/10
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": "核心网"})
+    assert r.status_code == 200
+    assert fake.calls == [
+        {"artifact_ref": WID, "q": "核心网", "mode": "dense", "top_k": 5,
+         "domain": DOMAIN, "username": "u-viewer"},
+        {"artifact_ref": WID, "q": "核心网", "mode": "fusion", "top_k": 10,
+         "domain": DOMAIN, "username": "u-viewer"},
+    ]
+
+
+async def test_search_non_member_404_no_forward(env):
+    """非成员（未绑域/无成员行）→ mining 侧 404 反探测即拦，不发起转发
+    （存活性不外泄给 serving，也省一次往返）。"""
+    fake = FakeForward(response=_search_payload())
+    env.app.dependency_overrides[get_wiki_search_client] = lambda: fake
+    env.holder["user"] = _user("u-outside")
+
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": "核心网"})
+    assert r.status_code == 404
+    assert fake.calls == []
+
+
+async def test_search_blank_or_invalid_params_422(env):
+    """q 空串（FastAPI min_length 拦）/ 纯空白（服务层与 serving isBlank 同
+    口径拦）/ mode 非法（Literal 拦）→ 422 且不发起转发。"""
+    fake = FakeForward(response=_search_payload())
+    env.app.dependency_overrides[get_wiki_search_client] = lambda: fake
+    env.holder["user"] = _user("u-viewer")
+
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": ""})
+    assert r.status_code == 422
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": "   "})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "invalid_query"
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": "核心网", "mode": "vector"})
+    assert r.status_code == 422
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": "核心网", "top_k": 999})
+    assert r.status_code == 422
+    assert fake.calls == []
+
+
+async def test_search_serving_failure_family_502(env):
+    """serving 故障族（未配密钥/网络不可达/超时/内部错）→ 502 中文信封。"""
+    env.holder["user"] = _user("u-viewer")
+    for code in ("serving_unavailable", "serving_timeout", "serving_error"):
+        fake = FakeForward(error=WikiError(code))
+        env.app.dependency_overrides[get_wiki_search_client] = \
+            lambda f=fake: f   # default 参绑当前桩（防循环晚绑定）
+        r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                                 params={"q": "核心网"})
+        assert r.status_code == 502, (code, r.text)
+        assert r.json()["detail"]["code"] == code
+        assert r.json()["detail"]["message"]   # 中文文案非空
+
+
+async def test_search_serving_404_passthrough(env):
+    """serving 侧 404（如 rev0 未发布对 serving 不可见）→ 反探测口径透传
+    404（不升 502——与 mining 侧非成员 404 同响应面）。"""
+    fake = FakeForward(error=WikiError("artifact_not_found"))
+    env.app.dependency_overrides[get_wiki_search_client] = lambda: fake
+    env.holder["user"] = _user("u-viewer")
+
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": "核心网"})
+    assert r.status_code == 404

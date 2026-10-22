@@ -160,6 +160,16 @@ async def get_compile_service(request: Request) -> "Any":
     )
 
 
+# ------------------------------------------- wiki web 检索转发（63号批次4 Task 4）
+
+async def get_wiki_search_client(request: Request) -> "Any":
+    """web 检索转发客户端（模块级单例——httpx.AsyncClient 连接池跨请求
+    复用，env 首建时读取；见 kb/wiki_search_client.py）。测试经
+    dependency override 同入口注入桩。"""
+    from knowledge_mining.mining.kb.wiki_search_client import get_client
+    return get_client()
+
+
 async def get_artifact_import_service(request: Request) -> "Any":
     """61号：Excel 三步导入向导（写路径经 ArtifactService 权限门禁）。"""
     from knowledge_mining.mining.kb.services.artifact_import_service import (
