@@ -38,8 +38,13 @@ from knowledge_mining.mining.kb.db_wiki import WikiError
 
 logger = logging.getLogger(__name__)
 
-#: 单 kb 版「当前知识」CTE——与 kb/db.KbDB._CURRENT_SNAPSHOT_CTE 同构：
-#: ``ANY(%(kb)s)`` 收窄为标量 ``%(kb)s``，latest→active 两段口径逐字保留。
+#: 单 kb 版「当前知识」CTE——latest 段与 kb/db.KbDB._CURRENT_SNAPSHOT_CTE
+#: 同构（``ANY(%(kb)s)`` 收窄为标量 ``%(kb)s``）；cur 段在单 kb 版加
+#: **DISTINCT**（审查 I-3）：同 kb 两文档可共享同一快照（同内容 hash，
+#: projector 一等支持路径），DISTINCT ON document_id 的 latest 会对同一
+#: document_snapshot_id 产出多行——去重后 units JOIN 才不把共享快照单元
+#: 翻倍（指纹计数/Σ 护栏/取材同源受益）。多 kb 版（KbDB）**不能**照搬：
+#: 跨 kb 语义不同（每 kb 各自视角），保持原样。
 _CURRENT_SNAPSHOT_CTE = """
 WITH latest AS (
     SELECT DISTINCT ON (bs.document_id)
@@ -52,7 +57,7 @@ WITH latest AS (
       AND b.status IN ('validated', 'published')
     ORDER BY bs.document_id, b.created_at DESC, b.id DESC
 ), cur AS (
-    SELECT document_snapshot_id
+    SELECT DISTINCT document_snapshot_id
     FROM latest
     WHERE selection_status = 'active'
 )"""
@@ -283,13 +288,20 @@ class CompileInputsDB:
         """编译取材（63号 §4.2 ①，Task 3 `_run_prepare` 唯一调用方）：kb
         当前快照范围内检索单元全量行。
 
-        口径与 current_fingerprint **完全同构**（dirty 语义闭环）：
-        _CURRENT_SNAPSHOT_CTE（单 kb 版）→ u JOIN cur → _DIR_PATH_LATERAL
-        目录归属（INNER JOIN LATERAL——快照无 link 行的孤儿单元不计，与指纹
-        计数口径一致）→ LEFT JOIN asset_retrieval_embeddings_v2（**LEFT** 保
-        住无向量单元——聚类侧旁路到未聚类池，取材完整）→ _DIR_FILTER（空
-        目录数组=全库不拼）。ORDER BY snapshot_id, ordinal, representation_id
-        ——**确定性铁律**（聚类种子取首遇，输入序固定输出才稳定）。
+        口径与 current_fingerprint **同源**（同一 _CURRENT_SNAPSHOT_CTE
+        快照集——含共享快照 DISTINCT 去重；同一 _DIR_PATH_LATERAL/
+        _DIR_FILTER scope 谓词），两处刻意差异（审查 M-2 修正原「完全同构」
+        夸大表述）：
+        ① 孤儿单元（快照无 link 行，理论不可达）：指纹的**空目录**分支不
+        JOIN LATERAL（计数含孤儿），本方法恒 INNER——孤儿无目录归属、无法
+        证明在 scope 内，**保守丢弃**（取材宁少勿错）；
+        ② 指纹按快照计数，本方法展开到单元行。
+        dirty 判定两侧同走 current_fingerprint，不受本方法差异影响。
+
+        LEFT JOIN asset_retrieval_embeddings_v2（**LEFT** 保住无向量单元——
+        聚类侧旁路到未聚类池，取材完整）；ORDER BY snapshot_id, ordinal,
+        representation_id——**确定性铁律**（聚类种子取首遇，输入序固定输出
+        才稳定）。
 
         每行：{representation_id, snapshot_id, content_text, structural_context,
         section_ref（015 迁移 ALTER 补列，现库恒在）, ordinal, dense_eligible,

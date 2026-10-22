@@ -785,3 +785,50 @@ async def test_collect_units_follows_latest_snapshot_only(async_pool) -> None:
         async_pool, kb_id=kb_id, document_id=doc, units=7,
         created_at="2026-10-22T02:00:00+00:00", selection_status="removed")
     assert await inputs.collect_units(kb_id, []) == []
+
+
+async def test_collect_units_shared_snapshot_dedup(async_pool) -> None:
+    """共享快照去重（审查 I-3）：同 kb 两文档共享同一快照（同内容 hash
+    一等支持路径）——latest 按 document_id DISTINCT ON 会对同一
+    document_snapshot_id 产出两行；cur 段 DISTINCT 修正后 units JOIN 不
+    翻倍（修复前 6 行）、指纹单行（修复前重复两条）、Σ 计数不虚增。"""
+    inputs = CompileInputsDB(async_pool)
+    kbdb, kb_id = await _seed_kb(async_pool)
+    doc_a = await _add_doc(kbdb, kb_id, directory_path="共享目录")
+    doc_b = await _add_doc(kbdb, kb_id, directory_path="共享目录")
+    snap = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_a, units=3)
+
+    # 文档 B 复用同快照：补 validated build 选择行 + snapshot link
+    # （两文档同目录——LATERAL 的 ORDER BY d.id 归属无二义）
+    build_id = uuid.uuid4().hex
+    async with async_pool.connection() as conn:
+        await conn.execute(
+            """INSERT INTO asset_builds
+               (id, build_code, status, build_mode, domain, kb_id, created_at)
+               VALUES (%s, %s, 'validated', 'full', 'plant-a', %s,
+                       '2026-10-22T03:00:00+00:00')""",
+            (build_id, f"build-{build_id[:8]}", kb_id))
+        await conn.execute(
+            """INSERT INTO asset_build_document_snapshots
+               (build_id, document_id, document_snapshot_id, selection_status,
+                reason)
+               VALUES (%s, %s, %s, 'active', 'add')""",
+            (build_id, doc_b, snap))
+        await conn.execute(
+            """INSERT INTO asset_document_snapshot_links
+               (id, document_id, document_snapshot_id, relative_path,
+                source_uri, linked_at)
+               VALUES (%s, %s, %s, 'b.md', 'object://source',
+                       '2026-10-22T03:00:00+00:00')""",
+            (uuid.uuid4().hex, doc_b, snap))
+
+    rows = await inputs.collect_units(kb_id, [])
+    assert len(rows) == 3  # 共享快照只取一份（修复前 latest 双行 → 6）
+    assert {r["snapshot_id"] for r in rows} == {snap}
+    assert all(r["directory_path"] == "共享目录" for r in rows)
+
+    # 指纹与 Σ 护栏同源受益：单行快照、计数不虚增
+    fp = await inputs.current_fingerprint(kb_id, [])
+    assert fp["snapshots"] == [{"snapshot_id": snap, "unit_count": 3}]
+    assert await inputs.kb_snapshot_unit_count(kb_id) == 3

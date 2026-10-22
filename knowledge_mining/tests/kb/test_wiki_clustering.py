@@ -322,6 +322,57 @@ def test_all_without_embedding_bypass_to_misc() -> None:
     assert result_cover(result) == {"n1", "n2"}
 
 
+def test_zero_vector_bypasses_like_missing_embedding() -> None:
+    # 零向量无角度语义（cosine 无定义）→ 与无向量同旁路未聚类池（审查 M-3）
+    result = cluster_units([
+        it("z", (0, 0, 0, 0), directory="dz"),
+        it("e1", (1, 0, 0, 0), directory="dz"),
+        it("e2", (1, 0, 0, 0), directory="dz"),
+        it("e3", unit(1, 0.02, 0, 0), directory="dz"),
+    ])
+    assert "z" in result.unclustered
+    assert result.stats["embedded_count"] == 3  # 零向量不计 embedded
+    assert result_cover(result) == {"z", "e1", "e2", "e3"}
+    misc = [c for c in result.clusters if c.is_misc]
+    assert tuple(misc[0].member_ids) == ("z",)  # 目录兜底仍有权属
+
+
+# ------------------------------------------------- 审查修复轮（I-1/I-2）
+
+def test_seed_admission_forces_assignment_at_cap() -> None:
+    # 种子准入（审查 I-1）：max_seeds=3 且 5 个两两 <0.62 的方向——前 3 个
+    # 各成种子；d/e 到达时种子已满 → 强制入最佳既有簇（d 与前三相似全 0，
+    # 平局取先建簇 a；e 相似全 0.5 平局同落 a）
+    items = [
+        it("a", (1, 0, 0, 0)),
+        it("b", (0, 1, 0, 0)),
+        it("c", (0, 0, 1, 0)),
+        it("d", (0, 0, 0, 1)),
+        it("e", unit(1, 1, 1, 1)),
+    ]
+    capped = cluster_units(items, max_seeds=3, min_promote=1)
+    groups = by_members(capped)
+    assert frozenset({"a", "d", "e"}) in groups  # d/e 被强制并入
+    assert frozenset({"b"}) in groups and frozenset({"c"}) in groups
+    assert len(capped.clusters) == 3
+    assert capped.stats["cluster_count"] == 3
+
+    # 对照：默认 max_seeds=500 下同样输入 → 5 个种子簇（无强制指派）
+    uncapped = cluster_units(items, min_promote=1)
+    assert len(uncapped.clusters) == 5
+
+
+def test_member_vec_normalized_as_float32_array() -> None:
+    # 内存形态断言（审查 I-2）：归一化产物为 array('f')（~4KB/条，对齐
+    # 取材侧；1024 维 tuple[float,...] ~32.8KB/条已退役）；f32 舍入值近似
+    from knowledge_mining.mining.kb.wiki_clustering import _normalize
+    vec = _normalize((3, 4, 0, 0))
+    assert isinstance(vec, array) and vec.typecode == "f"
+    assert vec[0] == pytest.approx(0.6, rel=1e-6)
+    assert vec[1] == pytest.approx(0.8, rel=1e-6)
+    assert _normalize((0, 0, 0, 0)) is None  # 零向量门控不变
+
+
 def test_empty_items_and_param_validation() -> None:
     result = cluster_units([])
     assert result.clusters == () and result.unclustered == ()
@@ -331,3 +382,5 @@ def test_empty_items_and_param_validation() -> None:
         cluster_units([it("a", (1, 0, 0, 0))], max_cluster=0)
     with pytest.raises(ValueError):
         cluster_units([it("a", (1, 0, 0, 0))], min_promote=0)
+    with pytest.raises(ValueError):
+        cluster_units([it("a", (1, 0, 0, 0))], max_seeds=0)

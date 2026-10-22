@@ -1,37 +1,49 @@
 """Wiki 制品编译聚类器（63号 §4.2 ② / 批次3 Task 2）—— 纯函数、零 IO、
-纯 stdlib（依赖冻结：不引 numpy/分词库）。
+纯 stdlib（依赖冻结：不引 numpy/分词库；容器 py3.11 无 math.sumprod——点积
+保持手写 map(mul) 循环）。
 
 输入 = collect_units 产出的单元行（embedding 为 array('f') 或 None——无向量
 单元不参与聚类，旁路到未聚类池）；输出 ClusterResult。流水线：
 
-    增量指派 → <min_promote 解散 → 簇间合并（迭代至稳定）→ 超限递归拆分
-    → 未聚类按 directory_path 兜底成杂项簇（每成员必须有权属——取材完整）
+    增量指派（含种子准入）→ <min_promote 解散 → 簇间合并（迭代至稳定）
+    → 超限递归拆分 → 未聚类按 directory_path 兜底成杂项簇（每成员必须有
+    权属——取材完整）
 
 设计口径（对任务书裁定的落点）：
 - **增量指派**：逐项与既有簇**质心**比相似度（归一化向量点积；质心=现成员
-  归一化均值，首成员即质心初始化）；≥sim_threshold 入最高相似簇，否则新
-  种子簇。数值平局按簇创建序裁决（创建序由输入序派生——确定性等价）。
-- **合并先于拆分**（任务书合并条「合并后若超 max_cluster 交给拆分规则」）；
-  拆分产物**不回灌**合并/转正——子簇源自已转正簇，保持权属，双种子取簇内
-  最远对、子簇质心间距构造上已拉开。
+  归一化均值，首成员即质心初始化；质心随成员变更失效缓存——比较热路径
+  零重算）；≥sim_threshold 入最高相似簇，否则新种子簇。数值平局按簇创建
+  序裁决（创建序由输入序派生——确定性等价）。
 - **杂项簇**：目录兜底容器非语义簇——centroid 空、不参与拆/合；空目录
   （directory_path=""，根目录文档）成员同落**总杂项簇**。
 - **确定性铁律**：输入序固定（调用方 ORDER BY snapshot_id, ordinal,
   representation_id 已保证）是全链根基；簇内成员序/digest_members/杂项簇
   组内序全按输入序；输出簇列表按 cluster_id 字典序——同输入两次调用输出
-  逐字段相等（验收②「重跑稳定性」的编译侧前提）。
+  逐字段相等（验收②「重跑稳定性」的编译侧前提）。成员向量归一后存
+  array('f')（f32 舍入确定——同输入恒同输出）。
 - **cluster_id** = 成员 representation_ids 排序后 sha256[:12]——成员集合
   决定身份（与成员到达序无关），成员增减必变 id。
 - 零向量 embedding 无角度语义（cosine 无定义）→ 与无向量同旁路未聚类池。
 
-设计偏差记录（批次3 决策7）：MVP 不做「凝聚度低重聚」——增量指派+拆+合
-已覆盖主逻辑。
+设计偏差记录：
+- **合并先于拆分是工程裁定**（非计划原文）：在「拆分产物不回灌合并」的
+  前提下，只有 合→拆 顺序能保证最终不变量「全部簇 ≤ max_cluster」——
+  拆→合可能再度超限且无终止保证。拆分产物不回灌转正：子簇源自已转正簇，
+  保持权属；双种子取簇内最远对、子簇质心间距构造上已拉开。
+- **种子准入控制（审查 I-1 裁定入规格）**：形成中的种子簇数达 max_seeds
+  （默认 500）后不再开新种子，后续单元**强制指派给最佳既有簇**（相似度可
+  能 < sim_threshold）——最坏指派复杂度钉在 O(N·max_seeds·D)。超
+  max_seeds 的异质语料由此可能产生大而杂的簇：靠拆分（>max_cluster）+
+  未聚类杂项兜底 + 目录分组收纳，不再保证「簇内两两相似 ≥ 阈值」。
+- MVP 不做「凝聚度低重聚」（批次3 决策7）——增量指派+拆+合已覆盖主逻辑。
 """
 from __future__ import annotations
 
 import hashlib
 import math
+from array import array
 from dataclasses import dataclass
+from operator import mul
 from typing import Any, Mapping, NamedTuple, Sequence
 
 #: digest_members / build_cluster_context 默认取材单元数上限（63号取材口径）
@@ -72,30 +84,42 @@ class ClusterResult:
 
 
 class _Member(NamedTuple):
-    """内部成员：输入序号（确定性键）+ 归一化向量 + 取材字段。"""
+    """内部成员：输入序号（确定性键）+ 归一化向量 + 取材字段。
+
+    vec 为归一化后的 array('f')（审查 I-2：1024 维 tuple[float,...]
+    ~32.8KB/条会吃掉取材侧 array('f') 的内存收益——4KB/条对齐；f32 舍入
+    确定，同输入恒同输出）。
+    """
 
     index: int
     rid: str
-    vec: tuple[float, ...]
+    vec: array
     content: str
     directory: str
 
 
 def _dot(a: Sequence[float], b: Sequence[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))
+    # map(mul) C 级循环（容器 py3.11 无 math.sumprod——审查 I-1 注记）
+    return sum(map(mul, a, b))
 
 
-def _normalize(vec: Sequence[float]) -> tuple[float, ...] | None:
-    """归一化；零向量返回 None（无角度语义，旁路未聚类池）。"""
+def _normalize(vec: Sequence[float]) -> array | None:
+    """归一化为 array('f')（内存形态见 _Member）；零向量返回 None（无角度
+    语义，旁路未聚类池）。"""
     n = math.sqrt(sum(x * x for x in vec))
     if n <= 0.0:
         return None
-    return tuple(x / n for x in vec)
+    return array("f", (x / n for x in vec))
 
 
 def _unit_from_sum(sum_vec: Sequence[float]) -> tuple[float, ...]:
-    """成员向量和（均单位向量）→ 归一化质心。和非零数学上恒成立；防御
-    零和直接返回原样（不参与相似度语义，不影响确定性）。"""
+    """成员向量和（均为单位向量）→ 归一化质心（tuple——簇数量级小，迭代
+    速度优先）。
+
+    诚实口径（审查 M-1）：和非零**并非**恒成立——成员恰为对跖向量（如
+    v 与 -v）时和精确抵消为零。防御分支返回原零向量：与一切向量点积恒
+    0，不产生除零/NaN，该簇退化为「与世隔绝」；同输入同输出，确定性
+    不受影响。"""
     n = math.sqrt(sum(x * x for x in sum_vec))
     if n <= 0.0:
         return tuple(sum_vec)
@@ -103,22 +127,27 @@ def _unit_from_sum(sum_vec: Sequence[float]) -> tuple[float, ...]:
 
 
 class _Forming:
-    """内部可变工作簇：成员向量滚动求和（质心按需归一化——O(dim)/次比较），
-    输出前冻结为 Cluster。members 恒按输入序维护（merge 时重排）。"""
+    """内部可变工作簇：成员向量滚动求和；**质心缓存**（add/merged 失效——
+    比较热路径只做点积，审查 I-1）；输出前冻结为 Cluster。members 恒按
+    输入序维护（merge 时重排）。"""
 
-    __slots__ = ("members", "sum_vec")
+    __slots__ = ("members", "sum_vec", "_centroid")
 
     def __init__(self, first: _Member) -> None:
         self.members: list[_Member] = [first]
         self.sum_vec: list[float] = list(first.vec)
+        self._centroid: tuple[float, ...] | None = None
 
     def add(self, m: _Member) -> None:
         self.members.append(m)
         for i, x in enumerate(m.vec):
             self.sum_vec[i] += x
+        self._centroid = None
 
     def centroid(self) -> tuple[float, ...]:
-        return _unit_from_sum(self.sum_vec)
+        if self._centroid is None:
+            self._centroid = _unit_from_sum(self.sum_vec)
+        return self._centroid
 
     def similarity(self, vec: Sequence[float]) -> float:
         return _dot(vec, self.centroid())
@@ -128,6 +157,7 @@ class _Forming:
         c = cls.__new__(cls)
         c.members = sorted(a.members + b.members, key=lambda m: m.index)
         c.sum_vec = [x + y for x, y in zip(a.sum_vec, b.sum_vec)]
+        c._centroid = None
         return c
 
 
@@ -157,18 +187,22 @@ def cluster_units(
     merge_threshold: float = 0.85,
     max_cluster: int = 100,
     min_promote: int = 3,
+    max_seeds: int = 500,
 ) -> ClusterResult:
     """增量聚类主入口（口径见模块 docstring）。
 
     items 各行至少含 representation_id / content_text / directory_path /
     embedding(array('f')|None)；多余键（collect_units 的 snapshot_id 等）
     容忍不读。量级护栏在编译 start（Σ unit_count > 30000 → 422），本函数
-    信任调用方。
+    信任调用方。max_seeds=种子准入上限（审查 I-1，偏差语义见模块
+    docstring 设计偏差记录节）。
     """
     if max_cluster < 1:
         raise ValueError("max_cluster 必须 ≥ 1")
     if min_promote < 1:
         raise ValueError("min_promote 必须 ≥ 1")
+    if max_seeds < 1:
+        raise ValueError("max_seeds 必须 ≥ 1")
 
     members: list[_Member] = []
     # 未聚类池（无向量/零向量/解散成员）：(输入序号, id, 内容, 目录)
@@ -184,7 +218,7 @@ def cluster_units(
             continue
         members.append(_Member(idx, rid, vec, content, directory))
 
-    forming = _assign(members, sim_threshold)
+    forming = _assign(members, sim_threshold, max_seeds)
 
     # <min_promote 解散（转正门禁）
     promoted: list[_Forming] = []
@@ -230,7 +264,7 @@ def build_cluster_context(
     cluster: Cluster,
     units_lookup: Mapping[str, Mapping[str, Any]],
     *,
-    cap: int = 12,
+    cap: int = DIGEST_MEMBERS_CAP,
     per_unit_chars: int = 800,
 ) -> str:
     """簇取材上下文（簇级写作 prompt 素材，63号 §4.4 引用规范——正文须带
@@ -252,10 +286,14 @@ def build_cluster_context(
 
 # ------------------------------------------------------------ 内部算法步
 
-def _assign(members: Sequence[_Member],
-            sim_threshold: float) -> list[_Forming]:
+def _assign(members: Sequence[_Member], sim_threshold: float,
+            max_seeds: int) -> list[_Forming]:
     """增量指派：逐项与既有簇质心比相似度，≥sim_threshold 入最高相似簇
-    （平局取先建簇——创建序由输入序派生）；否则新种子簇。"""
+    （平局取先建簇——创建序由输入序派生）；否则新种子簇。
+
+    **种子准入**（审查 I-1）：既有种子簇数达 max_seeds 后不再开新种子，
+    强制入当前最佳簇（相似度可能 < sim_threshold）——最坏复杂度
+    O(N·max_seeds·D)。"""
     clusters: list[_Forming] = []
     for m in members:
         best: _Forming | None = None
@@ -264,7 +302,8 @@ def _assign(members: Sequence[_Member],
             sim = c.similarity(m.vec)
             if best is None or sim > best_sim:
                 best, best_sim = c, sim
-        if best is not None and best_sim >= sim_threshold:
+        if best is not None and (best_sim >= sim_threshold
+                                 or len(clusters) >= max_seeds):
             best.add(m)
         else:
             clusters.append(_Forming(m))
