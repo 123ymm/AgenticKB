@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    63号批次4 wiki 制品检索 SQL（kb_wiki_* 三表，DDL=018_wiki_artifacts.sql，
+    Python 写侧 = mining/kb/wiki_*）。制品域独立检索路径（63号 §5.2）：不进
+    范式引擎、不混 asset_retrieval_units_v2；权限/revision 定版由调用方
+    （ArtifactWikiSearchService，selectVisibleArtifact.currentRevision）收口。
+    契约（与 ArtifactToolMapper.xml 同源）：
+    - 向量 literal/词法串/键全部 #{} 预编译绑定，全文零字符串拼接插值；
+    - direction 是 <choose> 枚举固定分支（in / 其余默认出链）；
+    - units 无 ordinal 列——稳定序用 (page_key, unit_key) 字典序。
+-->
+<mapper namespace="com.coremasterkb.serving.operator.mapper.WikiArtifactToolMapper">
+
+    <resultMap id="wikiUnitStatusMap"
+               type="com.coremasterkb.serving.operator.mapper.WikiArtifactToolMapper$WikiUnitStatusRow">
+        <constructor>
+            <arg column="total"   javaType="java.lang.Long"/>
+            <arg column="done"    javaType="java.lang.Long"/>
+            <arg column="pending" javaType="java.lang.Long"/>
+            <arg column="failed"  javaType="java.lang.Long"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="wikiUnitHitMap"
+               type="com.coremasterkb.serving.operator.mapper.WikiArtifactToolMapper$WikiUnitHitRow">
+        <constructor>
+            <arg column="unit_key"     javaType="java.lang.String"/>
+            <arg column="page_key"     javaType="java.lang.String"/>
+            <arg column="title"        javaType="java.lang.String"/>
+            <arg column="content_text" javaType="java.lang.String"/>
+            <arg column="score"        javaType="java.lang.Double"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="wikiPageMap"
+               type="com.coremasterkb.serving.operator.mapper.WikiArtifactToolMapper$WikiPageRow">
+        <constructor>
+            <arg column="page_key"    javaType="java.lang.String"/>
+            <arg column="title"       javaType="java.lang.String"/>
+            <arg column="page_type"   javaType="java.lang.String"/>
+            <arg column="frontmatter" javaType="java.lang.String"/>
+            <arg column="body_md"     javaType="java.lang.String"/>
+            <arg column="provenance"  javaType="java.lang.String"/>
+            <arg column="origin"      javaType="java.lang.String"/>
+            <arg column="updated_at"  javaType="java.time.OffsetDateTime"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="wikiLinkMap"
+               type="com.coremasterkb.serving.operator.mapper.WikiArtifactToolMapper$WikiLinkRow">
+        <constructor>
+            <arg column="from_page"   javaType="java.lang.String"/>
+            <arg column="to_page"     javaType="java.lang.String"/>
+            <arg column="anchor_text" javaType="java.lang.String"/>
+            <arg column="status"      javaType="java.lang.String"/>
+        </constructor>
+    </resultMap>
+
+    <!-- ======================= units 状态聚计 ======================= -->
+
+    <!-- 单趟 FILTER 聚合（done/pending/failed + total 同行返回）；COUNT 恒出
+         一行（制品+revision 无 units 时全 0）——卡片 embedding 进度与 dense
+         通道降级判定（done==0）共用。 -->
+    <select id="selectWikiUnitsStatus" resultMap="wikiUnitStatusMap">
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE embed_status = 'done') AS done,
+               COUNT(*) FILTER (WHERE embed_status = 'pending') AS pending,
+               COUNT(*) FILTER (WHERE embed_status = 'failed') AS failed
+        FROM kb_wiki_page_units
+        WHERE artifact_id = #{artifactId} AND revision = #{revision}
+    </select>
+
+    <!-- ======================= dense（HNSW ANN） ======================= -->
+
+    <!--
+      dense 通道：kb_wiki_page_units 自带 embedding 列（VECTOR(1024)，HNSW =
+      idx_wiki_units_hnsw / vector_cosine_ops），无独立 embeddings 表——照 009
+      searchDenseV2 的 ANN 两层形态：
+        ① 候选层（最内层）：artifact/revision 收窄 + embed_status='done' 过滤
+           + ORDER BY 余弦距离 LIMIT candidateBudget——HNSW 索引的标准入口形态。
+        ② 外层：JOIN kb_wiki_pages（三键等值）取 title，score = 1 - distance，
+           距离序输出（unit_key tie-break 稳定序）。
+      post-filter 截断边界（009 勘误口径）：本查询不开 iterative_scan——候选层
+      是"过滤后的行取距离序 Top candidateBudget"，pending/failed 单元占据近邻
+      时会挤占候选窗（截断而非严格全量 Top-K 语义）；MVP ≤200 页（units 数千
+      级）规模无碍，超规模再评估 iterative_scan。
+      域池会话参数（ef_search / force_custom_plan）已由连接初始化全局生效，
+      此处不重复设置。
+    -->
+    <select id="searchWikiUnitsDense" resultMap="wikiUnitHitMap">
+        SELECT u.unit_key, u.page_key, p.title, u.content_text,
+               (1 - u.distance) AS score
+        FROM (
+            SELECT unit_key, page_key, content_text, artifact_id, revision,
+                   (embedding &lt;=&gt; #{queryVector}::vector) AS distance
+            FROM kb_wiki_page_units
+            WHERE artifact_id = #{artifactId}
+              AND revision = #{revision}
+              AND embed_status = 'done'
+            ORDER BY embedding &lt;=&gt; #{queryVector}::vector
+            LIMIT #{candidateBudget}
+        ) u
+        JOIN kb_wiki_pages p
+              ON p.artifact_id = u.artifact_id
+             AND p.revision = u.revision
+             AND p.page_key = u.page_key
+        ORDER BY u.distance ASC, u.unit_key ASC
+    </select>
+
+    <!-- ======================= keyword（ILIKE 子串） ======================= -->
+
+    <!--
+      keyword 通道：无 tsvector 列（零 DDL），content_text ILIKE 子串匹配
+      （CJK 不分词直接子串命中；大小写不敏感）。
+      绑定口径：值走 #{} 预编译——'%' || #{lexicalQuery} || '%' 是把绑定参数
+      包进字面量百分号，参数值本身含 % / _ 时按通配符解释不转义（子串模糊
+      语义，与表格 DSL contains 同族口径），无注入面。
+      score 恒 1.0（RRF 融合只消费名次，不消费分值）；units 无 ordinal——
+      稳定序 = (page_key, unit_key) 字典序。
+    -->
+    <select id="searchWikiUnitsKeyword" resultMap="wikiUnitHitMap">
+        SELECT u.unit_key, u.page_key, p.title, u.content_text, 1.0 AS score
+        FROM kb_wiki_page_units u
+        JOIN kb_wiki_pages p
+              ON p.artifact_id = u.artifact_id
+             AND p.revision = u.revision
+             AND p.page_key = u.page_key
+        WHERE u.artifact_id = #{artifactId}
+          AND u.revision = #{revision}
+          AND u.content_text ILIKE ('%' || #{lexicalQuery} || '%')
+        ORDER BY u.page_key ASC, u.unit_key ASC
+        LIMIT #{limit}
+    </select>
+
+    <!-- ======================= 单页整读 ======================= -->
+
+    <!-- frontmatter/provenance 为 JSONB——以 ::text 输出 JSON 字符串（展示与
+         MCP 透传用）；revision 内 page_key 唯一，无行 = 页不存在。 -->
+    <select id="selectWikiPage" resultMap="wikiPageMap">
+        SELECT page_key, title, page_type,
+               frontmatter::text AS frontmatter, body_md,
+               provenance::text AS provenance, origin, updated_at
+        FROM kb_wiki_pages
+        WHERE artifact_id = #{artifactId}
+          AND revision = #{revision}
+          AND page_key = #{pageKey}
+    </select>
+
+    <!-- ======================= 页链接单跳 ======================= -->
+
+    <!-- direction=in 入链（to_page 固定，对侧 from_page+anchor 排序）；
+         其余（默认 out）出链（from_page 固定，对侧 to_page+anchor 排序）——
+         PK (artifact_id,revision,from_page,to_page,anchor_text) 保证确定性序。 -->
+    <select id="selectWikiLinks" resultMap="wikiLinkMap">
+        SELECT l.from_page, l.to_page, l.anchor_text, l.status
+        FROM kb_wiki_page_links l
+        WHERE l.artifact_id = #{artifactId}
+          AND l.revision = #{revision}
+          <choose>
+              <when test="direction == 'in'">
+                AND l.to_page = #{pageKey}
+              </when>
+              <otherwise>
+                AND l.from_page = #{pageKey}
+              </otherwise>
+          </choose>
+        ORDER BY
+        <choose>
+            <when test="direction == 'in'">l.from_page</when>
+            <otherwise>l.to_page</otherwise>
+        </choose>
+        ASC, l.anchor_text ASC
+    </select>
+
+</mapper>
