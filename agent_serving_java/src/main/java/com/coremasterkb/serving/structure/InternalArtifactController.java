@@ -9,6 +9,13 @@ import com.coremasterkb.serving.structure.ArtifactQueryService.ArtifactListResul
 import com.coremasterkb.serving.structure.ArtifactQueryService.ArtifactRows;
 import com.coremasterkb.serving.structure.ArtifactQueryService.ArtifactSummary;
 import com.coremasterkb.serving.structure.ArtifactQueryService.ColumnSchema;
+import com.coremasterkb.serving.structure.ArtifactWikiSearchService.WikiArtifactCard;
+import com.coremasterkb.serving.structure.ArtifactWikiSearchService.WikiLinkItem;
+import com.coremasterkb.serving.structure.ArtifactWikiSearchService.WikiLinksView;
+import com.coremasterkb.serving.structure.ArtifactWikiSearchService.WikiPageDetail;
+import com.coremasterkb.serving.structure.ArtifactWikiSearchService.WikiPageView;
+import com.coremasterkb.serving.structure.ArtifactWikiSearchService.WikiSearchHit;
+import com.coremasterkb.serving.structure.ArtifactWikiSearchService.WikiSearchView;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,13 +42,17 @@ import java.util.Map;
  * mapper 单 SQL，不存在/无权/已停用/跨域同一 {@code artifact_not_found}
  * 404 反探测，由 GlobalExceptionHandler 映射——对齐 kb_not_found 口径）。</p>
  *
- * <p>两个端点：</p>
+ * <p>五个端点：</p>
  * <ul>
  *   <li>{@code POST /api/internal/artifact-query}——art_ ref + 白名单 DSL：
  *       无 query → artifact_card（元信息 + 列能力 + revision 快照）；
- *       有 query → artifact_rows（provenance 随行）/ artifact_aggregate；</li>
+ *       有 query → artifact_rows（provenance 随行）/ artifact_aggregate；
+ *       kind=wiki 走 q/page/links 协议（63号批次4，wiki 四视图装配）；</li>
  *   <li>{@code POST /api/internal/artifact-list}——发现通道（域内已发布可见制品，
- *       updated_at DESC keyset 翻页）。</li>
+ *       updated_at DESC keyset 翻页）；</li>
+ *   <li>{@code POST /api/internal/artifact-wiki-search | artifact-wiki-page |
+ *       artifact-wiki-links}——wiki 直连调试/转发端点（63号批次4，供 mining
+ *       web 搜索框转发与直连调试；MCP 走 artifact-query 的 kind 分流零改动）。</li>
  * </ul>
  */
 @RestController
@@ -52,11 +63,14 @@ public class InternalArtifactController {
 
     private final ServingProperties properties;
     private final ArtifactQueryService artifactService;
+    private final ArtifactWikiSearchService wikiService;
 
     public InternalArtifactController(ServingProperties properties,
-                                      ArtifactQueryService artifactService) {
+                                      ArtifactQueryService artifactService,
+                                      ArtifactWikiSearchService wikiService) {
         this.properties = properties;
         this.artifactService = artifactService;
+        this.wikiService = wikiService;
     }
 
     // ------------------------------------------------------------------ endpoints
@@ -104,6 +118,61 @@ public class InternalArtifactController {
         });
     }
 
+    /**
+     * wiki 三通道检索（63号批次4）。body: {artifact_ref, q, mode?, top_k?,
+     * domain, username, is_admin, key_id?}——mode ∈ fusion（默认）/dense/keyword，
+     * top_k 默认 10 夹取 [1,50]；dense 通道降级不报错（degraded_dense=true）。
+     */
+    @PostMapping("/artifact-wiki-search")
+    public ResponseEntity<?> artifactWikiSearch(
+            @RequestBody JsonNode body,
+            @RequestHeader(value = "X-Internal-Auth", required = false) String internalAuth) {
+        return withAuth(internalAuth, body, () -> {
+            String artifactRef = requiredText(body, "artifact_ref", "artifact_ref 必填");
+            Object result = wikiService.search(artifactRef,
+                    text(body, "q"), text(body, "mode"), intOrNull(body.get("top_k")),
+                    text(body, "domain"), text(body, "username"),
+                    body.path("is_admin").asBoolean(false), text(body, "key_id"));
+            return ResponseEntity.ok(assembleQueryView(artifactRef, result));
+        });
+    }
+
+    /**
+     * wiki 单页整读。body: {artifact_ref, page_key, domain, username, is_admin,
+     * key_id?}——page_key 为明文页键（内网通道不经网关，编码由转发方负责）。
+     */
+    @PostMapping("/artifact-wiki-page")
+    public ResponseEntity<?> artifactWikiPage(
+            @RequestBody JsonNode body,
+            @RequestHeader(value = "X-Internal-Auth", required = false) String internalAuth) {
+        return withAuth(internalAuth, body, () -> {
+            String artifactRef = requiredText(body, "artifact_ref", "artifact_ref 必填");
+            String pageKey = requiredText(body, "page_key", "page_key 必填");
+            Object result = wikiService.readPage(artifactRef, pageKey,
+                    text(body, "domain"), text(body, "username"),
+                    body.path("is_admin").asBoolean(false), text(body, "key_id"));
+            return ResponseEntity.ok(assembleQueryView(artifactRef, result));
+        });
+    }
+
+    /**
+     * wiki 链接单跳。body: {artifact_ref, page_key, direction?, domain, username,
+     * is_admin, key_id?}——direction ∈ out（默认）/in。
+     */
+    @PostMapping("/artifact-wiki-links")
+    public ResponseEntity<?> artifactWikiLinks(
+            @RequestBody JsonNode body,
+            @RequestHeader(value = "X-Internal-Auth", required = false) String internalAuth) {
+        return withAuth(internalAuth, body, () -> {
+            String artifactRef = requiredText(body, "artifact_ref", "artifact_ref 必填");
+            String pageKey = requiredText(body, "page_key", "page_key 必填");
+            Object result = wikiService.links(artifactRef, pageKey, text(body, "direction"),
+                    text(body, "domain"), text(body, "username"),
+                    body.path("is_admin").asBoolean(false), text(body, "key_id"));
+            return ResponseEntity.ok(assembleQueryView(artifactRef, result));
+        });
+    }
+
     // ------------------------------------------------------------------ view assembly
 
     private Map<String, Object> assembleQueryView(String artifactRef, Object result) {
@@ -141,7 +210,85 @@ public class InternalArtifactController {
             out.put("aggregate", aggregate);
             return out;
         }
+        // ---- 63号批次4：wiki 四视图（kind=wiki 分流的新返回形态，缺分支即 500） ----
+        if (result instanceof WikiArtifactCard card) {
+            out.put("view", "wiki_artifact_card");
+            out.put("artifact_ref", card.artifactRef());
+            out.put("kind", card.kind());
+            out.put("title", card.title());
+            out.put("status", card.status());
+            out.put("revision", card.revision());
+            out.put("page_count", card.pageCount());
+            Map<String, Object> embedding = new LinkedHashMap<>();
+            embedding.put("total", card.embedding().total());
+            embedding.put("done", card.embedding().done());
+            embedding.put("pending", card.embedding().pending());
+            embedding.put("failed", card.embedding().failed());
+            out.put("embedding", embedding);
+            return out;
+        }
+        if (result instanceof WikiSearchView search) {
+            out.put("view", "wiki_search");
+            out.put("artifact_ref", search.artifactRef());
+            out.put("revision", search.revision());
+            out.put("degraded_dense", search.degradedDense());
+            out.put("results", search.results().stream().map(this::wikiHitView).toList());
+            return out;
+        }
+        if (result instanceof WikiPageView page) {
+            out.put("view", "wiki_page");
+            out.put("artifact_ref", page.artifactRef());
+            out.put("revision", page.revision());
+            out.put("page", wikiPageDetailView(page.page()));
+            Map<String, Object> links = new LinkedHashMap<>();
+            links.put("out", page.links().out().stream().map(this::wikiLinkView).toList());
+            links.put("in", page.links().in().stream().map(this::wikiLinkView).toList());
+            out.put("links", links);
+            return out;
+        }
+        if (result instanceof WikiLinksView links) {
+            out.put("view", "wiki_links");
+            out.put("artifact_ref", links.artifactRef());
+            out.put("revision", links.revision());
+            out.put("page_key", links.pageKey());
+            out.put("direction", links.direction());
+            out.put("links", links.links().stream().map(this::wikiLinkView).toList());
+            return out;
+        }
         throw new IllegalStateException("unknown artifact view for " + artifactRef);
+    }
+
+    private Map<String, Object> wikiHitView(WikiSearchHit hit) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("page_key", hit.pageKey());
+        out.put("title", hit.title());
+        out.put("unit_key", hit.unitKey());
+        out.put("snippet", hit.snippet());
+        out.put("score", hit.score());
+        out.put("channels", hit.channels());
+        return out;
+    }
+
+    private Map<String, Object> wikiPageDetailView(WikiPageDetail page) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("page_key", page.pageKey());
+        out.put("title", page.title());
+        out.put("page_type", page.pageType());
+        out.put("frontmatter", page.frontmatter());
+        out.put("body_md", page.bodyMd());
+        out.put("provenance", page.provenance());
+        out.put("origin", page.origin());
+        out.put("updated_at", page.updatedAt() == null ? null : page.updatedAt().toString());
+        return out;
+    }
+
+    private Map<String, Object> wikiLinkView(WikiLinkItem link) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("from_page", link.fromPage());
+        out.put("to_page", link.toPage());
+        out.put("anchor_text", link.anchorText());
+        out.put("status", link.status());
+        return out;
     }
 
     private Map<String, Object> columnView(ColumnSchema c) {

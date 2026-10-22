@@ -14,6 +14,7 @@ import com.coremasterkb.serving.structure.StructuredQueryService.WhereClause;
 import com.coremasterkb.serving.util.JsonUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -47,6 +48,9 @@ import java.util.Set;
  *   <li><b>翻页</b>：行=(sort_value, ordinal, row_key) keyset（默认序=ordinal+row_key）；
  *       发现=(updated_at DESC, artifact_id) keyset。cursor 是本服务签发的 base64url
  *       JSON，非法/与 order_by 不一致按 typed error 拒绝（不错页、不静默从头）。</li>
+ *   <li><b>wiki 分流</b>（63号批次4）：kind=wiki 在 DSL 之前分流到
+ *       {@link ArtifactWikiSearchService}（卡片/三通道检索/页面整读/链接单跳）——
+ *       本类表格分支一行不改，kind 的权威分流点在此。</li>
  * </ul>
  */
 @Service
@@ -67,9 +71,19 @@ public class ArtifactQueryService {
     private static final Set<String> NUMERIC_ONLY_OPS = StructuredQueryService.NUMERIC_ONLY_OPS;
 
     private final ArtifactToolMapper mapper;
+    /** 63号批次4：wiki 制品检索委托（null = 遗留单参构造——仅既有表格单测，wiki 分支不可达）。 */
+    private final ArtifactWikiSearchService wikiSearchService;
 
+    /** 遗留单参构造（既有表格单测）：wiki 分支不可达（kind 恒 stub 为 table）。 */
     public ArtifactQueryService(ArtifactToolMapper mapper) {
+        this(mapper, null);
+    }
+
+    @Autowired
+    public ArtifactQueryService(ArtifactToolMapper mapper,
+                                ArtifactWikiSearchService wikiSearchService) {
         this.mapper = mapper;
+        this.wikiSearchService = wikiSearchService;
     }
 
     // ------------------------------------------------------------------ DTO
@@ -136,6 +150,12 @@ public class ArtifactQueryService {
         }
 
         int revision = artifact.currentRevision() == null ? 0 : artifact.currentRevision();
+
+        // ---- 63号批次4 wiki 分流（纯插入：以下 table 路径一行不改） ----
+        if ("wiki".equals(artifact.kind())) {
+            return wikiQuery(artifactRef, queryNode, domain, username, isAdmin, keyId);
+        }
+
         RevisionRow snapshot = mapper.selectRevision(artifactId, revision);
         if (snapshot == null) {
             // published 事务保证 current_revision≥1 且快照同行落库——缺失即数据完整性问题
@@ -151,8 +171,9 @@ public class ArtifactQueryService {
                     artifact.kind(), schemas);
         }
         if (!"table".equals(artifact.kind())) {
+            // wiki 已在上文分流返回，此行只拦未来 kind——表格 DSL 专属
             throw StructureToolException.unsupportedOperation(
-                    "仅 table 类制品支持 DSL 查询（wiki 走来源挂载阅读）", Map.of());
+                    "仅 table 类制品支持 DSL 查询", Map.of("kind", String.valueOf(artifact.kind())));
         }
         if (columns.isEmpty()) {
             throw StructureToolException.structuredQueryUnavailable(
@@ -177,6 +198,63 @@ public class ArtifactQueryService {
             return aggregateMode(artifactRef, spec.aggregate(), criteria, table);
         }
         return rowsMode(artifactRef, spec, criteria, table);
+    }
+
+    // ------------------------------------------------------------------ wiki 分流（63号批次4）
+
+    /**
+     * wiki 制品 query dict 协议（批次4定稿，63号 §5.4）：
+     * query 缺省 → 卡片；{@code {"q":文本[, "mode", "top_k"]}} → 三通道检索；
+     * {@code {"page":页键}} → 页面整读；{@code {"links":页键[, "direction"]}} →
+     * 链接单跳；其余键 → unsupported_operation（中文说明 wiki 协议）。
+     * 按上述顺序分发，携带多余键不报错（MCP 侧 pydantic 已保证 query 是 dict）。
+     */
+    private Object wikiQuery(String artifactRef, JsonNode queryNode, String domain,
+                             String username, boolean isAdmin, String keyId) {
+        if (wikiSearchService == null) {
+            // 遗留单参构造（仅既有表格单测）——生产装配恒走双参构造
+            throw new IllegalStateException("wiki_search_service_not_wired");
+        }
+        if (queryNode == null || queryNode.isNull()) {
+            return wikiSearchService.card(artifactRef, domain, username, isAdmin, keyId);
+        }
+        JsonNode q = queryNode.get("q");
+        if (q != null && q.isTextual()) {
+            return wikiSearchService.search(artifactRef, q.asText(),
+                    textOrNull(queryNode, "mode"), intOrNull(queryNode, "top_k"),
+                    domain, username, isAdmin, keyId);
+        }
+        JsonNode page = queryNode.get("page");
+        if (page != null && page.isTextual()) {
+            return wikiSearchService.readPage(artifactRef, page.asText(),
+                    domain, username, isAdmin, keyId);
+        }
+        JsonNode linksNode = queryNode.get("links");
+        if (linksNode != null && linksNode.isTextual()) {
+            return wikiSearchService.links(artifactRef, linksNode.asText(),
+                    textOrNull(queryNode, "direction"), domain, username, isAdmin, keyId);
+        }
+        throw StructureToolException.unsupportedOperation(
+                "wiki 制品 query 仅支持 {\"q\":搜索文本[,\"mode\",\"top_k\"]} / "
+                        + "{\"page\":页键} / {\"links\":页键[,\"direction\":\"out|in\"]}，收到键: "
+                        + keysOf(queryNode),
+                Map.of("allowed", List.of("q", "mode", "top_k", "page", "links", "direction")));
+    }
+
+    private static String textOrNull(JsonNode node, String field) {
+        JsonNode v = node.get(field);
+        return v != null && v.isTextual() && !v.asText().isBlank() ? v.asText() : null;
+    }
+
+    private static Integer intOrNull(JsonNode node, String field) {
+        JsonNode v = node.get(field);
+        return v != null && v.isNumber() ? v.asInt() : null;
+    }
+
+    private static String keysOf(JsonNode queryNode) {
+        List<String> keys = new ArrayList<>();
+        queryNode.fieldNames().forEachRemaining(keys::add);
+        return String.join(",", keys);
     }
 
     /** web 通道（无钥匙开放集约束——keyId=null）。 */

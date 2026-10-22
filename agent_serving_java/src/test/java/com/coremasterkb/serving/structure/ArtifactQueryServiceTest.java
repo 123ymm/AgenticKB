@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -564,6 +565,119 @@ class ArtifactQueryServiceTest {
                 .isInstanceOf(StructureToolException.class)
                 .extracting(e -> ((StructureToolException) e).code())
                 .isEqualTo("result_too_large");
+    }
+
+    // ---- wiki 分流（63号批次4——query dict 协议路由；表格路径回归由上方既有用例守护） ----
+
+    @Nested
+    @DisplayName("wiki 分流")
+    class WikiDispatch {
+
+        private ArtifactWikiSearchService wikiSvc;
+
+        @BeforeEach
+        void setUpWiki() {
+            wikiSvc = mock(ArtifactWikiSearchService.class);
+            service = new ArtifactQueryService(mapper, wikiSvc);
+            // 本域已发布 wiki、rev2、成员 alice 可见（table 用例的 kind="table" 桩被覆写）
+            when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false, null))
+                    .thenReturn(new ArtifactToolMapper.ArtifactVisibleRow(
+                            ID, DOMAIN, "wiki", 2, "运维知识 wiki", null, null));
+        }
+
+        @Test
+        @DisplayName("query 缺省 → wiki 卡片（selectRevision 零调用——wiki 自己收口）")
+        void nullQueryRoutesToCard() {
+            ArtifactWikiSearchService.WikiArtifactCard card =
+                    new ArtifactWikiSearchService.WikiArtifactCard(
+                            "wiki", REF, "运维知识 wiki", "published", 2, 12,
+                            new ArtifactWikiSearchService.WikiEmbeddingProgress(30, 28, 1, 1));
+            when(wikiSvc.card(REF, DOMAIN, "alice", false, null)).thenReturn(card);
+
+            Object out = service.query(REF, null, DOMAIN, "alice", false);
+
+            assertThat(out).isSameAs(card);
+            // wiki 分流在 selectRevision 之前——快照读取由 wiki 服务自理
+            verify(mapper, never()).selectRevision(any(), anyInt());
+        }
+
+        @Test
+        @DisplayName("query={\"q\",mode,top_k} → search 参数透传（mode/top_k 缺省 null）")
+        void qKeyRoutesToSearch() {
+            when(wikiSvc.search(eq(REF), eq("接口报错"), isNull(), isNull(),
+                    eq(DOMAIN), eq("alice"), eq(false), isNull()))
+                    .thenReturn(new ArtifactWikiSearchService.WikiSearchView(
+                            REF, 2, false, List.of()));
+
+            Object out = service.query(REF, query("{\"q\":\"接口报错\"}"),
+                    DOMAIN, "alice", false);
+
+            assertThat(out).isInstanceOf(ArtifactWikiSearchService.WikiSearchView.class);
+            verify(wikiSvc).search(REF, "接口报错", null, null, DOMAIN, "alice", false, null);
+
+            // mode/top_k 逐参透传
+            service.query(REF, query("{\"q\":\"x\",\"mode\":\"dense\",\"top_k\":7}"),
+                    DOMAIN, "alice", false);
+            verify(wikiSvc).search(REF, "x", "dense", 7, DOMAIN, "alice", false, null);
+        }
+
+        @Test
+        @DisplayName("query={\"page\"} → readPage；query={\"links\",direction} → links")
+        void pageAndLinksKeysRoute() {
+            ArtifactWikiSearchService.WikiPageView page =
+                    new ArtifactWikiSearchService.WikiPageView(REF, 2, null, null);
+            when(wikiSvc.readPage(REF, "home", DOMAIN, "alice", false, null)).thenReturn(page);
+            assertThat(service.query(REF, query("{\"page\":\"home\"}"), DOMAIN, "alice", false))
+                    .isSameAs(page);
+
+            ArtifactWikiSearchService.WikiLinksView links =
+                    new ArtifactWikiSearchService.WikiLinksView(REF, 2, "home", "in", List.of());
+            when(wikiSvc.links(REF, "home", "in", DOMAIN, "alice", false, null)).thenReturn(links);
+            assertThat(service.query(REF, query("{\"links\":\"home\",\"direction\":\"in\"}"),
+                    DOMAIN, "alice", false)).isSameAs(links);
+            // direction 缺省 null（服务内归一为 out）
+            service.query(REF, query("{\"links\":\"home\"}"), DOMAIN, "alice", false);
+            verify(wikiSvc).links(REF, "home", null, DOMAIN, "alice", false, null);
+        }
+
+        @Test
+        @DisplayName("未知键（含表格 DSL 键）→ unsupported_operation（中文说明 wiki 协议 + allowed）")
+        void unknownKeysRejectedWithProtocolHint() {
+            assertThatThrownBy(() -> service.query(REF,
+                    query("{\"where\":[{\"field\":\"型号\",\"op\":\"eq\",\"value\":\"1\"}]}"),
+                    DOMAIN, "alice", false))
+                    .isInstanceOf(StructureToolException.class)
+                    .hasMessageContaining("wiki 制品 query")
+                    .satisfies(e -> {
+                        StructureToolException ste = (StructureToolException) e;
+                        assertThat(ste.code()).isEqualTo("unsupported_operation");
+                        assertThat(ste.details()).containsKey("allowed");
+                        assertThat((List<?>) ste.details().get("allowed"))
+                                .extracting(Object::toString)
+                                .contains("q", "page", "links", "direction");
+                    });
+            assertThatThrownBy(() -> service.query(REF, query("{\"foo\":\"bar\"}"),
+                    DOMAIN, "alice", false))
+                    .isInstanceOf(StructureToolException.class)
+                    .hasMessageContaining("foo");
+        }
+
+        @Test
+        @DisplayName("表格回归：kind=table 时 wiki 分支不可达——DSL 照常（聚合正常返回）")
+        void tableKindStillUsesDsl() {
+            when(mapper.selectVisibleArtifact(ID, DOMAIN, "alice", false, null))
+                    .thenReturn(visible(3));
+            when(mapper.aggregateArtifactRows(eq(ID), eq(3), anyList(), eq("count"),
+                    isNull(), eq(false)))
+                    .thenReturn(new ArtifactToolMapper.AggregateValueRow(120L, 120L));
+
+            Object out = service.query(REF, query("{\"aggregate\":{\"op\":\"count\"}}"),
+                    DOMAIN, "alice", false);
+
+            assertThat(out).isInstanceOf(ArtifactQueryService.ArtifactAggregate.class);
+            verify(wikiSvc, org.mockito.Mockito.never())
+                    .search(any(), any(), any(), any(), any(), any(), anyBoolean(), any());
+        }
     }
 
     // ---- mapper XML 文本契约（对齐 StructureToolMapperXmlTest 口径） ------------------
