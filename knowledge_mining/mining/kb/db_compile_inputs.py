@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from array import array
 from datetime import datetime, timezone
 from typing import Any
 
@@ -79,6 +80,18 @@ _DIR_FILTER = """(
         OR EXISTS (SELECT 1 FROM unnest(%(dirs)s::text[]) AS p(dir)
                    WHERE strpos(dp.directory_path, dir || '/') = 1)
     )"""
+
+#: collect_units fetchmany 流式批大小（决策2 ③：分批物化防峰值）
+_FETCH_BATCH = 2000
+
+
+def decode_embedding_text(text: str | None) -> array | None:
+    """pgvector 文本形态 ``"[0.1,0.2,...]"`` → ``array('f')``（决策2 ②：
+    4KB/条而非 list[float] ~32KB/条——30k 单元护栏内的内存账）。None 直传
+    （LEFT JOIN 无向量单元）。"""
+    if text is None:
+        return None
+    return array("f", map(float, text.strip("[]").split(",")))
 
 
 def _json(obj: Any) -> str:
@@ -261,6 +274,69 @@ class CompileInputsDB:
                 {"kb": kb_id},
             )
             return int((await cur.fetchone())["n"])  # type: ignore[index]
+
+    # ------------------------------------------------------------ 编译取材
+
+    async def collect_units(
+        self, kb_id: str, directories: list[str],
+    ) -> list[dict[str, Any]]:
+        """编译取材（63号 §4.2 ①，Task 3 `_run_prepare` 唯一调用方）：kb
+        当前快照范围内检索单元全量行。
+
+        口径与 current_fingerprint **完全同构**（dirty 语义闭环）：
+        _CURRENT_SNAPSHOT_CTE（单 kb 版）→ u JOIN cur → _DIR_PATH_LATERAL
+        目录归属（INNER JOIN LATERAL——快照无 link 行的孤儿单元不计，与指纹
+        计数口径一致）→ LEFT JOIN asset_retrieval_embeddings_v2（**LEFT** 保
+        住无向量单元——聚类侧旁路到未聚类池，取材完整）→ _DIR_FILTER（空
+        目录数组=全库不拼）。ORDER BY snapshot_id, ordinal, representation_id
+        ——**确定性铁律**（聚类种子取首遇，输入序固定输出才稳定）。
+
+        每行：{representation_id, snapshot_id, content_text, structural_context,
+        section_ref（015 迁移 ALTER 补列，现库恒在）, ordinal, dense_eligible,
+        directory_path, embedding(array('f')|None), **kb_id**（Python 侧回填
+        ——多源合并时归属账，决策6 provenance 的 (kb_id, snapshot_id) 分组键）}。
+        向量解码 decode_embedding_text（array('f')，决策2 ②）。
+
+        量级：cursor.fetchmany(_FETCH_BATCH) 流式聚合（决策2 ③）；最终仍全量
+        进内存——护栏在编译 start（Σ unit_count > 30000 → 422），本方法信任
+        调用方。
+        """
+        dirs = self._norm_dirs(directories)
+        params: dict[str, Any] = {"kb": kb_id}
+        where = ""
+        if dirs:
+            params["dirs"] = dirs
+            where = f"WHERE {_DIR_FILTER}"
+        rows: list[dict[str, Any]] = []
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                f"""{_CURRENT_SNAPSHOT_CTE}
+                    SELECT u.representation_id, u.snapshot_id, u.content_text,
+                           u.structural_context, u.section_ref, u.ordinal,
+                           u.dense_eligible, dp.directory_path,
+                           e.embedding_vector_vec::text AS embedding_text
+                    FROM asset_retrieval_units_v2 u
+                    JOIN cur ON cur.document_snapshot_id = u.snapshot_id
+                    JOIN LATERAL ({_DIR_PATH_LATERAL}) dp ON TRUE
+                    LEFT JOIN asset_retrieval_embeddings_v2 e
+                           ON e.representation_id = u.representation_id
+                          AND e.snapshot_id = u.snapshot_id
+                          AND e.dimension = 1024
+                    {where}
+                    ORDER BY u.snapshot_id, u.ordinal, u.representation_id""",
+                params,
+            )
+            while True:
+                batch = await cur.fetchmany(_FETCH_BATCH)
+                if not batch:
+                    break
+                for r in batch:
+                    d = dict(r)
+                    d["kb_id"] = kb_id
+                    d["embedding"] = decode_embedding_text(
+                        d.pop("embedding_text"))
+                    rows.append(d)
+        return rows
 
     # ------------------------------------------------------------ kb 元数据
 

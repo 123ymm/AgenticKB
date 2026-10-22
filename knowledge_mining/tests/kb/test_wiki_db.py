@@ -4,14 +4,16 @@
 no_pending_changes+wiki_no_pages+stale 令牌）/ rollback 纯指针（rev0 草稿
 保留）/ discard_draft / ensure_draft checkout（不推进 updated_at）/ units
 投影（H2 分节、幂等重投、1024 维向量写入）/ links 维护（recompute 删目标页
-落 broken + alias 边归一 canonical）/ diff 六键。本机无 PG 时整个模块在
-收集期跳过（与 KB_RUN_POSTGRES_ACCEPTANCE 验收门同款门槛，跑法见
-tests/conftest.py 的 control_pool/domain_pool 注释）。
+落 broken + alias 边归一 canonical）/ diff 六键 / 来源绑定与指纹（批次3
+T1）/ collect_units 编译取材（批次3 T2：列/scope 过滤/向量解码/排序）。本机
+无 PG 时整个模块在收集期跳过（与 KB_RUN_POSTGRES_ACCEPTANCE 验收门同款
+门槛，跑法见 tests/conftest.py 的 control_pool/domain_pool 注释）。
 """
 from __future__ import annotations
 
 import os
 import uuid
+from array import array
 
 import pytest
 
@@ -445,13 +447,18 @@ async def _seed_build(
     async_pool, *, kb_id: str, document_id: str, units: int,
     created_at: str = "2026-10-22T00:00:00+00:00",
     selection_status: str = "active",
+    with_embeddings: int = 0,
 ) -> str:
     """直插一份 validated build + 文档快照 + snapshot link + N 个 v2 检索单元
     （夹具形态照 test_stats_queries._build_snapshot；units 走
     asset_retrieval_units_v2——编译取材只读 L1 v2 产出；link 行是 scope 过滤
     的目录归属来源——_DIR_PATH_LATERAL 经 asset_document_snapshot_links 取
-    directory_path）。返回 snapshot_id。"""
+    directory_path）。ordinal=i / section_ref=s-{i}（取材排序列断言锚点，
+    section_ref 由 015 迁移 ALTER 补列）；with_embeddings>0 时给前 N 个单元
+    直插 1024 维向量行（embedding_id 沿生产 `{snapshot}:{rep}` 确定格式；
+    向量首分量 0.5 其余 0.001——array('f') 解码断言锚点）。返回 snapshot_id。"""
     snap_id, build_id = uuid.uuid4().hex, uuid.uuid4().hex
+    vec_text = "[0.5," + ",".join(["0.001"] * 1023) + "]"
     async with async_pool.connection() as conn:
         await conn.execute(
             """INSERT INTO asset_document_snapshots
@@ -481,11 +488,21 @@ async def _seed_build(
                 """INSERT INTO asset_retrieval_units_v2
                    (representation_id, snapshot_id, representation_type,
                     content_type, content_text, target_type, target_ref,
-                    canonical_evidence_id)
+                    canonical_evidence_id, ordinal, section_ref)
                    VALUES (%s, %s, 'raw_text', 'text/plain', %s,
-                           'raw_segment', %s, %s)""",
+                           'raw_segment', %s, %s, %s, %s)""",
                 (f"ru-{snap_id[:16]}-{i}", snap_id, f"单元{i}",
-                 f"seg-{i}", f"ev-{i}"))
+                 f"seg-{i}", f"ev-{i}", i, f"s-{i}"))
+        for i in range(with_embeddings):
+            await conn.execute(
+                """INSERT INTO asset_retrieval_embeddings_v2
+                   (embedding_id, snapshot_id, representation_id, strategy,
+                    policy_version, provider, model, model_version, dimension,
+                    input_hash, embedding_vector_vec)
+                   VALUES (%s, %s, %s, 'dense', 'test', 'test', 'test', '1',
+                           1024, %s, %s::vector)""",
+                (f"{snap_id}:ru-{snap_id[:16]}-{i}", snap_id,
+                 f"ru-{snap_id[:16]}-{i}", uuid.uuid4().hex, vec_text))
     return snap_id
 
 
@@ -676,3 +693,95 @@ async def test_update_batch_details_merge_and_latest_compile_batch(
     assert await inputs.latest_compile_batch("art_missing") is None
     assert await inputs.update_batch_details(
         "bat_missing", {"state": "failed"}) is False
+
+
+# --------------------------------------------- 编译取材（63号批次3 Task 2）
+
+async def test_collect_units_columns_scope_and_ordering(async_pool) -> None:
+    """collect_units（编译取材）：返回列齐全（section_ref=015 补列 /
+    kb_id Python 侧回填）+ scope 过滤三态（精确命中/前缀子目录/空数组=全库；
+    不相关目录=[]）+ LEFT JOIN 无向量单元保行（embedding=None）+ 有向量单元
+    array('f') 1024 维解码 + ORDER BY (snapshot_id, ordinal,
+    representation_id) 排序确定性（两次调用逐行相等——聚类输入序根基）。"""
+    inputs = CompileInputsDB(async_pool)
+    kbdb, kb_id = await _seed_kb(async_pool)
+    doc_plan = await _add_doc(kbdb, kb_id, directory_path="方案/云核")
+    doc_root = await _add_doc(kbdb, kb_id, directory_path="")
+    snap_plan = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_plan,
+        units=3, with_embeddings=1)
+    snap_root = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_root, units=2)
+
+    # 空目录数组 = 全库；两次调用逐行相等（排序确定性）
+    rows = await inputs.collect_units(kb_id, [])
+    assert rows == await inputs.collect_units(kb_id, [])
+    assert len(rows) == 5
+    keys = [(r["snapshot_id"], r["ordinal"], r["representation_id"])
+            for r in rows]
+    assert keys == sorted(keys)
+
+    plan_rows = [r for r in rows if r["snapshot_id"] == snap_plan]
+    assert len(plan_rows) == 3
+    first = plan_rows[0]
+    assert first["representation_id"] == f"ru-{snap_plan[:16]}-0"
+    assert first["content_text"] == "单元0"
+    assert first["structural_context"] == ""
+    assert first["section_ref"] == "s-0"
+    assert first["ordinal"] == 0
+    assert first["dense_eligible"] is True
+    assert first["directory_path"] == "方案/云核"
+    assert first["kb_id"] == kb_id
+
+    # 首单元带向量：pgvector 文本 → array('f') 1024 维（决策2 ②；f32 舍入
+    # 用 approx）
+    emb = first["embedding"]
+    assert isinstance(emb, array) and emb.typecode == "f"
+    assert len(emb) == 1024
+    assert emb[0] == pytest.approx(0.5, rel=1e-6)
+    assert emb[1] == pytest.approx(0.001, rel=1e-6)
+    # 无向量单元（plan 其余 + root 全部）：LEFT JOIN 保行、embedding=None
+    assert all(r["embedding"] is None for r in plan_rows[1:])
+    root_rows = [r for r in rows if r["snapshot_id"] == snap_root]
+    assert len(root_rows) == 2
+    assert all(r["embedding"] is None and r["directory_path"] == ""
+               for r in root_rows)
+
+    # scope 精确命中：只取 plan 快照 3 单元（root 快照整体出局）
+    exact = await inputs.collect_units(kb_id, ["方案/云核"])
+    assert {r["snapshot_id"] for r in exact} == {snap_plan}
+    assert all(r["directory_path"] == "方案/云核" for r in exact)
+    assert all(r["kb_id"] == kb_id for r in exact)
+    # 前缀语义：绑定 "方案" 命中 "方案/云核" 子目录——与精确命中同集同序
+    prefix = await inputs.collect_units(kb_id, ["方案"])
+    assert prefix == exact
+    # 不相关目录 → 空
+    assert await inputs.collect_units(kb_id, ["不存在"]) == []
+
+
+async def test_collect_units_follows_latest_snapshot_only(async_pool) -> None:
+    """collect_units 快照口径与 current_fingerprint 同构：重挖取最新 build
+    快照（旧快照单元不残留）；撤回（selection_status='removed'）→ 该文档
+    单元整体出局——取材与指纹/dirty 判定看同一份语料。"""
+    inputs = CompileInputsDB(async_pool)
+    kbdb, kb_id = await _seed_kb(async_pool)
+    doc = await _add_doc(kbdb, kb_id, directory_path="方案/云核")
+    snap1 = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc, units=3)
+    assert len(await inputs.collect_units(kb_id, [])) == 3
+
+    # 重挖：更晚的 validated build 换新快照（2 单元）→ 只见新快照
+    snap2 = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc, units=2,
+        created_at="2026-10-22T01:00:00+00:00")
+    rows = await inputs.collect_units(kb_id, [])
+    assert {r["snapshot_id"] for r in rows} == {snap2}
+    assert all(r["representation_id"].startswith(f"ru-{snap2[:16]}")
+               for r in rows)
+    assert snap1 != snap2
+
+    # 撤回（最新 build 的快照 selection_status='removed'）→ 无当前快照
+    await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc, units=7,
+        created_at="2026-10-22T02:00:00+00:00", selection_status="removed")
+    assert await inputs.collect_units(kb_id, []) == []
