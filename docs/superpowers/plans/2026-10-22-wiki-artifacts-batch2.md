@@ -267,3 +267,23 @@ class WikiService:
 3. 删除闭环：硬删后四张 wiki 表零残留。
 4. 表格制品全路径行为不变（既有测试全绿）。
 5. 门禁：kb 套件零新增失败；前端 build 0 错；vitest 全绿。
+
+---
+
+## 批次2 完成记录（2026-10-22 定稿）
+
+**提交链**（worktree-wiki-artifact-mvp，基于 f41e0a8）：ca10551 计划 → 7c4a213 计划两轮审查修订 → ecd80f6 T1 WikiDB（929 行：纯函数五件套/页面 CRUD 单事务乐观锁+touch/链接/units 投影 vector 文本字面量/生命周期四事务）→ 4fef59a T2 delete 级联四表+ArtifactService kind 分支点（Stub 钉契约）→ 04a262d T3 WikiService/WikiLifecycle/六端点/embedding 后置 → 86a4074 T3 修复（后台任务强引用集/wiki_no_pages→409 归一/码表收敛/日志幂等键）→ f8d3b9f T4 前端 API+编辑器（双轨 frontmatter）→ 9a636fd T5 阅读器+拆守卫+发布对话框单位 kind 化 → d97340e T5 修复（链接标记 trim/括号口径对齐后端）。
+
+**门禁**：Python 全量 2087 passed 与 merge-base 24c43d4 test-ID 级差分**零新增失败**（两侧失败集 298 ID 完全相等；kb 套件 +55 passed）；前端 588 全绿（92 文件）+ `npm run build` 零类型错。审查链：每任务规格+质量两审共 10 轮+3 轮修复迭代（计划审查 2 CRITICAL+7 HIGH 全修）。
+
+**关键契约（批次3/4 依赖，勿破坏）**：REST 信封 `{pages}`/`{links}`/`{revision,units}`；page_key URL 走 hex（网关 % 400 铁律），links page_key 走明文 query；DELETE 锁令牌随 body；错误码 wiki 路由表九码 + 发布族真源在 routes/artifacts._map_error（wiki_no_pages→409）；幂等键 `wiki-unit:v1:{artifact_id}:{revision}:sha256(内容)[:24]`；embedding 后置 async 协程+仅 LlmTaskClient 三调用下 to_thread 线程+`_EMBED_TASKS` 强引用集。
+
+**实现决策（对设计的细化）**：①units 按版本保留不删旧版（回滚即可用，检索按 current 过滤无脏读，硬删级联兜底）；②链接每次页写**全量重算**（compute_page_edges+逐页 replace——alias 归一 canonical 与 broken 全局一致的必要条件，200 页上限 O(N²) 已注 TODO replace_links_bulk）；③阅读器 `[[src:id]]` 角标复制 unit_id，回跳库原文=P1；④origin 人工写入口恒 manual（machine 只归批次3编译管线）。
+
+### 批次3 接手注意事项
+
+1. **sources 表零代码**：kb_artifact_sources 仅 DDL+级联删除，CRUD/绑定管理/指纹脏标记全归批次3（kb 侧清退时按 kb_id 反查用 idx_kb_artifact_sources_kb）。
+2. **create_batch 通道未放行**：db_artifacts.py create_batch L1473 仍只允许 upload/kb_import——批次3编译批次落账前必须加 wiki_compile。
+3. **编译管线挂载点**：WikiLifecycle.publish 已在发布后挂 project_units+_spawn_embed——批次3编译产物落 rev0 后走既有发布链即得 units/向量，勿另起炉灶；LLM 调用复用 retrieval_projection/llm_generation.py 的 GenerationClient 形态。
+4. **真库验收须 py≥3.12**：test_artifacts_db.py:50 既有 f-string 反斜杠在 py3.11 收集期 SyntaxError（a74b940 容器=3.11，跑 kb 套件须 --continue-on-collection-errors；PG 门控用例集 test_wiki_db.py 等 11 用例在 3.11 连收集都过不了，真库预演用高版本镜像）。
+5. 良性遗留：ordinal 删除后 count+1 可能撞已有值（排序 (ordinal,page_key) 无害，编辑器 UX 后续可优化）；PAGE_TYPES 徽标表 Editor/Reader 两份（编译页落地时抽共享）；WikiDB.recompute_link_statuses 无生产调用方（保留 API）；前端全并行 vitest 高负载时有漂移失败（隔离复跑稳定，maxWorkers=2 全绿）；WikiPage.aliases 类型声明宽于 getWikiPage 实际返回（阅读器已正确用 list metas）。
