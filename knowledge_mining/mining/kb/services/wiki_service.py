@@ -54,6 +54,11 @@ PAGE_TYPES = ("topic", "contradiction", "open_question", "glossary")
 _EMBED_BATCH = 32
 _EMBED_MAX_ATTEMPTS = 3
 
+#: 来源绑定 scope 输入上限（审查硬化：防脏输入撑爆指纹/取材 SQL 的 =ANY
+#: 数组——与 kb_id 长度上限对称；超限 422 invalid_scope）。
+_MAX_DIRECTORIES = 50
+_MAX_DIRECTORY_CHARS = 500
+
 #: (artifact_id, revision) 全局防重入——发布后置与 status 自愈共用同一集合
 #: （status() 的 O(1) 查询面；清理只在 _embed_units 的 finally）。
 _EMBED_INFLIGHT: set[tuple[str, int]] = set()
@@ -567,8 +572,10 @@ class WikiService:
     ) -> list[dict[str, Any]]:
         """绑定列表（ROLE_RUNTIME_READ——批次3 MVP 口径：制品成员即协作者，
         看得到绑定行）。每行附：
-        - dirty：fingerprint 与 current_fingerprint 的快照集不一致或从未编译
-          → True（_is_source_dirty）；
+        - dirty：**绑定范围内**编译语料是否变化——行自身 scope.directories
+          传给 current_fingerprint（scope 感知口径）与 fingerprint 比对
+          （_is_source_dirty）；不可读行 dirty=None（审查裁定：既省掉指纹
+          重查询也不向失去库权限的成员泄露库内容变化信号，前端显示"未知"）；
         - kb_title/unreadable：kb 可读判定（KbDB.is_visible 谓词）通过才给
           标题，否则 kb_title=None + unreadable=True（绑定行仍可见，只隐库
           元数据——绑定后失去读权的行不整行消失）。"""
@@ -579,8 +586,18 @@ class WikiService:
         out: list[dict[str, Any]] = []
         for row in rows:
             kb_id = str(row["kb_id"])
-            current = await self._inputs.current_fingerprint(kb_id)
             readable = await self._inputs.kb_readable(kb_id, str(user["id"]))
+            if readable:
+                scope = row.get("scope") or {}
+                directories = [str(d) for d in (scope.get("directories") or [])]
+                current = await self._inputs.current_fingerprint(
+                    kb_id, directories)
+                dirty: bool | None = _is_source_dirty(
+                    row.get("fingerprint"), current)
+                kb_title = titles.get(kb_id)
+            else:
+                dirty = None
+                kb_title = None
             out.append({
                 "kb_id": kb_id,
                 "scope": row.get("scope") or {},
@@ -588,8 +605,8 @@ class WikiService:
                 "status": row.get("status"),
                 "created_by": row.get("created_by"),
                 "created_at": row.get("created_at"),
-                "dirty": _is_source_dirty(row.get("fingerprint"), current),
-                "kb_title": (titles.get(kb_id) if readable else None),
+                "dirty": dirty,
+                "kb_title": kb_title,
                 "unreadable": not readable,
             })
         return out
@@ -608,9 +625,13 @@ class WikiService:
             user, artifact_id, *ROLE_DESIGN)
         _check_freshness(artifact, expected_updated_at)
         # scope 契约（决策6）：directories 必须是字符串数组且无空串（纯空白
-        # 视同空串拒收；元素 strip 归一后落库）
+        # 视同空串拒收；元素 strip 归一后落库）；量上限防脏输入撑爆指纹/
+        # 取材 SQL 的 =ANY 数组（审查硬化：与 kb_id 长度上限对称）
         if not isinstance(directories, list) or not all(
                 isinstance(d, str) and d.strip() for d in directories):
+            raise WikiError("invalid_scope")
+        if len(directories) > _MAX_DIRECTORIES or any(
+                len(d) > _MAX_DIRECTORY_CHARS for d in directories):
             raise WikiError("invalid_scope")
         kb_id = str(kb_id).strip()
         if not kb_id:

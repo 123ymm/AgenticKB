@@ -15,9 +15,11 @@ collect_units 取材。风格契约与 db_wiki.py / db_artifacts.py 一致：TEX
   fingerprint 保留——它是「上次编译语料」的账，KB 在解绑期间变化时 dirty
   对比（service 层）自然判脏，不需清零。
 - current_fingerprint 口径 = kb/db.KbDB._CURRENT_SNAPSHOT_CTE 的单 kb 同构
-  版（latest：每文档最近 validated/published build 快照 → cur：active），每
-  快照一次 COUNT 聚合（LEFT JOIN 保零单元快照成行）；该查询同时是编译 start
-  的量级护栏数据源（Σ unit_count，批次3 决策2）。
+  版（latest：每文档最近 validated/published build 快照 → cur：active）；
+  **scope 感知（审查裁定）**：快照集恒为 kb 全量当前快照，unit_count 按
+  绑定 directories 过滤（_DIR_PATH_LATERAL+_DIR_FILTER——空数组=全库）。
+  语义 dirty=绑定范围内编译语料发生变化；该查询同时是编译 start 的量级
+  护栏数据源（Σ unit_count，批次3 决策2）。
 - kb 可读判定不另起谓词：组合 KbDB.is_visible（谓词唯一真相源——site admin
   全通 / 域绑定 + 域内 public / owner / 成员分支一个不少；防第三次判定不对
   称坑）。不可读由 service 层统一翻 404 反探测。
@@ -53,6 +55,30 @@ WITH latest AS (
     FROM latest
     WHERE selection_status = 'active'
 )"""
+
+#: 单元目录归属 LATERAL（**T2 collect_units 复用同一形态**）：unit.snapshot_id
+#: → 所属文档的 directory_path（asset_document_snapshot_links⋈asset_documents）。
+#: 快照可被多文档共享（同内容多文档，见 projector.py representation_id 锚定
+#: 注释），ORDER BY d.id LIMIT 1 取确定性归属；快照无 link 行（孤儿，理论
+#: 不可达）时 LATERAL 无行——目录过滤下该单元不计（无法证明在 scope 内）。
+_DIR_PATH_LATERAL = """
+    SELECT d.directory_path
+    FROM asset_document_snapshot_links l
+    JOIN asset_documents d ON d.id = l.document_id
+    WHERE l.document_snapshot_id = u.snapshot_id
+    ORDER BY d.id
+    LIMIT 1
+"""
+
+#: scope 目录过滤谓词（directories 非空时拼入；空数组=全库不拼——**T2
+#: collect_units 复用同一形态**）：目录精确命中或为其子目录（strpos=1 前缀
+#: 判定而非 LIKE 'dir/%'——无 LIKE 元字符 %/_ 转义面，用户目录路径可含任意
+#: 字符）。
+_DIR_FILTER = """(
+        dp.directory_path = ANY(%(dirs)s::text[])
+        OR EXISTS (SELECT 1 FROM unnest(%(dirs)s::text[]) AS p(dir)
+                   WHERE strpos(dp.directory_path, dir || '/') = 1)
+    )"""
 
 
 def _json(obj: Any) -> str:
@@ -165,22 +191,51 @@ class CompileInputsDB:
 
     # ------------------------------------------------------------ 指纹观测
 
-    async def current_fingerprint(self, kb_id: str) -> dict[str, Any]:
-        """kb 当前语料指纹（批次3 决策6 契约形状）：
-        ``{"snapshots": [{"snapshot_id", "unit_count"}], "computed_at": iso}``。
-        口径见模块 docstring（单 kb 当前快照 CTE + 每快照一次 COUNT 聚合，
-        LEFT JOIN 保零单元快照成行）；kb 无就绪快照 → snapshots=[]。"""
+    @staticmethod
+    def _norm_dirs(directories: list[str] | None) -> list[str]:
+        """scope 目录归一：strip / 去空 / 去重排序（排序保幂等查询计划稳定）。"""
+        return sorted({str(d).strip() for d in (directories or [])
+                       if str(d).strip()})
+
+    async def current_fingerprint(
+        self, kb_id: str, directories: list[str],
+    ) -> dict[str, Any]:
+        """kb 当前语料指纹（批次3 决策6 契约形状，**scope 感知——T2 契约就此
+        定死**）：``{"snapshots": [{"snapshot_id", "unit_count"}],
+        "computed_at": iso}``。
+
+        语义：**dirty = 绑定范围内编译语料发生变化**——快照集恒走
+        _CURRENT_SNAPSHOT_CTE（kb 全量当前快照，含 scope 外的零计数行——
+        dirty 对比两侧同形）；unit_count 按 directories 过滤（精确命中或子
+        目录前缀，_DIR_PATH_LATERAL+_DIR_FILTER；空数组=全库不过滤）。
+        编译侧（T3 _run_prepare）落库指纹必须用**同参调用**的结果——两侧
+        同形，scope 外的库变化不误脏、scope 内变化必脏。
+        kb 无就绪快照 → snapshots=[]。"""
+        dirs = self._norm_dirs(directories)
+        params: dict[str, Any] = {"kb": kb_id}
+        if dirs:
+            params["dirs"] = dirs
+            # 标量子查询按 cur 行逐快照求值（idx_aru_v2_snapshot 收敛扫描面）；
+            # JOIN LATERAL 内联——scope 外单元不计，快照无 scope 内单元得 0
+            count_sql = f"""(
+                    SELECT COUNT(*)
+                    FROM asset_retrieval_units_v2 u
+                    JOIN LATERAL ({_DIR_PATH_LATERAL}) dp ON TRUE
+                    WHERE u.snapshot_id = cur.document_snapshot_id
+                      AND {_DIR_FILTER})"""
+        else:
+            count_sql = """(
+                    SELECT COUNT(*)
+                    FROM asset_retrieval_units_v2 u
+                    WHERE u.snapshot_id = cur.document_snapshot_id)"""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 f"""{_CURRENT_SNAPSHOT_CTE}
                     SELECT cur.document_snapshot_id AS snapshot_id,
-                           COUNT(u.representation_id) AS unit_count
+                           {count_sql} AS unit_count
                     FROM cur
-                    LEFT JOIN asset_retrieval_units_v2 u
-                           ON u.snapshot_id = cur.document_snapshot_id
-                    GROUP BY cur.document_snapshot_id
                     ORDER BY cur.document_snapshot_id""",
-                {"kb": kb_id},
+                params,
             )
             rows = [dict(r) for r in await cur.fetchall()]
         return {
@@ -193,7 +248,9 @@ class CompileInputsDB:
         }
 
     async def kb_snapshot_unit_count(self, kb_id: str) -> int:
-        """Σ 当前快照检索单元数（编译 start 量级护栏数据源，批次3 决策2）。"""
+        """Σ 当前快照检索单元数——**全库口径**（编译 start 量级护栏的兜底
+        数据源，批次3 决策2；scope 口径走 current_fingerprint(kb, dirs) 的
+        Σ unit_count——start 护栏按各源 scope 求和更准）。"""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 f"""{_CURRENT_SNAPSHOT_CTE}

@@ -2,11 +2,13 @@
 
 真实 WikiService/ArtifactService + 批次2 Fake 家族（FakeArtifactDB/FakeWikiDB/
 FakeTaskClient）+ 本文件新增 FakeCompileInputsDB（权威乐观锁比对+touch 语义与
-真库同构）。覆盖：三端点权限矩阵（viewer PUT/DELETE 403、GET 200；非成员 404
-反探测）；kb 不可读 404（防探测绑定他人私有库）；dirty 三态（无指纹 / 一致 /
-快照变化）；软删后复活（重绑同库 status 回 active、指纹保留）；绑定写推进
-乐观锁令牌（touch 调用断言）；422 invalid_scope（空串/空白目录 + pydantic
-定位）；DELETE 锁令牌随 body。
+真库同构；指纹 scope 过滤口径镜像 _DIR_FILTER）。覆盖：三端点权限矩阵（viewer
+PUT/DELETE 403、GET 200；非成员 404 反探测）；kb 不可读 404（防探测绑定他人
+私有库）；dirty 三态（无指纹 / 一致 / 快照变化）+ **scope 感知**（scope 外变
+化不误脏 / scope 内必脏 / 全库对照面）；不可读行 dirty=None 遮蔽（不跑指纹
+查询）；软删后复活（重绑同库 status 回 active、指纹保留）；绑定写推进乐观
+锁令牌（touch 调用断言）；422 invalid_scope（空串/空白目录/量上限 + pydantic
+定位）；_snapshot_signature 防御分支直测；DELETE 锁令牌随 body。
 """
 from __future__ import annotations
 
@@ -27,6 +29,8 @@ from knowledge_mining.mining.kb.services.artifact_service import ArtifactService
 from knowledge_mining.mining.kb.services.wiki_service import (
     WikiLifecycle,
     WikiService,
+    _is_source_dirty,
+    _snapshot_signature,
 )
 from knowledge_mining.tests.kb.test_artifacts_service import (
     FakeArtifactDB,
@@ -56,8 +60,11 @@ class FakeCompileInputsDB:
         self.artifacts = artifacts
         # (artifact_id, kb_id) -> 绑定行
         self.sources: dict[tuple[str, str], dict] = {}
-        # kb_id -> current_fingerprint 观测值（缺省 = 无就绪快照）
+        # kb_id -> 当前指纹观测值：snapshots 可带 directory_path（scope 过滤
+        # 口径镜像真库 _DIR_FILTER：精确命中或前缀子目录；空数组=全库）
         self.kb_fingerprints: dict[str, dict] = {}
+        # current_fingerprint 调用记录（不可读行"不跑指纹查询"断言用）
+        self.fingerprint_calls: list[tuple[str, tuple[str, ...]]] = []
         # 可读 kb_id 集（is_visible 谓词桩）
         self.readable: set[str] = set()
         self.titles: dict[str, str] = {}
@@ -136,17 +143,34 @@ class FakeCompileInputsDB:
 
     # ---- 指纹观测 / kb 元数据 --------------------------------------------
 
-    async def current_fingerprint(self, kb_id: str) -> dict:
+    async def current_fingerprint(self, kb_id: str, directories) -> dict:
+        """scope 感知镜像：快照集全量返回，unit_count 按 directories 过滤
+        （精确命中或 d+"/" 前缀；空数组=全库）——与真库 _DIR_PATH_LATERAL+
+        _DIR_FILTER 语义同构。"""
+        dirs = tuple(sorted({str(d).strip() for d in (directories or [])
+                             if str(d).strip()}))
+        self.fingerprint_calls.append((kb_id, dirs))
         fp = self.kb_fingerprints.get(kb_id)
         if fp is None:
             return {"snapshots": [],
                     "computed_at": "2026-10-22T00:00:00+00:00"}
-        return {"snapshots": [dict(s) for s in fp.get("snapshots", [])],
-                "computed_at": fp.get("computed_at")}
+        snaps = []
+        for snap in fp.get("snapshots", []):
+            dp = str(snap.get("directory_path") or "")
+            in_scope = (not dirs or dp in dirs
+                        or any(dp.startswith(d + "/") for d in dirs))
+            snaps.append({
+                "snapshot_id": snap["snapshot_id"],
+                "unit_count": (int(snap.get("unit_count") or 0)
+                               if in_scope else 0),
+            })
+        return {"snapshots": snaps, "computed_at": fp.get("computed_at")}
 
     async def kb_snapshot_unit_count(self, kb_id: str) -> int:
-        fp = await self.current_fingerprint(kb_id)
-        return sum(int(s.get("unit_count") or 0) for s in fp["snapshots"])
+        """全库口径 Σ（不经 current_fingerprint——不污染调用记录）。"""
+        fp = self.kb_fingerprints.get(kb_id) or {}
+        return sum(int(s.get("unit_count") or 0)
+                   for s in fp.get("snapshots", []))
 
     async def kb_readable(self, kb_id: str, user_id: str) -> bool:
         return kb_id in self.readable
@@ -273,18 +297,25 @@ async def test_upsert_unreadable_kb_404_anti_probe(env):
 
 async def test_list_sources_kb_title_and_unreadable(env):
     """kb_title 只对可读行返回；绑定后失去读权的行 kb_title=None+unreadable
-    （绑定行仍可见——制品成员看得到绑定行，只隐库元数据）。scope 往返。"""
+    +**dirty=None**（审查裁定：不跑指纹重查询、不向失去库权限的成员泄露库
+    内容变化信号——同端点其他字段同款遮蔽）。scope 往返。"""
     await _bind(env, "kb-1", ["方案/云核"], user=_user("u-bob"))  # editor 可绑
     await _bind(env, "kb-2")
     env.inputs.readable.discard("kb-2")   # 绑定后失去 kb-2 读权
+    env.inputs.fingerprint_calls.clear()
 
     rows = {r["kb_id"]: r
             for r in await env.svc.list_sources(_user("u-alice"), WID)}
     assert rows["kb-1"]["kb_title"] == "云核知识库"
     assert rows["kb-1"]["unreadable"] is False
     assert rows["kb-1"]["scope"] == {"directories": ["方案/云核"]}
+    assert rows["kb-1"]["dirty"] is True   # 可读行正常算（刚绑定无指纹）
     assert rows["kb-2"]["kb_title"] is None
     assert rows["kb-2"]["unreadable"] is True
+    assert rows["kb-2"]["dirty"] is None   # 遮蔽：未知（None）而非布尔
+    # 不可读行不跑指纹查询（白算与泄露面一并消掉）
+    queried = {kb for kb, _dirs in env.inputs.fingerprint_calls}
+    assert "kb-2" not in queried and "kb-1" in queried
 
 
 # ------------------------------------------------------------ dirty 三态
@@ -328,6 +359,57 @@ async def test_dirty_three_states(env):
 
     # kb 侧快照撤空（重挖后全 removed）→ 脏
     env.inputs.kb_fingerprints["kb-1"] = {"snapshots": [], "computed_at": "Z"}
+    rows = await env.svc.list_sources(_user("u-alice"), WID)
+    assert rows[0]["dirty"] is True
+
+
+async def test_dirty_scope_aware(env):
+    """scope 感知 dirty（审查裁定，T2 契约）：unit_count 按绑定 directories
+    过滤——scope 外的库变化不误脏、scope 内变化必脏；全库绑定看见一切。"""
+    env.inputs.kb_fingerprints["kb-1"] = {
+        "snapshots": [
+            {"snapshot_id": "s1", "unit_count": 5, "directory_path": "方案"},
+            {"snapshot_id": "s2", "unit_count": 2, "directory_path": ""},
+        ], "computed_at": "X"}
+
+    # "方案" 目录绑定：指纹按同参 scope 落库（含 scope 外快照的 0 计数行
+    # ——dirty 对比两侧同形）
+    await _bind(env, "kb-1", ["方案"])
+    scoped = await env.inputs.current_fingerprint("kb-1", ["方案"])
+    assert scoped["snapshots"] == [
+        {"snapshot_id": "s1", "unit_count": 5},
+        {"snapshot_id": "s2", "unit_count": 0}]
+    await env.inputs.update_fingerprint(WID, "kb-1", scoped)
+
+    # scope 外变化（根目录 s2 → 9）：scoped 绑定不脏
+    env.inputs.kb_fingerprints["kb-1"]["snapshots"][1]["unit_count"] = 9
+    rows = await env.svc.list_sources(_user("u-alice"), WID)
+    assert rows[0]["dirty"] is False
+
+    # scope 内变化（s1 → 6）：脏
+    env.inputs.kb_fingerprints["kb-1"]["snapshots"][0]["unit_count"] = 6
+    rows = await env.svc.list_sources(_user("u-alice"), WID)
+    assert rows[0]["dirty"] is True
+
+    # 前缀语义：绑定 "方案" 命中 "方案/云核" 子目录文档；不相关目录全 0
+    env.inputs.kb_fingerprints["kb-1"] = {
+        "snapshots": [{"snapshot_id": "s3", "unit_count": 4,
+                       "directory_path": "方案/云核"}], "computed_at": "Y"}
+    assert (await env.inputs.current_fingerprint("kb-1", ["方案"]))["snapshots"] \
+        == [{"snapshot_id": "s3", "unit_count": 4}]
+    assert (await env.inputs.current_fingerprint("kb-1", ["别的"]))["snapshots"] \
+        == [{"snapshot_id": "s3", "unit_count": 0}]
+
+    # 全库绑定对照面：scope 外的 s2 变化也会脏
+    env.inputs.kb_fingerprints["kb-1"] = {
+        "snapshots": [
+            {"snapshot_id": "s1", "unit_count": 5, "directory_path": "方案"},
+            {"snapshot_id": "s2", "unit_count": 2, "directory_path": ""},
+        ], "computed_at": "Z"}
+    await _bind(env, "kb-1", [])
+    await env.inputs.update_fingerprint(
+        WID, "kb-1", await env.inputs.current_fingerprint("kb-1", []))
+    env.inputs.kb_fingerprints["kb-1"]["snapshots"][1]["unit_count"] = 9
     rows = await env.svc.list_sources(_user("u-alice"), WID)
     assert rows[0]["dirty"] is True
 
@@ -416,8 +498,9 @@ async def test_upsert_touch_advances_optimistic_token(env):
 
 async def test_invalid_scope_422(env):
     """directories 含空串/纯空白 → 422 invalid_scope（服务层）；元素非字符串
-    → pydantic 定位断言 loc=["body","directories",1]；kb_id 空 → loc=["body",
-    "kb_id"]；空数组=全库合法。"""
+    → pydantic 定位断言 loc=["body","directories",1]；kb_id 空/纯空白 → 路由
+    层 strip 后 loc=["body","kb_id"]（审查硬化）；量上限（元素 ≤500 字符 /
+    列表 ≤50 项）超限 422 invalid_scope；空数组=全库合法。"""
     r = await env.client.put(
         f"/api/artifacts/{WID}/wiki/sources",
         json={"kb_id": "kb-1", "directories": [""]})
@@ -440,14 +523,68 @@ async def test_invalid_scope_422(env):
     assert r.status_code == 422
     assert r.json()["detail"][0]["loc"] == ["body", "kb_id"]
 
-    # 服务层直调：非列表 directories → invalid_scope（防旁路）
+    # 纯空白 kb_id：路由层 validator 先 strip → 过不了 min_length（同 loc）
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/sources",
+        json={"kb_id": "  ", "directories": []})
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == ["body", "kb_id"]
+
+    # 量上限（审查硬化，与 kb_id 长度上限对称）：元素 >500 / 列表 >50
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/sources",
+        json={"kb_id": "kb-1", "directories": ["x" * 501]})
+    assert r.status_code == 422 and "invalid_scope" in r.text
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/sources",
+        json={"kb_id": "kb-1",
+              "directories": [f"目录{i}" for i in range(51)]})
+    assert r.status_code == 422 and "invalid_scope" in r.text
+
+    # 服务层直调：非列表 directories / 空白 kb_id → invalid_scope（防旁路）
     with pytest.raises(WikiError, match="invalid_scope"):
         await env.svc.upsert_source(_user("u-alice"), WID, "kb-1", "not-a-list")
     with pytest.raises(WikiError, match="invalid_scope"):
         await env.svc.upsert_source(_user("u-alice"), WID, "  ", [])
 
-    # 空数组=全库，合法；目录元素 strip 归一
+    # 边界内合法：空数组=全库；500 字符元素 / 50 项列表恰好放行
     row = await env.svc.upsert_source(_user("u-alice"), WID, "kb-1", [])
     assert row["scope"] == {"directories": []}
     row = await env.svc.upsert_source(_user("u-alice"), WID, "kb-1", [" a/b "])
     assert row["scope"] == {"directories": ["a/b"]}
+    row = await env.svc.upsert_source(
+        _user("u-alice"), WID, "kb-1", ["x" * 500])
+    assert row["scope"] == {"directories": ["x" * 500]}
+    row = await env.svc.upsert_source(
+        _user("u-alice"), WID, "kb-1", [f"目录{i}" for i in range(50)])
+    assert len(row["scope"]["directories"]) == 50
+
+
+# --------------------------------------------------- dirty 纯函数防御分支
+
+async def test_snapshot_signature_defensive_branches():
+    """_snapshot_signature 防御分支直测（Fake/mock 路径永远产不出畸形指纹，
+    审查补项）：非 dict 指纹 / 缺 snapshots 键 / 非 list → None（恒脏哨兵）；
+    非 dict 条目、None/缺 snapshot_id → 跳过；非 int 计数 → 0。"""
+    assert _snapshot_signature(None) is None
+    assert _snapshot_signature([]) is None               # 非 dict 指纹整体
+    assert _snapshot_signature("bad") is None
+    assert _snapshot_signature({"computed_at": "X"}) is None   # 无 snapshots 键
+    assert _snapshot_signature({"snapshots": "bad"}) is None   # 非 list
+
+    sig = _snapshot_signature({"snapshots": [
+        "not-a-dict",                                # 非 dict 条目 → 跳过
+        {"snapshot_id": None, "unit_count": 3},      # None id → 跳过
+        {"unit_count": 3},                           # 缺 snapshot_id → 跳过
+        {"snapshot_id": "s1", "unit_count": "NaN"},  # 非 int 计数 → 0
+        {"snapshot_id": "s2"},                       # 缺计数 → 0
+        {"snapshot_id": "s3", "unit_count": 7},      # 正常条目
+    ]})
+    assert sig == {("s1", 0), ("s2", 0), ("s3", 7)}
+
+    # _is_source_dirty 边缘：stored 正常 + current 畸形（签名 None）→ 脏；
+    # stored 从未编译 → 恒脏
+    stored = {"snapshots": [{"snapshot_id": "s3", "unit_count": 7}]}
+    assert _is_source_dirty(stored, {"snapshots": "bad"}) is True
+    assert _is_source_dirty(None, stored) is True
+    assert _is_source_dirty(stored, stored) is False

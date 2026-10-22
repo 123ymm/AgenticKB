@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from knowledge_mining.mining.kb.auth import current_user
 from knowledge_mining.mining.kb.db_wiki import WikiError, decode_page_key
@@ -56,12 +56,21 @@ class WikiPageDeleteReq(BaseModel):
 
 
 class WikiSourcePut(BaseModel):
-    """PUT 绑定来源（批次3）：kb_id（TEXT id，全 ASCII）；directories 空数组=
-    全库（scope 契约见批次3 决策6）；expected_updated_at 乐观锁令牌——绑定写
-    推进令牌（touch），编辑器持有的旧令牌随后保存会 409，属预期失效。"""
+    """PUT 绑定来源（批次3）：kb_id（TEXT id，全 ASCII；路由层先 strip——
+    纯空白过不了 min_length）；directories 空数组=全库（scope 契约见批次3
+    决策6；量上限在 service 层 422 invalid_scope）；expected_updated_at
+    乐观锁令牌——绑定写推进令牌（touch），编辑器持有的旧令牌随后保存会
+    409，属预期失效。"""
     kb_id: str = Field(min_length=1, max_length=200)
     directories: list[str] = Field(default_factory=list)
     expected_updated_at: str | None = None
+
+    @field_validator("kb_id", mode="before")
+    @classmethod
+    def _strip_kb_id(cls, value: Any) -> Any:
+        """路由层 strip 空白（审查硬化："  " 不再过 min_length；非 str 原样
+        交给 pydantic 报类型错）。"""
+        return value.strip() if isinstance(value, str) else value
 
 
 class WikiSourceDeleteReq(BaseModel):

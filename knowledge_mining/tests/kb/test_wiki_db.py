@@ -417,9 +417,9 @@ async def test_diff_six_keys(async_pool) -> None:
 
 # --------------------------------------------- 来源绑定（63号批次3 Task 1）
 
-async def _seed_kb_doc(async_pool) -> tuple[KbDB, str, str]:
-    """编译取材夹具：kb + 文档（用户/库名随机，测试间不互踩）。
-    返回 (kbdb, kb_id, document_id)。"""
+async def _seed_kb(async_pool) -> tuple[KbDB, str]:
+    """编译取材夹具：建 kb（用户/库名随机，测试间不互踩）。
+    返回 (kbdb, kb_id)。"""
     kbdb = KbDB(async_pool)
     owner = await kbdb.create_user(username=f"wiki-src-{uuid.uuid4().hex[:8]}")
     # create_kb 校验 owner 域绑定（_lock_user_domain_access）——create_user
@@ -428,11 +428,17 @@ async def _seed_kb_doc(async_pool) -> tuple[KbDB, str, str]:
     kb = await kbdb.create_kb(
         domain="plant-a", name=f"指纹库{uuid.uuid4().hex[:6]}",
         owner_id=owner["id"])
+    return kbdb, kb["id"]
+
+
+async def _add_doc(kbdb: KbDB, kb_id: str, *, directory_path: str = "") -> str:
+    """kb 内加一份文档身份（directory_path 支撑 scope 过滤断言）。返回 doc_id。"""
     doc = await kbdb.insert_document_identity(
-        domain="plant-a", kb_id=kb["id"], document_key=f"doc:/{kb['id']}/a.md",
-        document_name="a.md", storage_path=f"/tmp/{kb['id']}/a.md",
-        directory_path="")
-    return kbdb, kb["id"], doc["id"]
+        domain="plant-a", kb_id=kb_id,
+        document_key=f"doc:/{kb_id}/{uuid.uuid4().hex[:8]}",
+        document_name="a.md", storage_path=f"/tmp/{kb_id}/a.md",
+        directory_path=directory_path)
+    return str(doc["id"])
 
 
 async def _seed_build(
@@ -440,9 +446,11 @@ async def _seed_build(
     created_at: str = "2026-10-22T00:00:00+00:00",
     selection_status: str = "active",
 ) -> str:
-    """直插一份 validated build + 文档快照 + N 个 v2 检索单元（夹具形态照
-    test_stats_queries._build_snapshot；units 走 asset_retrieval_units_v2——
-    编译取材只读 L1 v2 产出，旧 asset_retrieval_units 不计）。返回 snapshot_id。"""
+    """直插一份 validated build + 文档快照 + snapshot link + N 个 v2 检索单元
+    （夹具形态照 test_stats_queries._build_snapshot；units 走
+    asset_retrieval_units_v2——编译取材只读 L1 v2 产出；link 行是 scope 过滤
+    的目录归属来源——_DIR_PATH_LATERAL 经 asset_document_snapshot_links 取
+    directory_path）。返回 snapshot_id。"""
     snap_id, build_id = uuid.uuid4().hex, uuid.uuid4().hex
     async with async_pool.connection() as conn:
         await conn.execute(
@@ -462,6 +470,12 @@ async def _seed_build(
                 reason)
                VALUES (%s, %s, %s, %s, 'add')""",
             (build_id, document_id, snap_id, selection_status))
+        await conn.execute(
+            """INSERT INTO asset_document_snapshot_links
+               (id, document_id, document_snapshot_id, relative_path,
+                source_uri, linked_at)
+               VALUES (%s, %s, %s, 'a.md', 'object://source', %s)""",
+            (uuid.uuid4().hex, document_id, snap_id, created_at))
         for i in range(units):
             await conn.execute(
                 """INSERT INTO asset_retrieval_units_v2
@@ -532,43 +546,85 @@ async def test_sources_crud_soft_delete_revival_fingerprint(
     assert revived["fingerprint"]["snapshots"][0]["unit_count"] == 3
 
 
-async def test_current_fingerprint_current_snapshot_semantics(
+async def test_current_fingerprint_scope_and_snapshot_semantics(
     async_pool,
 ) -> None:
-    """current_fingerprint：单 kb 当前快照口径（_CURRENT_SNAPSHOT_CTE 同构）
-    ——每 active 快照一条 + COUNT(units_v2)；重挖取最新 build 快照（旧快照
-    不累加）；撤回（removed）后无当前快照；无任何 build 的空库 snapshots=[]
-    ；kb_snapshot_unit_count = Σ。"""
+    """current_fingerprint：单 kb 当前快照口径（_CURRENT_SNAPSHOT_CTE 同构
+    ——重挖取最新 build 快照不累加 / 撤回 removed 不计 / 空库 snapshots=[]）
+    + **scope 感知**（审查裁定）：unit_count 按 directories 过滤（_DIR_PATH_
+    LATERAL 目录归属 + 精确/前缀命中；空数组=全库；scope 外快照保留行、
+    计 0——dirty 对比两侧同形）。"""
     inputs = CompileInputsDB(async_pool)
-    _, kb_id, doc_id = await _seed_kb_doc(async_pool)
-    snap1 = await _seed_build(
-        async_pool, kb_id=kb_id, document_id=doc_id, units=3)
+    kbdb, kb_id = await _seed_kb(async_pool)
+    doc_plan = await _add_doc(kbdb, kb_id, directory_path="方案/云核")
+    doc_root = await _add_doc(kbdb, kb_id, directory_path="")
+    snap_plan = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_plan, units=3)
+    snap_root = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_root, units=2)
 
-    fp = await inputs.current_fingerprint(kb_id)
-    assert fp["snapshots"] == [{"snapshot_id": snap1, "unit_count": 3}]
+    def by_id(snaps: list) -> dict:
+        return {s["snapshot_id"]: s["unit_count"] for s in snaps}
+
+    # 全库口径（空数组）
+    fp = await inputs.current_fingerprint(kb_id, [])
+    assert by_id(fp["snapshots"]) == {snap_plan: 3, snap_root: 2}
     assert "computed_at" in fp
-    assert await inputs.kb_snapshot_unit_count(kb_id) == 3
-
-    # 重挖：更晚的 validated build 换新快照、单元 5 条 → 只见新快照（不累加）
-    snap2 = await _seed_build(
-        async_pool, kb_id=kb_id, document_id=doc_id, units=5,
-        created_at="2026-10-22T01:00:00+00:00")
-    fp2 = await inputs.current_fingerprint(kb_id)
-    assert fp2["snapshots"] == [{"snapshot_id": snap2, "unit_count": 5}]
     assert await inputs.kb_snapshot_unit_count(kb_id) == 5
 
-    # 撤回（最新 build 的 selection_status='removed'）→ 无当前快照
-    await _seed_build(
-        async_pool, kb_id=kb_id, document_id=doc_id, units=7,
-        created_at="2026-10-22T02:00:00+00:00", selection_status="removed")
-    fp3 = await inputs.current_fingerprint(kb_id)
-    assert fp3["snapshots"] == []
-    assert await inputs.kb_snapshot_unit_count(kb_id) == 0
+    # scope 精确命中：只计 plan 快照（root 快照保留行、计 0——两侧同形）
+    fp_plan = await inputs.current_fingerprint(kb_id, ["方案/云核"])
+    assert by_id(fp_plan["snapshots"]) == {snap_plan: 3, snap_root: 0}
+    # 前缀语义：绑定 "方案" 命中 "方案/云核" 子目录
+    fp_prefix = await inputs.current_fingerprint(kb_id, ["方案"])
+    assert by_id(fp_prefix["snapshots"]) == by_id(fp_plan["snapshots"])
+    # 不相关目录 → 全 0
+    fp_none = await inputs.current_fingerprint(kb_id, ["不存在"])
+    assert by_id(fp_none["snapshots"]) == {snap_plan: 0, snap_root: 0}
 
-    # 无任何 build 的空库 → snapshots=[]
-    _, empty_kb, _ = await _seed_kb_doc(async_pool)
-    assert (await inputs.current_fingerprint(empty_kb))["snapshots"] == []
+    # 重挖：更晚的 validated build 换新快照（5 单元）→ 只见新快照（不累加）
+    snap2 = await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_plan, units=5,
+        created_at="2026-10-22T01:00:00+00:00")
+    fp2 = await inputs.current_fingerprint(kb_id, [])
+    assert by_id(fp2["snapshots"]) == {snap2: 5, snap_root: 2}
+    assert await inputs.kb_snapshot_unit_count(kb_id) == 7
+
+    # 撤回（最新 build 的 selection_status='removed'）→ plan 文档无当前快照
+    await _seed_build(
+        async_pool, kb_id=kb_id, document_id=doc_plan, units=7,
+        created_at="2026-10-22T02:00:00+00:00", selection_status="removed")
+    fp3 = await inputs.current_fingerprint(kb_id, [])
+    assert by_id(fp3["snapshots"]) == {snap_root: 2}
+    assert await inputs.kb_snapshot_unit_count(kb_id) == 2
+
+    # 无任何 build 的空库 → snapshots=[]（scope 与全库同）
+    _, empty_kb = await _seed_kb(async_pool)
+    assert (await inputs.current_fingerprint(
+        empty_kb, ["任意"]))["snapshots"] == []
     assert await inputs.kb_snapshot_unit_count(empty_kb) == 0
+
+
+async def test_kb_readable_delegates_to_is_visible(async_pool) -> None:
+    """kb_readable 委托链接线断言（审查补项；谓词本体语义由 test_kb_db 的
+    is_visible 用例覆盖）：owner 可读 / 域内无关者不可读，且与 KbDB.is_visible
+    同参同果——防未来漂移成两套判定。"""
+    inputs = CompileInputsDB(async_pool)
+    kbdb, kb_id = await _seed_kb(async_pool)
+    async with async_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT owner_id FROM knowledge_bases WHERE id = %s", (kb_id,))
+        owner_id = str((await cur.fetchone())["owner_id"])
+    stranger = await kbdb.create_user(
+        username=f"wiki-oth-{uuid.uuid4().hex[:8]}")
+    await kbdb.bind_domain(user_id=stranger["id"], domain="plant-a")
+
+    assert await inputs.kb_readable(kb_id, owner_id) is True
+    assert await inputs.kb_readable(kb_id, stranger["id"]) is False
+    assert await inputs.kb_readable(kb_id, owner_id) == \
+        await kbdb.is_visible(kb_id=kb_id, user_id=owner_id)
+    assert await inputs.kb_readable(kb_id, stranger["id"]) == \
+        await kbdb.is_visible(kb_id=kb_id, user_id=stranger["id"])
 
 
 async def test_update_batch_details_merge_and_latest_compile_batch(
