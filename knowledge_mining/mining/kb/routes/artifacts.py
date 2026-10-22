@@ -184,6 +184,13 @@ def _map_error(exc: ArtifactError) -> HTTPException:
                 "code": "artifact_not_deprecated",
                 "message": "必须先停用（deprecate）制品才能删除——删除是级联硬删且不可恢复",
             })
+        if str(exc) == "wiki_no_pages":
+            # 63号批次2 wiki 发布门禁（rev0 零页）：状态冲突族，与
+            # no_pending_changes 同为发布门禁 409；表格路径永不产生该码。
+            return HTTPException(409, {
+                "code": "wiki_no_pages",
+                "message": "wiki 无页面可发布（rev0 至少一页）",
+            })
         return HTTPException(400, str(exc))
     return HTTPException(500, str(exc))
 

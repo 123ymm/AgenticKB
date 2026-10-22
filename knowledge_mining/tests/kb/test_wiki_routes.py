@@ -55,7 +55,7 @@ async def env():
         (uid, DOMAIN) for uid in ("u-alice", "u-bob", "u-viewer"))
     wdb = FakeWikiDB(adb.artifacts)
     tc = FakeTaskClient()
-    lifecycle = WikiLifecycle(adb, wdb, tc)
+    lifecycle = WikiLifecycle(wdb, tc)
     art_svc = ArtifactService(adb, wiki=lifecycle)
     svc = WikiService(art_svc, wdb, lifecycle)
 

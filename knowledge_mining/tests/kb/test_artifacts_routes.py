@@ -365,6 +365,22 @@ async def test_stale_updated_at_maps_409(env):
     assert r.json()["detail"]["code"] == "stale_artifact"
 
 
+async def test_map_error_wiki_no_pages_maps_409():
+    """63号批次2 状态码归一：wiki 空页发布门禁经 lifecycle 翻译为
+    InvalidOperation("wiki_no_pages")（publish 走本路由），_map_error 特判
+    409（发布门禁族，对齐 no_pending_changes）——表格路径永不产生该码。"""
+    from knowledge_mining.mining.kb.routes.artifacts import _map_error
+    from knowledge_mining.mining.kb.services.artifact_service import (
+        InvalidOperation,
+    )
+
+    mapped = _map_error(InvalidOperation("wiki_no_pages"))
+    assert mapped.status_code == 409
+    assert mapped.detail["code"] == "wiki_no_pages"
+    # 其他 InvalidOperation 码不受特判影响（仍 400 裸串）
+    assert _map_error(InvalidOperation("row_not_found")).status_code == 400
+
+
 async def test_preview_unknown_token_maps_410(env):
     aid = await _create_artifact(env)
     r = await env.client.get(f"/api/artifacts/{aid}/table/preview/deadbeef")

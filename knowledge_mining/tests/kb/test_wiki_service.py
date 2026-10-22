@@ -28,6 +28,7 @@ from knowledge_mining.mining.kb.services.wiki_service import (
     WikiLifecycle,
     WikiService,
     _EMBED_INFLIGHT,
+    _EMBED_TASKS,
 )
 from knowledge_mining.tests.kb.test_artifacts_service import (
     FakeArtifactDB,
@@ -399,7 +400,7 @@ def _wiki_env(*, task_client: FakeTaskClient | None = None,
         (uid, DOMAIN) for uid in ("u-owner", "u-editor", "u-viewer"))
     wdb = FakeWikiDB(adb.artifacts)
     tc = task_client or FakeTaskClient()
-    lifecycle = WikiLifecycle(adb, wdb, tc)
+    lifecycle = WikiLifecycle(wdb, tc)
     svc = WikiService(ArtifactService(adb, wiki=lifecycle), wdb, lifecycle)
     return SimpleNamespace(adb=adb, wdb=wdb, tc=tc, svc=svc,
                            lifecycle=lifecycle)
@@ -820,9 +821,12 @@ async def test_spawn_embed_inflight_guard():
     task = env.lifecycle._spawn_embed(WID, 1)
     assert task is not None
     assert (WID, 1) in _EMBED_INFLIGHT
+    # 强引用集在飞期间持有任务（事件循环只持弱引用，防 GC）；完成后释放
+    assert task in _EMBED_TASKS
     assert env.lifecycle._spawn_embed(WID, 1) is None   # 防重入
     await task
     assert (WID, 1) not in _EMBED_INFLIGHT
+    assert task not in _EMBED_TASKS
     # 40 条按 32/批分两批（unit_key 排序稳定）
     assert len(env.tc.submits) == 2
     assert [len(s["texts"]) for s in env.tc.submits] == [32, 8]

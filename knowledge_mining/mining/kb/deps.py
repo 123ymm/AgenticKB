@@ -86,12 +86,10 @@ def _wiki_lifecycle(request: Request) -> "Any":
     全局防重入由服务模块级 _EMBED_INFLIGHT 兜底）。"""
     lifecycle = getattr(request.state, "wiki_lifecycle", None)
     if lifecycle is None:
-        from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
         from knowledge_mining.mining.kb.db_wiki import WikiDB
         from knowledge_mining.mining.kb.services.wiki_service import WikiLifecycle
-        pool = request.app.state.pg_pool
         lifecycle = WikiLifecycle(
-            ArtifactDB(pool), WikiDB(pool), _get_task_client())
+            WikiDB(request.app.state.pg_pool), _get_task_client())
         request.state.wiki_lifecycle = lifecycle
     return lifecycle
 

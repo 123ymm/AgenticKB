@@ -57,20 +57,18 @@ class WikiPageDeleteReq(BaseModel):
 # ---------------------------------------------------------------- helpers
 
 #: WikiError.code → HTTP 状态（"invalid_frontmatter:字段" 按前缀归并）。
+#: 发布族门禁（wiki_no_pages/no_pending_changes/usage_note_required）不在本表
+#: ——publish 端点在 artifacts 路由（lifecycle 已翻译为 ArtifactError 族，
+#: 状态码真源 = routes/artifacts._map_error）。
 _WIKI_HTTP_STATUS: dict[str, int] = {
     "page_not_found": 404,
     "artifact_not_found": 404,
     "stale_artifact": 409,
     "page_key_conflict": 409,
-    "no_pending_changes": 409,
-    "wiki_no_pages": 409,
     "invalid_page_key": 422,
     "invalid_page_type": 422,
     "invalid_frontmatter": 422,
-    "invalid_direction": 422,
-    "invalid_revision": 400,
-    "invalid_status": 400,
-    "usage_note_required": 422,
+    "invalid_title": 422,
 }
 
 #: 409 信封文案（对齐 routes/artifacts 的 {code, message} 形态）。
@@ -78,8 +76,6 @@ _WIKI_MESSAGES: dict[str, str] = {
     "stale_artifact": "制品已被他人修改，请刷新后重试",
     "page_key_conflict": "目标 page_key 已被其他页占用——改名=新页+旧页删，"
                          "请先处理占用页",
-    "wiki_no_pages": "wiki 无页面可发布（rev0 至少一页）",
-    "no_pending_changes": "无待发布变更（草稿已关闭，请先编辑检出草稿）",
 }
 
 

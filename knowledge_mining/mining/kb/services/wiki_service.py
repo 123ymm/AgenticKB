@@ -54,8 +54,14 @@ PAGE_TYPES = ("topic", "contradiction", "open_question", "glossary")
 _EMBED_BATCH = 32
 _EMBED_MAX_ATTEMPTS = 3
 
-#: (artifact_id, revision) 全局防重入——发布后置与 status 自愈共用同一集合。
+#: (artifact_id, revision) 全局防重入——发布后置与 status 自愈共用同一集合
+#: （status() 的 O(1) 查询面；清理只在 _embed_units 的 finally）。
 _EMBED_INFLIGHT: set[tuple[str, int]] = set()
+
+#: 后台 embed 任务强引用集（事件循环对 Task 只持弱引用，不持引用的任务可能
+#: 中途被 GC——被 GC 的任务不会触发 done 回调、协程 finally 也不执行。照仓库
+#: 既有模式：onenet/import_service._bg_tasks / purge_tasks._bg_tasks）。
+_EMBED_TASKS: set["asyncio.Task[None]"] = set()
 
 #: WikiError.code → ArtifactError 族（口径对齐 artifact_service._translate；
 #: 未列出的 code 一律 InvalidOperation——路由 400）。
@@ -102,12 +108,12 @@ def _extract_vectors(entry: dict[str, Any]) -> list[list[float]] | None:
 class WikiLifecycle:
     """kind=wiki 的生命周期协作者（deps 装配注入 ArtifactService._wiki）。
 
-    adb：ArtifactDB（touch/读行备用）；wdb：WikiDB（页面/链接/units/生命周期
-    四事务）；task_client：LlmTaskClient 同步阻塞客户端（模块级单例注入）。
+    wdb：WikiDB（页面/链接/units/生命周期四事务——touch/读行全在 wdb 事务
+    内，无需 ArtifactDB 协作者）；task_client：LlmTaskClient 同步阻塞客户端
+    （模块级单例注入）。
     """
 
-    def __init__(self, adb: Any, wdb: Any, task_client: LlmTaskClient) -> None:
-        self._adb = adb
+    def __init__(self, wdb: Any, task_client: LlmTaskClient) -> None:
         self._wdb = wdb
         self._task_client = task_client
 
@@ -195,9 +201,12 @@ class WikiLifecycle:
             return None
         _EMBED_INFLIGHT.add(key)
         task = asyncio.create_task(self._embed_units(key[0], key[1]))
-        # finally 兜底之外再加 done_callback——协程被销毁而未执行的极端路径
-        # （进程关闭）不留下脏 in-flight 键；set.discard 幂等。
-        task.add_done_callback(lambda _t: _EMBED_INFLIGHT.discard(key))
+        # 强引用集防 GC：事件循环对 Task 只持弱引用，不持引用的任务可能中途
+        # 被回收（届时 done 回调不会触发、协程 finally 也不执行——引用集是
+        # 这条路径的唯一防线）。done 回调（完成/取消时触发）释放引用。
+        # in-flight 键由 _embed_units 的 finally 清理（正常/异常/取消均会经过）。
+        _EMBED_TASKS.add(task)
+        task.add_done_callback(_EMBED_TASKS.discard)
         return task
 
     async def _embed_units(self, artifact_id: str, revision: int) -> None:
@@ -225,11 +234,12 @@ class WikiLifecycle:
                         idempotency_key=idem,
                     )
                 except LlmTaskError as exc:
-                    # 提交瞬时失败：保持 pending，下次发布/status 自愈重试
+                    # 提交瞬时失败：保持 pending，下次发布/status 自愈重试。
+                    # 幂等键是关联 llm_service 侧日志/任务的唯一手段，必带。
                     logger.warning(
                         "wiki units embedding 提交失败（保持 pending 待自愈）"
-                        " artifact=%s revision=%s: %s", artifact_id, revision,
-                        exc)
+                        " artifact=%s revision=%s batch=%s idem=%s: %s",
+                        artifact_id, revision, len(texts), idem, exc)
                     return
                 entries = await asyncio.to_thread(
                     self._task_client.wait_for_tasks, [task_id])
@@ -260,8 +270,8 @@ class WikiLifecycle:
                 # timeout：保持 pending（可重试态；failed 不自动重试的对照面）
                 logger.warning(
                     "wiki embedding 任务等待超时（保持 pending 待自愈）"
-                    " artifact=%s revision=%s task=%s", artifact_id, revision,
-                    task_id)
+                    " artifact=%s revision=%s task=%s units=%s",
+                    artifact_id, revision, task_id, len(units))
                 return
         except Exception:
             logger.exception(
@@ -327,7 +337,12 @@ class WikiService:
     async def _recompute_all_links(self, artifact_id: str) -> None:
         """全量重算 rev0 边表：get_page 拿全页（含 body_md/frontmatter——
         list_pages 是不含 body_md 的轻量清单）→ compute_page_edges（alias 归一
-        + broken 全局一致）→ 逐页 replace_page_links。"""
+        + broken 全局一致）→ 逐页 replace_page_links。
+
+        非事务的读-算-写：未持锁，并发写者的边可能交错（后写胜——边表是页内容
+        的纯派生数据，下次任一页写自愈）。
+        TODO：200 页上限下单次页写 O(N) 往返、N 页全编 O(N²)，内网 RTT 会放
+        大；终态优化 = WikiDB 增 replace_links_bulk 单事务批量替换。"""
         listing = await self._wdb.list_pages(artifact_id, revision=0)
         pages: list[dict[str, Any]] = []
         for meta in listing:
