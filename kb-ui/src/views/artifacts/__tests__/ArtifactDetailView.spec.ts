@@ -102,9 +102,14 @@ describe('artifact detail view', () => {
     expect(vm.runtimeColumns.map(c => c.column_name)).toEqual(['MOP'])
     // 设计态草稿新列不得进入运行态表头（codex二审功能项②）
     expect(vm.runtimeColumns.map(c => c.column_name)).not.toContain('草稿新列')
+
+    // 表格路径回归（批次2 拆守卫后）：wiki 双面板不渲染，发布单位缺省=行
+    expect(wrapper.findComponent({ name: 'WikiEditorPanel' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'WikiReaderPanel' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ArtifactPublishDialog' }).props('unitLabel')).toBe('行')
   })
 
-  it('wiki 制品：切运行态不触发表格接口，双页签显示占位守卫', async () => {
+  it('wiki 制品：设计态/运行态挂 wiki 面板，切运行态不触发表格接口', async () => {
     state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, kind: 'wiki' })
     const wrapper = mountDetail()
     await flushPromises()
@@ -113,15 +118,27 @@ describe('artifact detail view', () => {
     vm.activeTab = 'runtime'
     await flushPromises()
 
-    // wiki 占位守卫：运行态 tab 不拉表格列/行（说明卡照常，无 API 死调用）
+    // wiki 守卫保留：运行态 tab 不拉表格列/行（阅读器面板自加载，无 API 死调用）
     expect(state.api.listColumns).not.toHaveBeenCalled()
     expect(state.api.listRows).not.toHaveBeenCalled()
 
-    // 双页签占位文案（tab-pane 桩渲染全部插槽，两处 EmptyState 同时在树中）
-    const placeholders = wrapper.findAllComponents({ name: 'EmptyState' })
-      .map(c => c.props('text') || c.attributes('text'))
-    expect(placeholders).toContain('Wiki 设计面板随下个批次开放；版本与成员见对应页签。')
-    expect(placeholders).toContain('Wiki 阅读视图随下个批次开放。')
+    // 双面板接线（shallowMount 桩）：设计态编辑面板 + 运行态阅读面板
+    const editor = wrapper.findComponent({ name: 'WikiEditorPanel' })
+    expect(editor.exists()).toBe(true)
+    expect(editor.props('artifactId')).toBe('art-1')
+    expect(editor.props('canWrite')).toBe(true)
+    expect(editor.props('expectedUpdatedAt')).toBe('2026-10-16T09:00:00+00:00')
+    const reader = wrapper.findComponent({ name: 'WikiReaderPanel' })
+    expect(reader.exists()).toBe(true)
+    expect(reader.props('artifactId')).toBe('art-1')
+
+    // 表格三组件不渲染（wiki 路径）
+    expect(wrapper.findComponent({ name: 'ArtifactImportWizard' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ArtifactSchemaPanel' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ArtifactRowsPanel' }).exists()).toBe(false)
+
+    // 发布对话框单位 kind 化：wiki → 页
+    expect(wrapper.findComponent({ name: 'ArtifactPublishDialog' }).props('unitLabel')).toBe('页')
   })
 
   it('refetches detail, runtime schema and rows after a rollback (versions panel changed)', async () => {

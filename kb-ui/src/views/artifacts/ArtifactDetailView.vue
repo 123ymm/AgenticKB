@@ -77,11 +77,14 @@
     <el-tabs v-if="artifact" v-model="activeTab" class="artifact-detail__tabs">
       <!-- ── 设计态：导入向导 / 列定义 / 行编辑三面板（owner+editor；viewer 无设计态）── -->
       <el-tab-pane label="设计态" name="design">
-        <!-- wiki 占位守卫（60号）：编译/编辑面板随下个批次开放；文案角色中立——
-             viewer 不能管成员/回滚版本，只指向对应页签 -->
-        <EmptyState
+        <!-- wiki 编辑面板（63号批次2）：viewer 也可读（面板内部按 canWrite 收敛写入口） -->
+        <WikiEditorPanel
           v-if="artifact.kind === 'wiki'"
-          text="Wiki 设计面板随下个批次开放；版本与成员见对应页签。"
+          :artifact-id="artifactId"
+          :can-write="canWrite"
+          :expected-updated-at="artifact.updated_at"
+          :draft-open="artifact.draft_open"
+          @changed="reloadAll"
         />
         <template v-else-if="canWrite">
           <ArtifactImportWizard
@@ -129,10 +132,11 @@
           <el-button data-test="edit-meta" @click="openMetaEdit">编辑元信息</el-button>
         </div>
 
-        <!-- wiki 占位守卫（60号）：阅读视图随下个批次开放，说明卡/元信息编辑保留 -->
-        <EmptyState
+        <!-- wiki 运行态阅读器（63号批次2）：面板自加载 current_revision 投影；
+             表格制品走下方只读行表（两条路径互斥，DOM 结构各不受扰） -->
+        <WikiReaderPanel
           v-if="artifact.kind === 'wiki'"
-          text="Wiki 阅读视图随下个批次开放。"
+          :artifact-id="artifactId"
         />
         <template v-else>
           <el-table v-loading="rowsLoading" :data="runtimeRows" size="small">
@@ -232,6 +236,7 @@
       :usage-note="artifact?.usage_note || ''"
       :draft-open="artifact?.draft_open"
       :current-revision="artifact?.current_revision ?? 0"
+      :unit-label="artifact?.kind === 'wiki' ? '页' : '行'"
       @published="reloadAll"
       @changed="reload"
     />
@@ -252,6 +257,8 @@ import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
 import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
 import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.vue'
 import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
+import WikiEditorPanel from '@/components/artifacts/WikiEditorPanel.vue'
+import WikiReaderPanel from '@/components/artifacts/WikiReaderPanel.vue'
 import { decodeRowKey } from '@/utils/rowKey'
 import type { ArtifactColumn, ArtifactDetail, ArtifactRow } from '@/types/artifacts'
 
@@ -362,7 +369,7 @@ function loadRuntimeData() {
 }
 
 watch(activeTab, (tab) => {
-  // wiki 占位守卫：无表格运行态，不触发 table 列/行懒加载
+  // wiki 守卫保留：无表格运行态，不触发 table 列/行懒加载（阅读器面板自加载）
   if (tab === 'runtime' && !runtimeLoaded.value && artifact.value?.kind !== 'wiki') {
     loadRuntimeData()
   }
