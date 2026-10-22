@@ -1851,3 +1851,148 @@ async def test_list_artifacts_excludes_unbound_domain_members() -> None:
         a["artifact_id"]
         for a in await svc.list_artifacts(user=_user("u-siteadmin", site_role="admin"))
     }
+
+
+# ------------------------------------------- wiki 生命周期 kind 分支点（63号批次2）
+
+WID = "art_wiki"
+
+
+class StubWikiLifecycle:
+    """Task 3 WikiLifecycle 协作者的记录桩——四入口记录调用参数并返回表格
+    同形值（publish={revision,row_count,diff}；rollback/discard=制品行形态；
+    diff=六平键），钉死 ArtifactService 的 kind 分支路由契约。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.publish_result = {
+            "revision": 3, "row_count": 5,
+            "diff": {"added_count": 2, "removed_count": 0, "changed_count": 1},
+        }
+        self.rollback_result = {
+            "artifact_id": WID, "current_revision": 2, "status": "published",
+        }
+        self.discard_result = {"artifact_id": WID, "draft_open": False}
+        self.diff_result = {
+            "added": ["术语表"], "removed": [], "changed": [],
+            "added_count": 1, "removed_count": 0, "changed_count": 0,
+        }
+
+    async def publish(self, user, art, *, change_summary, expected_updated_at):
+        self.calls.append(
+            ("publish", user["id"], dict(art), change_summary, expected_updated_at))
+        return dict(self.publish_result)
+
+    async def rollback_to(self, user, art, revision, *, expected_updated_at=None):
+        self.calls.append(
+            ("rollback_to", user["id"], dict(art), revision, expected_updated_at))
+        return dict(self.rollback_result)
+
+    async def discard(self, user, art, *, expected_updated_at=None):
+        self.calls.append(("discard", user["id"], dict(art), expected_updated_at))
+        return dict(self.discard_result)
+
+    async def diff(self, artifact_id):
+        self.calls.append(("diff", artifact_id))
+        return dict(self.diff_result)
+
+
+async def _wiki_seeded_db() -> FakeArtifactDB:
+    """_seeded_db 基础上加一个 wiki 制品（published rev2 干净态）——四方法
+    分支点在角色/新鲜度门禁之后，fake 的表格行集合不会被触碰。"""
+    db = await _seeded_db()
+    db.artifacts[WID] = {
+        "artifact_id": WID, "domain_id": "plant-a", "kind": "wiki",
+        "title": "运维 Wiki", "description": "", "usage_note": "运维知识入口",
+        "owner_user_id": "u-owner", "visibility": "private",
+        "status": "published",
+        "current_revision": 2, "draft_open": False,
+        "created_at": NOW, "updated_at": NOW,
+    }
+    db.members[WID] = {
+        "u-owner": "owner", "u-editor": "editor", "u-viewer": "viewer",
+    }
+    db.rev0_rows[WID] = []
+    return db
+
+
+@pytest.mark.asyncio
+async def test_wiki_kind_routes_lifecycle_to_collaborator() -> None:
+    """63号批次2分支点：kind=wiki 的 publish/rollback_to/discard_draft/
+    diff_draft_vs_current 四方法在角色/新鲜度门禁后整参委托注入的 wiki
+    协作者（收到制品行与关键字参、返回值原样透传），表格路径零触碰。"""
+    db = await _wiki_seeded_db()
+    stub = StubWikiLifecycle()
+    svc = ArtifactService(db, wiki=stub)
+    owner = _user("u-owner")
+
+    result = await svc.publish(
+        user=owner, artifact_id=WID, change_summary="rev3",
+        expected_updated_at=NOW.isoformat(),
+    )
+    assert result == stub.publish_result
+    rolled = await svc.rollback_to(user=owner, artifact_id=WID, revision=2)
+    assert rolled == stub.rollback_result
+    discarded = await svc.discard_draft(
+        user=owner, artifact_id=WID, expected_updated_at=NOW.isoformat(),
+    )
+    assert discarded == stub.discard_result
+    diff = await svc.diff_draft_vs_current(user=owner, artifact_id=WID)
+    assert diff == stub.diff_result
+
+    assert [c[0] for c in stub.calls] \
+        == ["publish", "rollback_to", "discard", "diff"]
+    # publish：收到完整制品行 + 关键字参；expected 已归一 datetime（db 层
+    # FOR UPDATE 全精度比对口径——ISO 串解析回 NOW）
+    _, uid, art, summary, expected = stub.calls[0]
+    assert uid == "u-owner"
+    assert art["artifact_id"] == WID and art["kind"] == "wiki"
+    assert summary == "rev3" and expected == NOW
+    # rollback_to：revision 归一 int 后整参委托
+    _, uid, art, revision, _ = stub.calls[1]
+    assert art["artifact_id"] == WID and revision == 2
+    # discard：同样收到制品行；diff：只有 artifact_id
+    assert stub.calls[2][2]["artifact_id"] == WID
+    assert stub.calls[3] == ("diff", WID)
+    # 表格路径未被触碰（fake db 调用记录无四操作）
+    for op in ("publish", "rollback_to", "discard_draft", "diff_draft_vs_current"):
+        assert op not in db.calls
+
+
+@pytest.mark.asyncio
+async def test_table_kind_lifecycle_never_touches_wiki_collaborator() -> None:
+    """回归保护：kind=table 的四方法走原表格路径——注入的 wiki 协作者零调用
+    （既有构造 ArtifactService(db) 兼容性由本用例连带覆盖：wiki=None 默认）。"""
+    db = await _seeded_db()
+    stub = StubWikiLifecycle()
+    svc = ArtifactService(db, wiki=stub)
+    owner = _user("u-owner")
+    await db.ensure_draft(AID)   # 干净态门禁：先检出草稿
+    result = await svc.publish(user=owner, artifact_id=AID, change_summary="rev2")
+    assert result["revision"] == 2 and "diff" in result
+    assert (await svc.rollback_to(user=owner, artifact_id=AID, revision=1))[
+        "current_revision"] == 1
+    await svc.discard_draft(user=owner, artifact_id=AID)
+    diff = await svc.diff_draft_vs_current(user=owner, artifact_id=AID)
+    assert diff["added_count"] == 0
+    assert stub.calls == []
+
+
+@pytest.mark.asyncio
+async def test_wiki_kind_without_collaborator_fails_fast() -> None:
+    """部署形态缺 wiki 协作者（wiki=None）时 kind=wiki 四方法快速失败
+    （400 invalid_operation 口径）——不得静默走表格 SQL（空表发布会推空
+    版本行，损坏 wiki 制品的生命周期状态）。"""
+    db = await _wiki_seeded_db()
+    svc = ArtifactService(db)   # 不注入 wiki 协作者
+    owner = _user("u-owner")
+    for call in (
+        lambda: svc.publish(user=owner, artifact_id=WID, change_summary="x"),
+        lambda: svc.rollback_to(user=owner, artifact_id=WID, revision=1),
+        lambda: svc.discard_draft(user=owner, artifact_id=WID),
+        lambda: svc.diff_draft_vs_current(user=owner, artifact_id=WID),
+    ):
+        with pytest.raises(InvalidOperation):
+            await call()
+    for op in ("publish", "rollback_to", "discard_draft", "diff_draft_vs_current"):
+        assert op not in db.calls

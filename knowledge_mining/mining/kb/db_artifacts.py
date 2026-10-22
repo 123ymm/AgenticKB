@@ -199,6 +199,9 @@ class ArtifactDB:
     async def delete_artifact(self, artifact_id: str) -> None:
         """owner 硬删（service 层已门禁 status=deprecated）：显式级联（列约定
         无 FK，删除顺序自底向上；钥匙开放行无 artifact 侧 FK，一并显式清）。
+        63号批次2补批次1遗留缺口①：wiki 四表（units→links→pages 自底向上）
+        与通用来源表 kb_artifact_sources 同入级联——对 table 制品为空删零
+        副作用（制品删除是 units 唯一清理点，批次2决策①按版本保留不随发布删）。
         级联后清本制品动态表达式索引（对抗审查修复⑤：idx_kbtr_{art}_* 不随
         行表清空）。"""
         async with self._pool.connection() as conn:
@@ -213,6 +216,22 @@ class ArtifactDB:
                 )
                 await conn.execute(
                     "DELETE FROM kb_artifact_batches WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM kb_wiki_page_units WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM kb_wiki_page_links WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM kb_wiki_pages WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM kb_artifact_sources WHERE artifact_id = %s",
                     (artifact_id,),
                 )
                 await conn.execute(

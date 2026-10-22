@@ -15,6 +15,7 @@ test_artifacts_service.py 尾部。
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 
@@ -620,6 +621,60 @@ async def test_delete_artifact_cascades_all_six_tables(async_pool) -> None:
     assert await db.get_artifact(aid) is None
     for table in ("kb_table_rows", "kb_table_columns", "kb_artifact_batches",
                   "kb_artifact_members", "kb_artifact_revisions"):
+        assert await _table_count(async_pool, table, aid) == 0
+
+
+async def test_delete_artifact_cascades_wiki_four_tables(async_pool) -> None:
+    """63号批次2回归（真库，批次1遗留缺口①）：硬删 wiki 制品级联清四张
+    wiki 属表——pages/links/units/sources 该制品零行残留（制品删除是 units
+    唯一清理点）；对 table 制品四条 DELETE 为空删零副作用（上方六表用例
+    已覆盖 table 路径不因新增级联破坏）。"""
+    db = ArtifactDB(async_pool)
+    kbdb = KbDB(async_pool)
+    owner = await kbdb.create_user(username="art-owner-17")
+    aid = (await db.create_artifact(
+        domain_id="plant-a", kind="wiki", title="运维 Wiki",
+        owner_user_id=owner["id"],
+    ))["artifact_id"]
+    async with async_pool.connection() as conn:
+        # rev0 草稿两页 + 一条边 + rev1 一条检索单元 + 一条来源绑定
+        await conn.execute(
+            """INSERT INTO kb_wiki_pages
+               (artifact_id, revision, page_key, title, body_md, ordinal,
+                origin, updated_by)
+               VALUES (%(a)s, 0, '首页', '首页', '导语 [[术语表]]', 1,
+                       'manual', %(u)s),
+                      (%(a)s, 0, '术语表', '术语表', '术语说明', 2,
+                       'manual', %(u)s),
+                      (%(a)s, 1, '首页', '首页', '首版快照', 1,
+                       'manual', %(u)s)""",
+            {"a": aid, "u": owner["id"]},
+        )
+        await conn.execute(
+            """INSERT INTO kb_wiki_page_links
+               (artifact_id, revision, from_page, to_page, anchor_text, status)
+               VALUES (%s, 0, '首页', '术语表', '', 'valid')""",
+            (aid,),
+        )
+        await conn.execute(
+            """INSERT INTO kb_wiki_page_units
+               (artifact_id, revision, unit_key, page_key, content_text)
+               VALUES (%s, 1, '首页', '首页', '# 首页 首版快照')""",
+            (aid,),
+        )
+        await conn.execute(
+            """INSERT INTO kb_artifact_sources
+               (id, artifact_id, kb_id, created_by)
+               VALUES (%s, %s, 'kb-wiki-1', %s)""",
+            (f"src_{uuid.uuid4().hex}", aid, owner["id"]),
+        )
+    for table in ("kb_wiki_pages", "kb_wiki_page_links", "kb_wiki_page_units",
+                  "kb_artifact_sources"):
+        assert await _table_count(async_pool, table, aid) > 0   # 删前有数据
+    await db.delete_artifact(aid)
+    assert await db.get_artifact(aid) is None
+    for table in ("kb_wiki_pages", "kb_wiki_page_links", "kb_wiki_page_units",
+                  "kb_artifact_sources"):
         assert await _table_count(async_pool, table, aid) == 0
 
 
