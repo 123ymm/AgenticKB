@@ -243,10 +243,14 @@ async def test_rollback_is_pointer_only(async_pool) -> None:
     row = await wdb.rollback_to(aid, 1, expected_updated_at=art["updated_at"])
     assert row["current_revision"] == 1 and row["status"] == "published"
 
-    # 纯指针：rev0 草稿保留、快照不动（数据不动语义）
-    assert await wdb.count_pages(aid, 0) == 1
+    # 纯指针：rev0 草稿保留、快照不动（数据不动语义）。
+    # rev0=checkout 复制的 v1页 + 新增 v2页 共 2 页（ensure_draft 与表格行表同构：
+    # current→rev0 INSERT..SELECT 复制后开草稿窗）——回滚不得触碰。
+    # （真库首跑勘误：原断言误写 1——写而不跑期间从未执行过。）
+    assert await wdb.count_pages(aid, 0) == 2
     assert await wdb.count_pages(aid, 1) == 1
     assert await wdb.get_page(aid, 0, "v2页") is not None
+    assert await wdb.get_page(aid, 0, "v1页") is not None
     assert await wdb.get_page(aid, 1, "v1页") is not None
 
     art = await adb.get_artifact(aid)
@@ -532,13 +536,15 @@ async def test_sources_crud_soft_delete_revival_fingerprint(
     # 绑定写推进令牌（touch 同事务，upsert 返回后立即可见）
     assert (await adb.get_artifact(aid))["updated_at"] != art["updated_at"]
 
-    # stale 令牌 → 事务内权威比对拒绝（先于写入，不落行）
+    # stale 令牌 → 事务内权威比对拒绝（先于写入，不落行）——"不落行"指本次的
+    # kb-beta；已成功的 kb-alpha 不受影响（真库首跑勘误：原断言误写成空列表）。
     with pytest.raises(WikiError) as ei:
         await inputs.upsert_source(
             aid, "kb-beta", scope={"directories": []}, created_by=owner["id"],
             expected_updated_at="2000-01-01T00:00:00+00:00")
     assert ei.value.code == "stale_artifact"
-    assert await inputs.list_sources(aid) == []
+    listed_after_stale = await inputs.list_sources(aid)
+    assert [s["kb_id"] for s in listed_after_stale] == ["kb-alpha"]
 
     await inputs.upsert_source(
         aid, "kb-beta", scope={"directories": []}, created_by=owner["id"])
