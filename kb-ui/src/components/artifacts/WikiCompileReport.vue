@@ -32,6 +32,7 @@ const REPORT_ROWS = [
   { key: 'pages_written', label: '写入页数' },
   { key: 'unit_count', label: '取材单元' },
   { key: 'cluster_count', label: '聚类数' },
+  { key: 'embedded_ratio', label: '向量覆盖率' },
   { key: 'failed_pages', label: '失败页' },
   { key: 'dropped_pages', label: '超限截断页' },
   { key: 'broken_links', label: '断链' },

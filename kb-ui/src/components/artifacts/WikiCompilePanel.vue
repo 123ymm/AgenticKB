@@ -23,14 +23,7 @@
           <el-tag size="small" :type="dirtyBadge(src.dirty).type" data-test="wiki-source-dirty">
             {{ dirtyBadge(src.dirty).text }}
           </el-tag>
-          <el-button
-            v-if="canWrite"
-            size="small"
-            text
-            type="danger"
-            data-test="wiki-source-delete"
-            @click="removeSource(src)"
-          >解绑</el-button>
+          <el-button v-if="canWrite" size="small" text type="danger" data-test="wiki-source-delete" @click="removeSource(src)">解绑</el-button>
         </div>
         <p v-if="!sourcesLoading && sources.length === 0" class="wiki-compile__empty">
           尚未绑定来源——编译需要至少一个知识库来源
@@ -41,29 +34,14 @@
         <el-select v-model="addDomain" class="wiki-compile__add-domain" data-test="wiki-source-domain" placeholder="选择域">
           <el-option v-for="d in domainStore.enabledDomains" :key="d.domain_id" :value="d.domain_id" :label="d.domain_id" />
         </el-select>
-        <el-select
-          v-model="addKbId"
-          class="wiki-compile__add-kb"
-          data-test="wiki-source-kb"
-          :loading="kbsLoading"
-          placeholder="选择知识库"
-        >
+        <el-select v-model="addKbId" class="wiki-compile__add-kb" data-test="wiki-source-kb"
+          :loading="kbsLoading" placeholder="选择知识库">
           <el-option v-for="kb in kbs" :key="kb.id" :value="kb.id" :label="kb.name" />
         </el-select>
-        <el-input-tag
-          v-model="addDirs"
-          class="wiki-compile__add-dirs"
-          data-test="wiki-source-dirs"
-          placeholder="目录路径（回车添加，留空=全库）"
-        />
-        <el-button
-          type="primary"
-          size="small"
-          :loading="savingSource"
-          :disabled="!addDomain || !addKbId"
-          data-test="wiki-source-save"
-          @click="saveSource"
-        >绑定</el-button>
+        <el-input-tag v-model="addDirs" class="wiki-compile__add-dirs" data-test="wiki-source-dirs"
+          placeholder="目录路径（回车添加，留空=全库）" />
+        <el-button type="primary" size="small" :loading="savingSource" :disabled="!addDomain || !addKbId"
+          data-test="wiki-source-save" @click="saveSource">绑定</el-button>
       </div>
     </section>
 
@@ -188,6 +166,9 @@ const savingSource = ref(false)
 
 // ── 编译状态 ──
 const status = ref<WikiCompileStatus | null>(null)
+/** 状态落地序号（过期响应防护，审查 I-1）：applyStatus/制品切换时推进
+ * ——发起时捕获旧值的迟到响应（旧制品慢响应/动作后的旧轮询）一律丢弃。 */
+let statusEpoch = 0
 const starting = ref(false)
 const confirming = ref(false)
 const cancelling = ref(false)
@@ -212,8 +193,10 @@ const { start: startPolling, stop: stopPolling } = usePolling(fetchStatus, POLL_
 
 /** 轮询单例编排（applyStatus 统一驱动）：pollRunning 守卫防每次状态落地
  * 重置 interval 节拍；制品切换后重取落态即在此**重启**（定时器已被上一
- * 制品的终态停掉——只靠 gate 不会复活，审查 MEDIUM）。 */
-let pollRunning = false
+ * 制品的终态停掉——只靠 gate 不会复活，审查 MEDIUM）。初值=true 对齐
+ * composable 挂载即自动 start 的事实——首个非轮询态落地即拆空转 interval
+ * （审查 Minor#4：no-op 定时器每 5s 空转）。 */
+let pollRunning = true
 function syncPolling(): void {
   const want = props.canWrite && POLL_STATES.has(state.value)
   if (want === pollRunning) return
@@ -226,11 +209,13 @@ onMounted(() => {
   addDomain.value = domainStore.currentDomain
   void loadSources()
   if (props.canWrite) void fetchStatus()
+  else syncPolling()   // viewer：拆掉挂载自动起的空转 interval
 })
 
-/** 制品切换（路由复用组件不重挂）→ 重置一切并重取；重取落态经
- * applyStatus → syncPolling 按新制品状态重启轮询。 */
+/** 制品切换（路由复用组件不重挂）→ 推进 epoch+重置一切并重取；重取落态
+ * 经 applyStatus → syncPolling 按新制品状态重启轮询。 */
 watch(() => props.artifactId, () => {
+  statusEpoch += 1
   status.value = null
   sources.value = []
   void loadSources()
@@ -308,6 +293,7 @@ async function removeSource(src: WikiSource): Promise<void> {
 function applyStatus(next: WikiCompileStatus): void {
   const wasInFlight = IN_FLIGHT.has(state.value)
   status.value = next
+  statusEpoch += 1   // 新状态落地——发起于旧 epoch 的在飞轮询作废（I-1）
   syncPolling()
   if (TERMINAL.has(String(next.state)) && wasInFlight) {
     emit('changed')
@@ -315,12 +301,21 @@ function applyStatus(next: WikiCompileStatus): void {
   }
 }
 
+/** 拉取编译状态（轮询与首拉共用）：发起时捕获制品 id + epoch，响应回来
+ * 双比对——旧制品慢响应/动作后旧轮询一律丢弃（审查 I-1）。 */
 async function fetchStatus(): Promise<void> {
+  const aid = props.artifactId
+  const epoch = statusEpoch
+  const stale = (): boolean => aid !== props.artifactId || epoch !== statusEpoch
   try {
-    applyStatus(await api.compileStatus(props.artifactId))
+    const next = await api.compileStatus(aid)
+    if (stale()) return
+    applyStatus(next)
   } catch (error) {
+    if (stale()) return
     if (errorCode(error) === 'compile_not_found') {
       status.value = null   // 从未编译（无批）→ idle
+      syncPolling()         // 拆挂载自动起的 interval（Minor#4）
       return
     }
     // 轮询连续失败不刷屏：停下提示一次，待用户操作/刷新页面恢复

@@ -394,6 +394,70 @@ describe('WikiCompilePanel', () => {
     expect(state.api.listWikiSources).toHaveBeenLastCalledWith('art-2')
     expect(state.api.compileStatus).toHaveBeenLastCalledWith('art-2')
   })
+
+  it('切换制品竞态：旧制品迟到响应不落地（审查 I-1）', async () => {
+    // A 的首拉悬挂（慢响应）→ 切 B（B 落 completed）→ A 迟到响应到达
+    let resolveA!: (value: WikiCompileStatus) => void
+    state.api.compileStatus.mockImplementationOnce(
+      () => new Promise<WikiCompileStatus>(resolve => { resolveA = resolve }))
+    state.api.compileStatus.mockResolvedValue(
+      { batch_id: 'bB', state: 'completed', stats: {}, conflicts: [] } as WikiCompileStatus)
+    const wrapper = mountPanel(true, 'art-1')
+    await flush()
+
+    await wrapper.setProps({ artifactId: 'art-2' })
+    await flush()
+    expect(wrapper.text()).toContain('上一轮编译已完成')
+
+    // A 的迟到响应（awaiting_toc 带 toc）不得把 B 页面拉回目录确认态
+    resolveA({
+      batch_id: 'bA', state: 'awaiting_toc',
+      toc: [{ section_title: 'A 节', page_hints: [{ title: 'A 页', cluster_ids: [], page_type: 'topic' }] }],
+    } as WikiCompileStatus)
+    await flush()
+    expect(wrapper.findComponent(WikiTocEditor).exists()).toBe(false)
+    expect(wrapper.text()).toContain('上一轮编译已完成')
+  })
+
+  it('compile_not_found → idle 映射：无错误提示、空转 interval 已拆（I-2/Minor#4）', async () => {
+    state.api.compileStatus.mockRejectedValue(
+      { response: { status: 404, data: { detail: { code: 'compile_not_found' } } } })
+    const wrapper = mountPanel()
+    await flush()
+
+    expect(wrapper.find('[data-test="wiki-compile-start"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('编译将取材绑定来源')
+    expect(state.ui.error).not.toHaveBeenCalled()   // 404 不是错误
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(state.api.compileStatus).toHaveBeenCalledTimes(1)   // mount 首拉后无新请求
+  })
+
+  it('轮询失败（非 404）：单次错误提示 + 停轮询不刷屏（I-2）', async () => {
+    state.api.compileStatus.mockRejectedValue(
+      { response: { status: 500, data: { detail: { code: 'internal', message: '后端异常' } } } })
+    mountPanel()
+    await flush()
+
+    expect(state.ui.error).toHaveBeenCalledTimes(1)
+    expect(state.ui.error).toHaveBeenCalledWith(expect.stringContaining('获取编译进度失败'))
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(state.api.compileStatus).toHaveBeenCalledTimes(1)   // 停轮询后不再发
+    expect(state.ui.error).toHaveBeenCalledTimes(1)           // 提示不重复
+  })
+
+  it('写操作 stale_artifact：提示刷新 + emit changed（I-2）', async () => {
+    state.api.upsertWikiSource.mockRejectedValue(
+      { response: { status: 409, data: { detail: { code: 'stale_artifact' } } } })
+    const wrapper = mountPanel()
+    await flush()
+    const vm = wrapper.vm as unknown as PanelVm
+    vm.addKbId = 'kb-9'
+
+    await vm.saveSource()
+    await flush()
+    expect(state.ui.error).toHaveBeenCalledWith('制品已被他人修改，已刷新最新状态')
+    expect(wrapper.emitted('changed')).toBeTruthy()
+  })
 })
 
 describe('WikiTocEditor', () => {
@@ -509,7 +573,7 @@ describe('WikiCompileReport', () => {
     const wrapper = mountReport({
       batch_id: 'b1', state: 'completed',
       stats: {
-        pages_written: 50, unit_count: 900, cluster_count: 40,
+        pages_written: 50, unit_count: 900, cluster_count: 40, embedded_ratio: 0.87,
         failed_pages: 2, broken_links: 3, dangling_pages: 1,
         contradiction_pages: 1, open_question_pages: 2, glossary_pages: 6,
         conflicts_n: 1,
@@ -524,6 +588,8 @@ describe('WikiCompileReport', () => {
     expect(report.text()).toContain('50')
     expect(report.text()).toContain('取材单元')
     expect(report.text()).toContain('900')
+    expect(report.text()).toContain('向量覆盖率')   // Minor#6：12 键齐
+    expect(report.text()).toContain('0.87')
     expect(report.text()).toContain('断链')
     expect(report.text()).toContain('悬空引用页')
     // 端点未带的键（dropped_pages）不渲染该行
