@@ -28,6 +28,7 @@ from knowledge_mining.mining.kb.routes.artifacts import (
     _map_error as _map_artifact_error,
 )
 from knowledge_mining.mining.kb.services.artifact_service import ArtifactError
+from knowledge_mining.mining.kb.services.wiki_compile_service import MAX_UNITS
 
 router = APIRouter(prefix="/api/artifacts", tags=["wiki-artifacts"])
 
@@ -149,7 +150,9 @@ _WIKI_MESSAGES: dict[str, str] = {
                              "awaiting_toc 态）",
     "compile_not_found": "该制品尚无编译批次（先启动编译）",
     "no_sources": "未绑定任何知识库来源，请先在来源面板绑定",
-    "too_many_units": "绑定范围内检索单元超上限（30000），请收窄目录范围",
+    # 上限数从服务常量派生（审查 Minor：文案与 MAX_UNITS 不双源漂移）。
+    "too_many_units": f"绑定范围内检索单元超上限（{MAX_UNITS}），"
+                      "请收窄目录范围",
     "too_many_pages": "确认目录展开页数超上限（200），请删减后再确认",
     "invalid_toc": "目录结构不合法（需非空节列表，每节含 title 非空页提示）",
 }

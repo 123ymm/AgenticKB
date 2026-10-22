@@ -30,9 +30,9 @@ from knowledge_mining.mining.kb.db_wiki import (
     compute_page_edges,
     normalize_page_key,
 )
-# 批次3决策7：发布前确定性校验（单向下依赖——wiki_compile_service 不回引
-# 本模块，无环）。
-from knowledge_mining.mining.kb.services.wiki_compile_service import (
+# 批次3决策7：发布前确定性校验。直连 wiki_compile_pages（校验函数权威定义
+# 处——经 wiki_compile_service 转出多一层间接，审查 Minor；单向下依赖无环）。
+from knowledge_mining.mining.kb.services.wiki_compile_pages import (
     validate_pages_for_publish,
 )
 from knowledge_mining.mining.kb.services.artifact_service import (

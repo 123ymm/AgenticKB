@@ -77,7 +77,7 @@ from knowledge_mining.mining.retrieval_projection.llm_generation import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "CompileService", "validate_pages_for_publish",
+    "CompileService", "validate_pages_for_publish", "drop_prepare_cache",
     "TOC_PROMPT_VERSION", "PAGE_PROMPT_VERSION", "QUALITY_PROMPT_VERSION",
     "MAX_PAGES", "MAX_UNITS",
 ]
@@ -100,19 +100,23 @@ _TOP_DIRS = 3
 _INFLIGHT_STATES = ("preparing", "awaiting_toc", "writing")
 
 #: 后台编译任务强引用集（事件循环对 Task 只持弱引用——照批次2 _EMBED_TASKS /
-#: onenet._bg_tasks 模式；done 回调释放）。
+#: onenet._bg_tasks 模式；done 回调释放）。在飞防重入由守卫事务权威承担
+#: （审查 Minor：原 in-flight 键集合只写不读，死状态已删）。
 _COMPILE_TASKS: set["asyncio.Task[None]"] = set()
-
-#: artifact_id 在飞键（**纯簿记**——强引用集伴随；不作 start 前置：在飞判定
-#: 权威只在 try_start_guard 事务，进程内预检会把 cancel 后的合法新轮误拒
-#: 成 409，审查 F1 裁定移除前置）。
-_COMPILE_INFLIGHT: set[str] = set()
 
 #: prepare 产物缓存（artifact_id → 取材账，值携带 batch_id 归属——释放时
 #: 归属判断防僵尸任务抹掉新轮缓存，审查 F1）。**进程重启即丢**：awaiting_toc
 #: 批次作废（confirm 后 writing 首步发现缺缓存 → failed 提示重编）。写库持久
-#: 30k 单元摘要不值当（MVP 裁定，见模块 docstring）。
+#: 30k 单元摘要不值当（MVP 裁定，见模块 docstring）。制品硬删路径经
+#: drop_prepare_cache 兜底清理（审查 I-2）。
 _PREPARE_CACHE: dict[str, "PreparedCorpus"] = {}
+
+
+def drop_prepare_cache(artifact_id: str) -> None:
+    """制品级联硬删路径的缓存清理（审查 I-2②）：无归属判断——制品已删，
+    该 artifact 的一切编译缓存都是孤儿。幂等、纯内存操作（调用方包 try/except
+    尽力而为，失败仅日志——删除主流程不受缓存清理影响）。"""
+    _PREPARE_CACHE.pop(str(artifact_id), None)
 
 
 @dataclass
@@ -156,12 +160,13 @@ class CompileService:
         self, user: dict[str, Any], artifact_id: str, *,
         expected_updated_at: Any = None,
     ) -> dict[str, Any]:
-        """启动编译：ROLE_DESIGN + 新鲜度 → 守卫事务（查在飞/护栏/建批）→
-        同步落 preparing → 后台 _run_prepare。返回 {batch_id, state}。
+        """启动编译：ROLE_DESIGN + 新鲜度 → 守卫事务（查在飞/护栏/建批——
+        INSERT 原子携带 state=preparing，审查 I-1 消除裸窗口 TOCTOU）→ 后台
+        _run_prepare。返回 {batch_id, state}。
 
-        在飞判定**只在守卫事务**（审查 F1）：进程内 _COMPILE_INFLIGHT 仅簿记
-        ——若拿它当前置，cancel 后立刻重编会被尚在批边界徘徊的旧任务误拒
-        （旧批 DB 态已 cancelled，守卫放行才是正确语义）。"""
+        在飞判定**只在守卫事务**（审查 F1）：进程内集合不作前置——cancel 后
+        立刻重编不被批边界徘徊的旧任务误拒（旧批 DB 态已 cancelled，守卫
+        放行才是正确语义）。"""
         await self._gate(user, artifact_id, expected_updated_at)
         guard = await self._inputs.try_start_guard(
             artifact_id, str(user["id"]), max_units=MAX_UNITS)
@@ -175,8 +180,6 @@ class CompileService:
             raise WikiError(
                 f"too_many_units:{int(guard.get('unit_total') or 0)}")
         batch_id = str(batch["batch_id"])
-        await self._inputs.update_batch_details(
-            batch_id, {"state": "preparing"})
         self._spawn(artifact_id, self._run_prepare(batch_id, artifact_id))
         return {"batch_id": batch_id, "state": "preparing"}
 
@@ -202,7 +205,12 @@ class CompileService:
         })
         if normalized is None:
             raise WikiError("invalid_toc")
-        if toc_page_count(normalized["toc"]) > MAX_PAGES:
+        page_total = toc_page_count(normalized["toc"])
+        if page_total == 0:
+            # 零页目录（节全空 hints）——writing 展开无页直接完结无意义，
+            # 与形状不符同走 422（审查 Minor）
+            raise WikiError("invalid_toc")
+        if page_total > MAX_PAGES:
             raise WikiError("too_many_pages")
         ok = await self._inputs.update_batch_details(
             batch_id, {"toc": normalized["toc"], "state": "writing"},
@@ -343,8 +351,6 @@ class CompileService:
             await self._fail(batch_id, f"prepare_failed:{type(exc).__name__}",
                              ("preparing", "writing"))
             self._pop_cache_if_mine(artifact_id, batch_id)
-        finally:
-            _COMPILE_INFLIGHT.discard(artifact_id)
 
     async def _toc_llm(
         self, artifact_id: str, result: Any, units_lookup: dict[str, Any],
@@ -432,6 +438,8 @@ class CompileService:
             prepared = _PREPARE_CACHE.get(artifact_id)
             batch = await self._inputs.batch_state(batch_id)
             if batch is None:
+                # 批行已消失（制品级联硬删）——孤儿缓存一并释放（审查 I-2①）
+                self._pop_cache_if_mine(artifact_id, batch_id)
                 return
             details = batch.get("details") or {}
             user = str(batch.get("created_by") or "wiki_compile")
@@ -453,7 +461,6 @@ class CompileService:
                 pages = pages[:MAX_PAGES]   # 防御性截断（confirm 已拦 >200）
             units_lookup = {
                 str(u["representation_id"]): u for u in prepared.units}
-            valid_unit_ids = set(units_lookup)
             clusters_by_id = {c.cluster_id: c for c in prepared.clusters}
             digest = toc_digest_text(details.get("toc") or [])
             total_batches = max(
@@ -482,7 +489,7 @@ class CompileService:
                 for page in chunk:
                     await self._write_one_topic_page(
                         artifact_id, page, pages, digest,
-                        constraint, units_lookup, valid_unit_ids,
+                        constraint, units_lookup,
                         clusters_by_id, user, stats, conflicts, written,
                         provenance_by_key)
                 # 每批后：全量链接重算 + 本批断链注入下批约束（§4.2 ④）
@@ -537,13 +544,11 @@ class CompileService:
                              f"writing_failed:{type(exc).__name__}",
                              ("preparing", "writing"))
             self._pop_cache_if_mine(artifact_id, batch_id)
-        finally:
-            _COMPILE_INFLIGHT.discard(artifact_id)
 
     async def _write_one_topic_page(
         self, artifact_id: str, page: dict[str, Any],
         pages: list[dict[str, Any]], digest: str, constraint: str,
-        units_lookup: dict[str, Any], valid_unit_ids: set[str],
+        units_lookup: dict[str, Any],
         clusters_by_id: dict[str, Cluster], user: str,
         stats: dict[str, Any], conflicts: list[dict[str, Any]],
         written: list[dict[str, Any]],
@@ -574,9 +579,11 @@ class CompileService:
         valid_cited = [r for r in cited if r in member_ids]
         unit_ids = (valid_cited or member_ids[:PROVENANCE_FALLBACK_IDS])
         provenance = group_provenance(unit_ids, member_units)
+        # 悬空判定口径=页簇成员并集（审查 Minor：与 provenance 记账同口径，
+        # 跨簇引用编译期即捕获——「编译干净发布却 blocking」接缝消除）
         flags = page_flags(
             str(page.get("page_type") or "topic"),
-            provenance, str(body), valid_unit_ids)
+            provenance, str(body), set(member_ids))
         if flags.get("dangling_refs"):
             stats["dangling_pages"] += 1
         outcome = await write_machine_page(
@@ -730,9 +737,8 @@ class CompileService:
         return artifact
 
     def _spawn(self, artifact_id: str, coro: Any) -> None:
-        """后台任务簿记：in-flight 键 + 强引用集（事件循环对 Task 只持弱
-        引用，照批次2 _spawn_embed 模式；done 回调释放引用）。"""
-        _COMPILE_INFLIGHT.add(artifact_id)
+        """后台任务簿记：强引用集（事件循环对 Task 只持弱引用——照批次2
+        _spawn_embed 模式；done 回调释放引用）。防重入由守卫事务权威承担。"""
         task = asyncio.create_task(coro)
         _COMPILE_TASKS.add(task)
         task.add_done_callback(_COMPILE_TASKS.discard)

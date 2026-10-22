@@ -15,11 +15,14 @@ user 对象形态 = auth.current_user 返回的 kb_users 行（id / site_role）
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
 from knowledge_mining.mining.kb.db_artifacts import ArtifactError as ArtifactRepoError
 from knowledge_mining.mining.kb.db_artifacts import _row_key_value
+
+logger = logging.getLogger(__name__)
 
 #: 运行态读（元信息/已发布行）：成员任一角色。
 ROLE_RUNTIME_READ = ("owner", "editor", "viewer")
@@ -362,6 +365,19 @@ class ArtifactService:
             # 制品；停用是可恢复的缓冲动作，删除不可恢复。
             raise InvalidOperation("artifact_not_deprecated")
         await self._db.delete_artifact(artifact_id)
+        # 63号批次3（审查 I-2②）：尽力清理编译进程内存缓存（制品已删，
+        # awaiting_toc 期的 _PREPARE_CACHE 条目成孤儿）。延迟 import——
+        # wiki_compile_service 依赖本模块，模块级 import 成环；调用期两模块
+        # 均已加载，函数内 import 无环。尽力而为：清理失败只记日志，不影响
+        # 删除主流程。
+        try:
+            from knowledge_mining.mining.kb.services.wiki_compile_service import (
+                drop_prepare_cache,
+            )
+            drop_prepare_cache(artifact_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "编译缓存清理失败（不影响删除）artifact=%s", artifact_id)
 
     # -------------------------------------------------------------- 成员
 

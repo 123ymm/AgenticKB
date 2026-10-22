@@ -114,7 +114,9 @@ class FakeCompileInputsDB:
     """CompileInputsDB 内存实现（T1 版扩展编译域四方法）。守卫语义与真库
     同构：update_batch_details 按 state 白名单拦截；complete_batch 守卫
     'writing' + row_count 同笔；try_start_guard 查在飞→查源→Σ护栏→建批
-    （超限不建批——不留孤儿批次行；advisory lock 由单线程事件循环天然串行）。"""
+    （超限不建批——不留孤儿批次行；**建批 INSERT 原子携带
+    state=preparing**（审查 I-1），_guard_lock 模拟 pg_advisory_xact_lock
+    的跨协程串行化，guard_yield 在「检查后 INSERT 前」让位制造竞态窗口）。"""
 
     def __init__(self, artifacts: dict[str, dict]) -> None:
         self.artifacts = artifacts
@@ -129,6 +131,9 @@ class FakeCompileInputsDB:
         # kb_id -> 取材单元行（directory_path 过滤镜像 _DIR_FILTER）
         self.collected: dict[str, list[dict]] = {}
         self.guard_calls: int = 0
+        # 模拟 advisory lock 的守卫串行化 + 竞态窗口注入（审查 I-1 测试）
+        self._guard_lock = asyncio.Lock()
+        self.guard_yield = False
 
     def _touch(self, artifact_id: str) -> None:
         self.touches.append(artifact_id)
@@ -237,36 +242,43 @@ class FakeCompileInputsDB:
     async def try_start_guard(self, artifact_id: str, created_by: str, *,
                               max_units: int) -> dict:
         self.guard_calls += 1
-        latest = await self.latest_compile_batch(artifact_id)
-        if latest is not None:
-            state = str((latest.get("details") or {}).get("state") or "")
-            if state in ("preparing", "awaiting_toc", "writing"):
-                return {"in_flight": latest, "batch": None,
+        async with self._guard_lock:   # 模拟 pg_advisory_xact_lock 串行化
+            latest = await self.latest_compile_batch(artifact_id)
+            if latest is not None:
+                state = str((latest.get("details") or {}).get("state") or "")
+                if state in ("preparing", "awaiting_toc", "writing"):
+                    return {"in_flight": latest, "batch": None,
+                            "sources": [], "unit_total": 0}
+            sources = await self.list_sources(artifact_id)
+            if not sources:
+                return {"in_flight": None, "batch": None,
                         "sources": [], "unit_total": 0}
-        sources = await self.list_sources(artifact_id)
-        if not sources:
-            return {"in_flight": None, "batch": None,
-                    "sources": [], "unit_total": 0}
-        total = 0
-        for src in sources:
-            dirs = [str(d) for d in
-                    ((src.get("scope") or {}).get("directories") or [])]
-            fp = await self.current_fingerprint(str(src["kb_id"]), dirs)
-            total += sum(int(s["unit_count"]) for s in fp["snapshots"])
-        if total > int(max_units):
-            return {"in_flight": None, "batch": None,
+            total = 0
+            for src in sources:
+                dirs = [str(d) for d in
+                        ((src.get("scope") or {}).get("directories") or [])]
+                fp = await self.current_fingerprint(str(src["kb_id"]), dirs)
+                total += sum(int(s["unit_count"]) for s in fp["snapshots"])
+            if total > int(max_units):
+                return {"in_flight": None, "batch": None,
+                        "sources": sources, "unit_total": total}
+            if self.guard_yield:
+                # 竞态窗口注入：检查已过、INSERT 未落——并发的第二个 start
+                # 在真库会被 advisory lock 挡在检查前，此处由 _guard_lock
+                # 同构保证；yield 验证建批原子携带 preparing 后此窗口无害。
+                await asyncio.sleep(0)
+            batch = {
+                "batch_id": f"bat_{uuid.uuid4().hex[:12]}",
+                "artifact_id": artifact_id, "channel": "wiki_compile",
+                "file_name": "", "sheet_name": "", "row_count": 0,
+                "created_by": created_by,
+                "created_at": datetime.now(timezone.utc),
+            }
+            self.batches.append(batch)
+            # INSERT 原子携带 preparing（审查 I-1——与真库同构）
+            self.batch_details[batch["batch_id"]] = {"state": "preparing"}
+            return {"in_flight": None, "batch": dict(batch),
                     "sources": sources, "unit_total": total}
-        batch = {
-            "batch_id": f"bat_{uuid.uuid4().hex[:12]}",
-            "artifact_id": artifact_id, "channel": "wiki_compile",
-            "file_name": "", "sheet_name": "", "row_count": 0,
-            "created_by": created_by,
-            "created_at": datetime.now(timezone.utc),
-        }
-        self.batches.append(batch)
-        self.batch_details[batch["batch_id"]] = {}
-        return {"in_flight": None, "batch": dict(batch),
-                "sources": sources, "unit_total": total}
 
     async def update_batch_details(self, batch_id: str, patch: dict, *,
                                    guard_states=None) -> bool:
@@ -415,9 +427,8 @@ async def env():
                 client=client, holder=holder,
             )
         finally:
-            # 排空残留后台编译任务：模块级 _COMPILE_INFLIGHT/_PREPARE_CACHE 跨
-            # 测试共享，任务 finally 不跑会污染下一用例（loop 关闭时任务销毁
-            # 的 finally 时机不确定）。
+            # 排空残留后台编译任务：模块级 _PREPARE_CACHE 跨测试共享，任务
+            # 退出路径不跑会污染下一用例（loop 关闭时任务销毁时机不确定）。
             others = [t for t in asyncio.all_tasks()
                       if t is not asyncio.current_task()]
             if others:
@@ -540,7 +551,7 @@ async def test_full_state_machine_happy_path(env):
     # rev0 落页：origin=machine + 页键归一
     page = await env.wdb.get_page(WID, 0, "页A")
     assert page is not None and page["origin"] == "machine"
-    assert page["ordinal"] == 101                  # 节1 页1
+    assert page["ordinal"] == 1001                 # 节1 页1（1000 基数）
     # draft 已开（编译产物可发布）
     assert env.adb.artifacts[WID]["draft_open"] is True
 
@@ -778,6 +789,32 @@ async def test_second_start_while_inflight_409(env):
         await _start(env)
 
 
+async def test_start_race_concurrent_second_rejected(env):
+    """审查 I-1 TOCTOU：守卫在「检查后 INSERT 前」让位（guard_yield），并发
+    第二个 start 仍被拒——建批 INSERT 原子携带 state=preparing，B 的在飞
+    检查（被 _guard_lock 挡到 A 提交后，同构真库 advisory lock）看到
+    preparing 即拒；全库只建一个批次。"""
+    all_units = _seed_corpus(env)
+    await _bind_all(env)
+    env.gen.queue = [
+        _toc_json(["页A"], _cluster_id(all_units)),
+        _page_body("页A"), _quality("页A", "页A")]
+    env.inputs.guard_yield = True   # 检查与 INSERT 之间让位一次
+    results = await asyncio.gather(
+        env.compile_svc.start(_user("u-alice"), WID),
+        env.compile_svc.start(_user("u-alice"), WID),
+        return_exceptions=True)
+    ok = [r for r in results if not isinstance(r, Exception)]
+    errs = [r for r in results if isinstance(r, Exception)]
+    assert len(ok) == 1 and len(errs) == 1, results
+    assert "compile_in_progress" in str(errs[0])
+    wiki_batches = [b for b in env.inputs.batches
+                    if b["channel"] == "wiki_compile"]
+    assert len(wiki_batches) == 1                  # 只建一个批次
+    assert env.inputs.batch_details[wiki_batches[0]["batch_id"]]["state"] \
+        == "preparing"                             # INSERT 原子携带
+
+
 async def test_start_stale_token_409(env):
     """乐观锁失配 → StaleArtifact（409 家族，路由翻 stale_artifact）。"""
     env.inputs.collected["kb-1"] = _units("u", "snap-1", 6)
@@ -885,6 +922,23 @@ async def test_confirm_over_200_pages_422(env):
         == "awaiting_toc"
 
 
+async def test_confirm_zero_pages_422(env):
+    """审查 Minor：零页目录（空列表 / 节全空 hints）→ 422 invalid_toc
+    （writing 展开无页直接完结无意义）。"""
+    all_units = _seed_corpus(env)
+    await _bind_all(env)
+    env.gen.queue = [_toc_json(["页A"], _cluster_id(all_units))]
+    await _start(env)
+    await _wait_state(env, "awaiting_toc")
+    with pytest.raises(WikiError, match="invalid_toc"):
+        await _confirm(env, [])                    # 空列表（normalize 拒）
+    with pytest.raises(WikiError, match="invalid_toc"):
+        await _confirm(env, [{"section_title": "空节",
+                              "page_hints": []}])  # 节在页零
+    assert _details(await env.inputs.latest_compile_batch(WID))["state"] \
+        == "awaiting_toc"
+
+
 async def test_confirm_wrong_state_409_and_not_found(env):
     """非 awaiting_toc 的 confirm → 409 invalid_compile_state；无批次 → 404
     compile_not_found。"""
@@ -916,6 +970,22 @@ async def test_prepare_cache_lost_fails_writing(env):
     await _confirm(env, toc)
     batch = await _wait_state(env, "failed")
     assert "cache" in str(_details(batch)["error"])
+
+
+async def test_artifact_delete_drops_prepare_cache(env):
+    """审查 I-2②：制品级联硬删 → drop_prepare_cache 兜底清理（awaiting_toc
+    期的缓存不再成孤儿——延迟 import 接线在 ArtifactService.delete_artifact）。"""
+    all_units = _seed_corpus(env)
+    await _bind_all(env)
+    env.gen.queue = [_toc_json(["页A"], _cluster_id(all_units))]
+    await _start(env)
+    await _wait_state(env, "awaiting_toc")
+    assert WID in _PREPARE_CACHE
+
+    # 两级确认：先 deprecate 再删（delete_artifact 门禁）
+    env.adb.artifacts[WID]["status"] = "deprecated"
+    await env.art_svc.delete_artifact(user=_user("u-alice"), artifact_id=WID)
+    assert WID not in _PREPARE_CACHE
 
 
 # ------------------------------------------------------------ 写作分批
@@ -1060,7 +1130,47 @@ async def test_citation_flags_three_kinds(env):
     noclu = await env.wdb.get_page(WID, 0, "无簇页")
     assert noclu["flags"]["provenance_missing"] is True
     assert noclu["provenance"] == []
-    assert det["stats"]["dangling_pages"] == 1
+    # 无簇页的 u0 引用也悬空（valid=页簇成员并集=空集——口径收窄后跨「无簇」
+    # 引用同样编译期捕获）
+    assert noclu["flags"]["dangling_refs"] == ["u0"]
+    assert det["stats"]["dangling_pages"] == 2
+
+
+async def test_cross_cluster_ref_dangling_at_compile(env):
+    """审查 Minor：悬空口径第三接缝收窄——valid_unit_ids=页簇成员并集（与
+    provenance 记账同口径），引用**他簇的真实 unit id** 编译期即 dangling
+    （「编译干净发布却 blocking」的接缝消除）。"""
+    # 两簇语料：u 簇同向 A 向量、w 簇同向 B 向量（余弦 0 < 0.62 → 两簇）
+    u_units = _units("u", "snap-1", 3)
+    w_units = _units("w", "snap-9", 3)
+    for unit in w_units:
+        unit["embedding"] = array("f", (0.0, 1.0, 0.0, 0.0))
+    env.inputs.collected["kb-1"] = u_units + w_units
+    env.inputs.kb_fingerprints["kb-1"] = {
+        "snapshots": [
+            {"snapshot_id": "snap-1", "unit_count": 3,
+             "directory_path": "方案"},
+            {"snapshot_id": "snap-9", "unit_count": 3,
+             "directory_path": "方案"}],
+        "computed_at": "X"}
+    await _bind(env)
+    cid_u = _cluster_id(u_units)   # 页只挂 u 簇
+
+    env.gen.queue = [
+        _toc_json(["页A"], cid_u),
+        _page_body("页A", refs=("u0", "w0")),   # w0 真实存在但跨簇
+        _quality("页A", "页A")]
+    await _start(env)
+    await _wait_state(env, "awaiting_toc")
+    toc = _details(await env.inputs.latest_compile_batch(WID))["toc"]
+    await _confirm(env, toc)
+    await _wait_state(env, "completed")
+
+    page = await env.wdb.get_page(WID, 0, "页A")
+    assert page["flags"]["dangling_refs"] == ["w0"]
+    # provenance 记账同口径：跨簇引用不入账（只有簇内 u0）
+    assert page["provenance"] == [
+        {"kb_id": "kb-1", "snapshot_id": "snap-1", "unit_ids": ["u0"]}]
 
 
 async def test_draft_exempt_manual_pages_not_flagged(env):

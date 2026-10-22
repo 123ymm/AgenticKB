@@ -430,7 +430,10 @@ class CompileInputsDB:
            unit_total（service 翻 422 too_many_units，同样不建批）；
         ④ INSERT 新批次（channel=wiki_compile，file_name/sheet_name 空串——
            NOT NULL DEFAULT '' 列的显式放行口径，对齐 db_artifacts.create_batch
-           的 wiki_compile 分支）。
+           的 wiki_compile 分支）。**details 随 INSERT 原子携带
+           {"state": "preparing"}**（审查 I-1：若依赖调用方随后第二个事务补写
+           preparing，守卫在「本事务提交→补写落地」的裸窗口里查到的 state 是
+           空串——并发第二个 start 会双建批双 prepare）。
 
         返回 ``{"in_flight": 行|None, "batch": 新行|None, "sources": [...],
         "unit_total": int}``——service 只做翻译不做判定，判定语义全部留在
@@ -481,10 +484,12 @@ class CompileInputsDB:
                 cur = await conn.execute(
                     """INSERT INTO kb_artifact_batches
                        (batch_id, artifact_id, channel, file_name, sheet_name,
-                        row_count, created_by)
-                       VALUES (%(bid)s, %(a)s, 'wiki_compile', '', '', 0, %(u)s)
+                        row_count, created_by, details)
+                       VALUES (%(bid)s, %(a)s, 'wiki_compile', '', '', 0, %(u)s,
+                               '{"state": "preparing"}'::jsonb)
                        RETURNING batch_id, artifact_id, channel, file_name,
-                                 sheet_name, row_count, created_by, created_at""",
+                                 sheet_name, row_count, created_by, created_at,
+                                 details""",
                     {"bid": f"bat_{uuid.uuid4().hex}", "a": artifact_id,
                      "u": created_by},
                 )

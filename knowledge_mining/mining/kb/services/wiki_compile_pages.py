@@ -119,8 +119,9 @@ def toc_page_count(toc: list[Any]) -> int:
 
 
 def expand_toc_pages(toc: list[Any]) -> list[dict[str, Any]]:
-    """目录 → 待写页清单：{title, page_type, cluster_ids, ordinal=节序*100+
-    页序}（文档序）。"""
+    """目录 → 待写页清单：{title, page_type, cluster_ids, ordinal=节序*1000+
+    页序}（文档序）。基数 1000（审查 Minor）：100 基数下节内第 100 页起与
+    下一节首页撞 ordinal；页 cap MAX_PAGES=200 < 1000，1000 基数内不撞。"""
     pages: list[dict[str, Any]] = []
     for si, sec in enumerate(toc):
         if not isinstance(sec, dict):
@@ -133,7 +134,7 @@ def expand_toc_pages(toc: list[Any]) -> list[dict[str, Any]]:
                 "page_type": str(hint.get("page_type") or "topic"),
                 "cluster_ids": [str(c) for c in (hint.get("cluster_ids")
                                                  or [])],
-                "ordinal": (si + 1) * 100 + (pi + 1),
+                "ordinal": (si + 1) * 1000 + (pi + 1),
             })
     return pages
 
@@ -214,13 +215,14 @@ def page_flags(
     valid_unit_ids: set[str],
 ) -> dict[str, Any]:
     """页级引用校验三件（§4.4，确定性代码非 LLM）→ flags：
-    provenance 空（仅 topic 计）→ provenance_missing；行内 src ∉ 取材全集 →
-    dangling_refs=[...]；连续 ≥3 事实句无引用 → density_warning。
+    provenance 空（仅 topic 计）→ provenance_missing；行内 src ∉ valid_unit_ids
+    → dangling_refs=[...]；连续 ≥3 事实句无引用 → density_warning。
 
-    悬空口径分层（审查 F3，两处有意不同）：**编译期（本函数）= 当轮全语料
-    取材全集**（严——LLM 只准引用给定素材）；**发布期
+    悬空口径分层（审查 F3+Minor，三处有意不同）：**编译期（本函数）=
+    页簇成员并集**（调用方传 member_ids——与 provenance 记账同口径，跨簇引用
+    编译期即捕获，「编译干净发布却 blocking」的接缝消除）；**发布期
     （validate_pages_for_publish）= rev0 provenance unit_ids 并集**（宽——
-    发布时已拿不到编译语料全集，rev0 内证有据即放行，err-safe 方向为放行）。"""
+    发布时已拿不到编译语料/簇账，rev0 内证有据即放行，err-safe 方向为放行）。"""
     flags: dict[str, Any] = {}
     if page_type == "topic" and not provenance:
         flags["provenance_missing"] = True
@@ -264,9 +266,10 @@ async def validate_pages_for_publish(
     返回 (blocking, warnings)：
     - 任何页行内 ``[[src:]]`` 悬空（∉ 该页 provenance unit_ids ∪ 全 rev0
       provenance 并集）→ blocking（§4.4 铁律：LLM 只复核不判存在性）。
-      **悬空口径分层（审查 F3）**：编译期（page_flags）用当轮全语料取材
-      全集（严）；本函数收窄到 rev0 provenance 并集——发布时拿不到编译语料
-      全集，rev0 内证有据即放行（err-safe 方向为放行），有意分层非不一致；
+      **悬空口径分层（审查 F3+Minor）**：编译期（page_flags）用页簇成员
+      并集（严，与 provenance 记账同口径——跨簇引用编译期即捕获）；本函数
+      收窄到 rev0 provenance 并集——发布时拿不到编译语料/簇账，rev0 内证
+      有据即放行（err-safe 方向为放行），有意分层非不一致；
     - machine **topic** 页 provenance 空 → blocking（机器可查来源账硬性）；
     - manual 页 provenance 空 → warning（记录偏差：设计「硬性」降警告——批次2
       编辑器无 provenance 录入 UI，硬阻断封死人工页发布路径；补录入 UI 后可
