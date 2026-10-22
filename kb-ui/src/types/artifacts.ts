@@ -224,3 +224,85 @@ export interface WikiStatus {
   revision: number
   units: WikiUnitsStatus
 }
+
+// ── Wiki 编译管线（63号批次3：sources 三端点 + compile 四端点）──
+
+/**
+ * 绑定源行（GET /wiki/sources 信封 {sources}）。dirty 三态（63号批次3
+ * 裁定）：true=绑定范围内语料已变化（建议重编译）；false=与指纹一致；
+ * null=库已不可读，无法判定（前端显示「未知」，行仍可见只隐库元数据）。
+ * dirty/kb_title/unreadable 为列表端点计算字段——PUT 响应不带（可选）。
+ */
+export interface WikiSource {
+  kb_id: string
+  /** 决策6 契约：{"directories": ["a/b", ...]}（空数组=全库）。 */
+  scope: { directories?: string[] } & Record<string, unknown>
+  status: string | null
+  fingerprint: Record<string, unknown> | null
+  created_by?: string | null
+  created_at: string
+  dirty?: boolean | null
+  kb_title?: string | null
+  unreadable?: boolean
+}
+
+/** 目录页提示（toc 树叶子；POST /wiki/compile/toc 请求体同构）。 */
+export interface WikiTocPageHint {
+  title: string
+  cluster_ids: string[]
+  page_type: string
+}
+
+/** 目录节（awaiting_toc 时 status.toc 数组元素 / 确认请求体元素）。 */
+export interface WikiTocSection {
+  section_title: string
+  page_hints: WikiTocPageHint[]
+}
+
+/** 编译状态机全集（批次3 决策1；无批时后端 404 compile_not_found）。 */
+export type WikiCompileState =
+  | 'preparing' | 'awaiting_toc' | 'writing'
+  | 'completed' | 'failed' | 'cancelled'
+
+/** 编译报告计数（prepare 与 writing 两段合并；缺项由端点补 0/省略）。 */
+export interface WikiCompileStats {
+  /** prepare 段：取材单元数 / 聚类数 / 向量覆盖率。 */
+  unit_count?: number
+  cluster_count?: number
+  embedded_ratio?: number
+  /** writing 段。 */
+  pages_written?: number
+  failed_pages?: number
+  dropped_pages?: number
+  broken_links?: number
+  dangling_pages?: number
+  /** 专页计数（质量调用 + 术语表派生）。 */
+  contradiction_pages?: number
+  open_question_pages?: number
+  glossary_pages?: number
+  /** 机器页与人工页同键冲突数（conflicts 明细的长度口径）。 */
+  conflicts_n?: number
+  [key: string]: unknown
+}
+
+/** origin 冲突明细行（机器页撞 manual 键被跳过——人工裁决后重编译）。 */
+export interface WikiCompileConflict {
+  page_key?: string
+  manual_title?: string
+  machine_title?: string
+  [key: string]: unknown
+}
+
+/**
+ * GET /wiki/compile/status 返回体（design-only；无批 → 404
+ * compile_not_found，前端映射 idle）。toc 仅 awaiting_toc 时附带。
+ */
+export interface WikiCompileStatus {
+  batch_id: string
+  state: WikiCompileState | string
+  progress?: { batch?: string; pages_done?: number }
+  stats?: WikiCompileStats
+  conflicts?: WikiCompileConflict[]
+  toc?: WikiTocSection[]
+  error?: string | null
+}

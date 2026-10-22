@@ -77,15 +77,24 @@
     <el-tabs v-if="artifact" v-model="activeTab" class="artifact-detail__tabs">
       <!-- ── 设计态：导入向导 / 列定义 / 行编辑三面板（owner+editor；viewer 无设计态）── -->
       <el-tab-pane label="设计态" name="design">
-        <!-- wiki 编辑面板（63号批次2）：viewer 也可读（面板内部按 canWrite 收敛写入口） -->
-        <WikiEditorPanel
-          v-if="artifact.kind === 'wiki'"
-          :artifact-id="artifactId"
-          :can-write="canWrite"
-          :expected-updated-at="artifact.updated_at"
-          :draft-open="artifact.draft_open"
-          @changed="reloadAll"
-        />
+        <!-- wiki 分支（63号批次2/3）：编译面板（来源绑定+目录确认+进度轮询）
+             在上、页面编辑面板在下；viewer 也可读（面板内部按 canWrite 收敛写入口） -->
+        <template v-if="artifact.kind === 'wiki'">
+          <WikiCompilePanel
+            :artifact-id="artifactId"
+            :can-write="canWrite"
+            :expected-updated-at="artifact.updated_at"
+            @changed="reloadAll"
+          />
+          <el-divider content-position="left">页面编辑</el-divider>
+          <WikiEditorPanel
+            :artifact-id="artifactId"
+            :can-write="canWrite"
+            :expected-updated-at="artifact.updated_at"
+            :draft-open="artifact.draft_open"
+            @changed="reloadAll"
+          />
+        </template>
         <template v-else-if="canWrite">
           <ArtifactImportWizard
             :artifact-id="artifactId"
@@ -257,6 +266,7 @@ import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
 import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
 import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.vue'
 import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
+import WikiCompilePanel from '@/components/artifacts/WikiCompilePanel.vue'
 import WikiEditorPanel from '@/components/artifacts/WikiEditorPanel.vue'
 import WikiReaderPanel from '@/components/artifacts/WikiReaderPanel.vue'
 import { decodeRowKey } from '@/utils/rowKey'

@@ -103,7 +103,8 @@ describe('artifact detail view', () => {
     // 设计态草稿新列不得进入运行态表头（codex二审功能项②）
     expect(vm.runtimeColumns.map(c => c.column_name)).not.toContain('草稿新列')
 
-    // 表格路径回归（批次2 拆守卫后）：wiki 双面板不渲染，发布单位缺省=行
+    // 表格路径回归（批次2 拆守卫后）：wiki 三面板（编译/编辑/阅读）不渲染，发布单位缺省=行
+    expect(wrapper.findComponent({ name: 'WikiCompilePanel' }).exists()).toBe(false)
     expect(wrapper.findComponent({ name: 'WikiEditorPanel' }).exists()).toBe(false)
     expect(wrapper.findComponent({ name: 'WikiReaderPanel' }).exists()).toBe(false)
     expect(wrapper.findComponent({ name: 'ArtifactPublishDialog' }).props('unitLabel')).toBe('行')
@@ -131,6 +132,18 @@ describe('artifact detail view', () => {
     const reader = wrapper.findComponent({ name: 'WikiReaderPanel' })
     expect(reader.exists()).toBe(true)
     expect(reader.props('artifactId')).toBe('art-1')
+
+    // 批次3：设计态顶部挂编译面板（来源绑定+目录确认+进度轮询），
+    // 终态 emit changed → reloadAll 刷新乐观锁令牌（编译页写推进令牌）
+    const compile = wrapper.findComponent({ name: 'WikiCompilePanel' })
+    expect(compile.exists()).toBe(true)
+    expect(compile.props('artifactId')).toBe('art-1')
+    expect(compile.props('canWrite')).toBe(true)
+    expect(compile.props('expectedUpdatedAt')).toBe('2026-10-16T09:00:00+00:00')
+    const getBefore = state.api.get.mock.calls.length
+    compile.vm.$emit('changed')
+    await flushPromises()
+    expect(state.api.get.mock.calls.length).toBe(getBefore + 1)
 
     // 表格三组件不渲染（wiki 路径）
     expect(wrapper.findComponent({ name: 'ArtifactImportWizard' }).exists()).toBe(false)

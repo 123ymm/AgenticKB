@@ -22,11 +22,14 @@ import type {
   PreviewEnvelope,
   PublishResult,
   RevisionInfo,
+  WikiCompileStatus,
   WikiLink,
   WikiPage,
   WikiPageMeta,
   WikiPageType,
+  WikiSource,
   WikiStatus,
+  WikiTocSection,
 } from '@/types/artifacts'
 
 export interface ArtifactCreateRequest {
@@ -383,6 +386,73 @@ export function useArtifactsApi() {
     /** units embedding 进度（运行态信息，viewer+ 可读）。 */
     async getWikiStatus(artifactId: string): Promise<WikiStatus> {
       const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/status`)
+      return data
+    },
+
+    // ── Wiki 编译管线（63号批次3：sources 三端点 + compile 四端点）──
+    // 状态端点 design-only；无批时后端 404 compile_not_found（调用方
+    // （WikiCompilePanel）捕获后映射 idle——无编辑器令牌的编译操作后端
+    // 不 touch 制品，编译页写才推进乐观锁令牌（终态后须刷新详情）。
+
+    /** 绑定源列表（dirty 三态/kb_title/unreadable 计算字段见 WikiSource）。 */
+    async listWikiSources(artifactId: string): Promise<WikiSource[]> {
+      const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/sources`)
+      return data.sources ?? []
+    },
+
+    /** 绑定/更新来源（touch 制品——成功后调用方须刷新乐观锁令牌）。
+     * 返回绑定行（计算字段以 list 口径为准）。 */
+    async upsertWikiSource(
+      artifactId: string,
+      payload: { kb_id: string; directories: string[]; expected_updated_at?: string },
+    ): Promise<WikiSource> {
+      const { data } = await client.put(`/api/artifacts/${artifactId}/wiki/sources`, payload)
+      return data
+    },
+
+    /** 解绑来源（锁令牌随 body；kb_id 为全 ASCII TEXT id，path 直传）。 */
+    async deleteWikiSource(
+      artifactId: string, kbId: string, expectedUpdatedAt?: string,
+    ): Promise<void> {
+      await client.delete(
+        `/api/artifacts/${artifactId}/wiki/sources/${kbId}`,
+        { data: { expected_updated_at: expectedUpdatedAt } },
+      )
+    },
+
+    /** 启动编译 → {batch_id, state:'preparing'}（在飞 409 / 无源·超限 422）。 */
+    async startCompile(
+      artifactId: string, expectedUpdatedAt?: string,
+    ): Promise<{ batch_id: string; state: string }> {
+      const { data } = await client.post(
+        `/api/artifacts/${artifactId}/wiki/compile`,
+        { expected_updated_at: expectedUpdatedAt })
+      return data
+    },
+
+    /** 编译进度（awaiting_toc 时附带 toc；终态附带 stats/conflicts/error）。 */
+    async compileStatus(artifactId: string): Promise<WikiCompileStatus> {
+      const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/compile/status`)
+      return data
+    },
+
+    /** 确认（可编辑）目录 → writing（展开页数 >200 后端 422 too_many_pages）。 */
+    async confirmToc(
+      artifactId: string, toc: WikiTocSection[], expectedUpdatedAt?: string,
+    ): Promise<{ state: string }> {
+      const { data } = await client.post(
+        `/api/artifacts/${artifactId}/wiki/compile/toc`,
+        { toc, expected_updated_at: expectedUpdatedAt })
+      return data
+    },
+
+    /** 取消在飞编译（awaiting_toc 即时生效；writing 批边界停止）。 */
+    async cancelCompile(
+      artifactId: string, expectedUpdatedAt?: string,
+    ): Promise<{ state: string }> {
+      const { data } = await client.post(
+        `/api/artifacts/${artifactId}/wiki/compile/cancel`,
+        { expected_updated_at: expectedUpdatedAt })
       return data
     },
   }

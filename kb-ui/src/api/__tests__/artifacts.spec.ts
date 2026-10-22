@@ -23,6 +23,9 @@ vi.mock('axios', () => ({
         if (url.includes('/wiki/page/')) return { data: { page_key: 'home', body_md: '# x' } }
         if (url.includes('/wiki/links')) return { data: { links: [{ from_page: 'home', to_page: 'a', anchor_text: '', status: 'valid' }] } }
         if (url.includes('/wiki/status')) return { data: { revision: 1, units: { total: 2, done: 1, failed: 0, pending: 1 } } }
+        if (url.endsWith('/wiki/sources')) return { data: { sources: [{ kb_id: 'kb-1' }] } }
+        if (url.endsWith('/wiki/compile/status')) return { data: { batch_id: 'b1', state: 'writing', progress: { batch: '1/2', pages_done: 3 } } }
+        if (url.includes('/wiki/compile')) return { data: { batch_id: 'b1', state: 'preparing' } }
         if (url === '/api/artifacts') return { data: { artifacts: [{ artifact_id: 'a1' }] } }
         return { data: { artifact_id: 'a1' } }
       }
@@ -243,5 +246,58 @@ describe('artifacts API', () => {
       revision: 1, units: { total: 2, done: 1, failed: 0, pending: 1 },
     })
     await expect(api.getWikiPage('a1', 'home')).resolves.toMatchObject({ page_key: 'home' })
+  })
+
+  it('builds the seven wiki compile calls (sources CRUD + compile pipeline) with lock tokens', async () => {
+    const api = useArtifactsApi()
+    const token = '2026-10-16T00:00:00Z'
+
+    await api.listWikiSources('a1')
+    expect(state.requests[0]).toMatchObject({ method: 'get', url: '/api/artifacts/a1/wiki/sources' })
+
+    await api.upsertWikiSource('a1', {
+      kb_id: 'kb-1', directories: ['docs/net', 'docs/ops'], expected_updated_at: token,
+    })
+    expect(state.requests[1]).toMatchObject({ method: 'put', url: '/api/artifacts/a1/wiki/sources' })
+    expect(state.requests[1].body).toEqual({
+      kb_id: 'kb-1', directories: ['docs/net', 'docs/ops'], expected_updated_at: token,
+    })
+
+    await api.deleteWikiSource('a1', 'kb-1', token)
+    expect(state.requests[2]).toMatchObject({ method: 'delete', url: '/api/artifacts/a1/wiki/sources/kb-1' })
+    expect(state.requests[2].config.data).toEqual({ expected_updated_at: token })
+
+    await api.startCompile('a1', token)
+    expect(state.requests[3]).toMatchObject({ method: 'post', url: '/api/artifacts/a1/wiki/compile' })
+    expect(state.requests[3].body).toEqual({ expected_updated_at: token })
+
+    await api.compileStatus('a1')
+    expect(state.requests[4]).toMatchObject({ method: 'get', url: '/api/artifacts/a1/wiki/compile/status' })
+
+    await api.confirmToc('a1', [{
+      section_title: '网络',
+      page_hints: [{ title: '组网', cluster_ids: ['c1', 'c2'], page_type: 'topic' }],
+    }], token)
+    expect(state.requests[5]).toMatchObject({ method: 'post', url: '/api/artifacts/a1/wiki/compile/toc' })
+    expect(state.requests[5].body).toEqual({
+      toc: [{
+        section_title: '网络',
+        page_hints: [{ title: '组网', cluster_ids: ['c1', 'c2'], page_type: 'topic' }],
+      }],
+      expected_updated_at: token,
+    })
+
+    await api.cancelCompile('a1', token)
+    expect(state.requests[6]).toMatchObject({ method: 'post', url: '/api/artifacts/a1/wiki/compile/cancel' })
+    expect(state.requests[6].body).toEqual({ expected_updated_at: token })
+  })
+
+  it('unwraps wiki sources and compile status envelopes', async () => {
+    const api = useArtifactsApi()
+
+    await expect(api.listWikiSources('a1')).resolves.toEqual([{ kb_id: 'kb-1' }])
+    await expect(api.compileStatus('a1')).resolves.toMatchObject({
+      batch_id: 'b1', state: 'writing',
+    })
   })
 })
