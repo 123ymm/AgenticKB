@@ -17,12 +17,7 @@
             </span>
             <span class="wiki-compile__dirs">
               <el-tag v-if="directoriesOf(src).length === 0" size="small" type="info" effect="plain">全库</el-tag>
-              <el-tag
-                v-for="d in directoriesOf(src)"
-                :key="d"
-                size="small"
-                effect="plain"
-              >{{ d }}</el-tag>
+              <el-tag v-for="d in directoriesOf(src)" :key="d" size="small" effect="plain">{{ d }}</el-tag>
             </span>
           </div>
           <el-tag size="small" :type="dirtyBadge(src.dirty).type" data-test="wiki-source-dirty">
@@ -160,10 +155,13 @@ import WikiTocEditor from './WikiTocEditor.vue'
 import type { KbSummary } from '@/types/kb'
 import type { WikiCompileStatus, WikiSource, WikiTocSection } from '@/types/artifacts'
 
-/** 轮询周期（批次3 口径：5s；仅 awaiting_toc/writing 在飞态发请求）。 */
+/** 轮询周期（批次3 口径：5s）。 */
 const POLL_MS = 5000
 const IN_FLIGHT = new Set(['preparing', 'awaiting_toc', 'writing'])
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
+/** 轮询态=preparing/writing——**不含 awaiting_toc**：该态服务端在等用户
+ * 输入无状态变化，轮询响应会以新 toc 引用重置编辑器、静默清空半程编辑。 */
+const POLL_STATES = new Set(['preparing', 'writing'])
 
 const props = defineProps<{
   artifactId: string
@@ -205,12 +203,24 @@ const idleHint = computed(() => {
   return '编译将取材绑定来源 → 聚类 → 确认目录 → 自动写作'
 })
 
-/** 轮询（复用 usePolling：unmount 自动 clearInterval；gate=design 角色
- * 且在飞态——终态/非编辑者一个请求都不发）。 */
+/** 轮询（复用 usePolling：unmount 自动 clearInterval；启停唯一入口=
+ * syncPolling）。 */
 const { start: startPolling, stop: stopPolling } = usePolling(fetchStatus, POLL_MS, {
   immediate: false,
-  shouldRun: () => props.canWrite && IN_FLIGHT.has(state.value),
+  shouldRun: () => props.canWrite && POLL_STATES.has(state.value),
 })
+
+/** 轮询单例编排（applyStatus 统一驱动）：pollRunning 守卫防每次状态落地
+ * 重置 interval 节拍；制品切换后重取落态即在此**重启**（定时器已被上一
+ * 制品的终态停掉——只靠 gate 不会复活，审查 MEDIUM）。 */
+let pollRunning = false
+function syncPolling(): void {
+  const want = props.canWrite && POLL_STATES.has(state.value)
+  if (want === pollRunning) return
+  pollRunning = want
+  if (want) startPolling()
+  else stopPolling()
+}
 
 onMounted(() => {
   addDomain.value = domainStore.currentDomain
@@ -218,7 +228,8 @@ onMounted(() => {
   if (props.canWrite) void fetchStatus()
 })
 
-/** 制品切换（路由复用组件）→ 重置一切并重取（轮询 gate 按新状态自愈）。 */
+/** 制品切换（路由复用组件不重挂）→ 重置一切并重取；重取落态经
+ * applyStatus → syncPolling 按新制品状态重启轮询。 */
 watch(() => props.artifactId, () => {
   status.value = null
   sources.value = []
@@ -226,9 +237,7 @@ watch(() => props.artifactId, () => {
   if (props.canWrite) void fetchStatus()
 })
 
-function directoriesOf(src: WikiSource): string[] {
-  return src.scope?.directories ?? []
-}
+const directoriesOf = (src: WikiSource): string[] => src.scope?.directories ?? []
 
 /** dirty 三态徽标（null=不可读库，显示「未知」——不泄露库内容变化信号）。 */
 function dirtyBadge(dirty: boolean | null | undefined): { type: 'warning' | 'success' | 'info'; text: string } {
@@ -292,18 +301,17 @@ async function removeSource(src: WikiSource): Promise<void> {
   } catch (error) { await actionFailed('解绑失败', error) }
 }
 
-/** 状态落地：终态即停轮询；从在飞态观测到终态时 emit changed（M4 铁律：
- * 编译页写推进乐观锁令牌——不刷新则编辑器旧令牌首次保存必 409）+ 刷新
- * 来源（编译后指纹对齐，dirty 徽标归零）。 */
+/** 状态落地：syncPolling 统一启停（awaiting_toc/终态停，preparing/writing
+ * 跑）；从在飞态观测到终态时 emit changed（M4 铁律：编译页写推进乐观锁
+ * 令牌——不刷新则编辑器旧令牌首次保存必 409）+ 刷新来源（编译后指纹
+ * 对齐，dirty 徽标归零）。 */
 function applyStatus(next: WikiCompileStatus): void {
   const wasInFlight = IN_FLIGHT.has(state.value)
   status.value = next
-  if (TERMINAL.has(String(next.state))) {
-    stopPolling()
-    if (wasInFlight) {
-      emit('changed')
-      void loadSources()
-    }
+  syncPolling()
+  if (TERMINAL.has(String(next.state)) && wasInFlight) {
+    emit('changed')
+    void loadSources()
   }
 }
 
@@ -316,7 +324,7 @@ async function fetchStatus(): Promise<void> {
       return
     }
     // 轮询连续失败不刷屏：停下提示一次，待用户操作/刷新页面恢复
-    stopPolling()
+    pollRunning = false; stopPolling()
     ElMessage.error(`获取编译进度失败：${await apiErrorDetail(error)}`)
   }
 }
@@ -326,7 +334,6 @@ async function startCompile(): Promise<void> {
   try {
     const res = await api.startCompile(props.artifactId, props.expectedUpdatedAt)
     applyStatus({ batch_id: res.batch_id, state: res.state })
-    startPolling()
   } catch (error) { await actionFailed('启动编译失败', error) } finally {
     starting.value = false
   }
@@ -337,7 +344,6 @@ async function confirmToc(toc: WikiTocSection[]): Promise<void> {
   try {
     const res = await api.confirmToc(props.artifactId, toc, props.expectedUpdatedAt)
     applyStatus({ ...(status.value ?? { batch_id: '' }), state: res.state })
-    startPolling()
   } catch (error) { await actionFailed('确认目录失败', error) } finally {
     confirming.value = false
   }
@@ -378,10 +384,7 @@ function errorCode(error: unknown): string | undefined {
   border-left: 3px solid var(--el-color-primary, #2563eb); padding-left: 8px;
 }
 .wiki-compile__sources { display: flex; flex-direction: column; gap: 4px; }
-.wiki-compile__src {
-  display: flex; align-items: center; gap: 10px; padding: 6px 8px;
-  border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 6px;
-}
+.wiki-compile__src { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 6px; }
 .wiki-compile__src-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .wiki-compile__src-title { font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
 .wiki-compile__dirs { display: inline-flex; gap: 4px; flex-wrap: wrap; }

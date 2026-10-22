@@ -240,6 +240,48 @@ describe('WikiCompilePanel', () => {
     expect(wrapper.find('[data-test="wiki-compile-writing"]').exists()).toBe(true)
   })
 
+  it('awaiting_toc 停轮询（审查 HIGH）：advance 无新请求——编辑半程不被清', async () => {
+    const toc: WikiTocSection[] = [{
+      section_title: '网络',
+      page_hints: [{ title: '组网', cluster_ids: ['c1'], page_type: 'topic' }],
+    }]
+    state.api.compileStatus.mockResolvedValue(
+      { batch_id: 'b1', state: 'awaiting_toc', toc } as WikiCompileStatus)
+    const wrapper = mountPanel()
+    await flush()
+
+    expect(state.api.compileStatus).toHaveBeenCalledTimes(1)   // mount 首拉
+    expect(wrapper.findComponent(WikiTocEditor).exists()).toBe(true)
+
+    // 该态服务端在等用户输入——轮询已停，advance 15s 不发请求
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(state.api.compileStatus).toHaveBeenCalledTimes(1)
+    // 编辑器仍在（若仍轮询，每轮新 toc 引用会重置 sections 清空编辑）
+    expect(wrapper.findComponent(WikiTocEditor).exists()).toBe(true)
+  })
+
+  it('制品切换：目标制品在飞（writing）时重启已停定时器（审查 MEDIUM）', async () => {
+    // 制品 A：终态 → 定时器停
+    state.api.compileStatus.mockResolvedValue(
+      { batch_id: 'bA', state: 'completed', stats: {}, conflicts: [] } as WikiCompileStatus)
+    const wrapper = mountPanel(true, 'art-1')
+    await flush()
+    expect(state.api.compileStatus).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(state.api.compileStatus).toHaveBeenCalledTimes(1)   // A 终态停轮询
+
+    // 切到制品 B（在飞 writing）→ 重取落态重启轮询
+    state.api.compileStatus.mockReset().mockResolvedValue(
+      { batch_id: 'bB', state: 'writing', progress: { batch: '1/2', pages_done: 3 } } as WikiCompileStatus)
+    await wrapper.setProps({ artifactId: 'art-2' })
+    await flush()
+    expect(state.api.compileStatus).toHaveBeenLastCalledWith('art-2')
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(state.api.compileStatus.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(state.api.compileStatus).toHaveBeenLastCalledWith('art-2')   // 轮询已复活
+  })
+
   it('writing：进度（批次/页数）+ 取消随令牌', async () => {
     state.api.compileStatus.mockResolvedValue({
       batch_id: 'b1', state: 'writing',
@@ -394,6 +436,31 @@ describe('WikiTocEditor', () => {
         page_hints: [{ title: '例行巡检', cluster_ids: ['c3'], page_type: 'topic' }],
       },
     ]]])
+  })
+
+  it('同内容新引用不重置编辑；目录内容真变才重置（审查 HIGH 双保险）', async () => {
+    const wrapper = mountEditor(smallToc)
+    await flush()
+    const vm = wrapper.vm as unknown as TocVm
+    vm.sections[0].section_title = '改过的节'
+    vm.sections[0].page_hints[1].included = false
+
+    // 父级以同内容新引用回传（重渲染/重复 status 响应）——编辑保留
+    await wrapper.setProps({ toc: JSON.parse(JSON.stringify(smallToc)) as WikiTocSection[] })
+    await flush()
+    expect(vm.sections[0].section_title).toBe('改过的节')
+    expect(vm.sections[0].page_hints[1].included).toBe(false)
+
+    // 服务端目录真变（新一轮 awaiting_toc）——以服务端为准重置
+    const changed: WikiTocSection[] = [{
+      section_title: '新节',
+      page_hints: [{ title: '新页', cluster_ids: ['c9'], page_type: 'topic' }],
+    }]
+    await wrapper.setProps({ toc: changed })
+    await flush()
+    expect(vm.sections).toHaveLength(1)
+    expect(vm.sections[0].section_title).toBe('新节')
+    expect(vm.sections[0].page_hints[0].title).toBe('新页')
   })
 
   it('>200 页：实时计数 + 禁用提交（后端 422 too_many_pages 前移拦截）', async () => {

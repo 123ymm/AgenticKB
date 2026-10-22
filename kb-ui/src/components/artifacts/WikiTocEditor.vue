@@ -74,10 +74,17 @@ const emit = defineEmits<{
   cancel: []
 }>()
 
-/** 可编辑本地副本（页提示附勾选位，默认全包含）；toc 引用变化（新一轮
- * awaiting_toc）时重置——编辑半程被新目录覆盖时以服务端为准。 */
+/** 可编辑本地副本（页提示附勾选位，默认全包含）。重置守卫=内容指纹：
+ * 同内容新引用（父级重渲染/重复 status 响应）**不重置**——静默清空用户
+ * 半程编辑是审查 HIGH；内容真变（新一轮 awaiting_toc）才以服务端为准。 */
 const sections = ref<EditableSection[]>(props.toc.map(toEditable))
-watch(() => props.toc, toc => { sections.value = toc.map(toEditable) })
+let tocFingerprint = JSON.stringify(props.toc)
+watch(() => props.toc, (toc) => {
+  const fingerprint = JSON.stringify(toc)
+  if (fingerprint === tocFingerprint) return
+  tocFingerprint = fingerprint
+  sections.value = toc.map(toEditable)
+})
 
 function toEditable(section: WikiTocSection): EditableSection {
   return {
