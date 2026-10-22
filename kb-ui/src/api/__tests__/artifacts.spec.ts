@@ -19,6 +19,10 @@ vi.mock('axios', () => ({
         if (url.endsWith('/table/columns')) return { data: { columns: [{ column_id: 'c1' }] } }
         if (url.includes('/table/rows')) return { data: { rows: [], total: 0, page: 1, size: 50 } }
         if (url.endsWith('/diff')) return { data: { added: [], removed: [], changed: [], added_count: 0, removed_count: 0, changed_count: 0 } }
+        if (url.includes('/wiki/pages')) return { data: { pages: [{ page_key: 'home' }] } }
+        if (url.includes('/wiki/page/')) return { data: { page_key: 'home', body_md: '# x' } }
+        if (url.includes('/wiki/links')) return { data: { links: [{ from_page: 'home', to_page: 'a', anchor_text: '', status: 'valid' }] } }
+        if (url.includes('/wiki/status')) return { data: { revision: 1, units: { total: 2, done: 1, failed: 0, pending: 1 } } }
         if (url === '/api/artifacts') return { data: { artifacts: [{ artifact_id: 'a1' }] } }
         return { data: { artifact_id: 'a1' } }
       }
@@ -26,6 +30,7 @@ vi.mock('axios', () => ({
         interceptors: { request: { use: (fn: typeof state.requestInterceptor) => { state.requestInterceptor = fn } } },
         get: (url: string, config?: Record<string, unknown>) => dispatch('get', url, undefined, config),
         post: (url: string, body?: unknown, config?: Record<string, unknown>) => dispatch('post', url, body, config),
+        put: (url: string, body?: unknown, config?: Record<string, unknown>) => dispatch('put', url, body, config),
         patch: (url: string, body?: unknown, config?: Record<string, unknown>) => dispatch('patch', url, body, config),
         delete: (url: string, config?: Record<string, unknown>) => dispatch('delete', url, undefined, config),
       }
@@ -33,7 +38,7 @@ vi.mock('axios', () => ({
   },
 }))
 
-import { useArtifactsApi } from '@/api/artifacts'
+import { encodePageKey, useArtifactsApi } from '@/api/artifacts'
 
 const file = new File(['x'], 'A.xlsx', { type: 'application/octet-stream' })
 
@@ -173,5 +178,70 @@ describe('artifacts API', () => {
     await expect(api.listBatches('a1')).resolves.toEqual([{ batch_id: 'b1' }])
     await expect(api.listColumns('a1')).resolves.toEqual([{ column_id: 'c1' }])
     await expect(api.list()).resolves.toEqual([{ artifact_id: 'a1' }])
+  })
+
+  it('builds the six wiki calls with hex path keys, plaintext link query and lock tokens', async () => {
+    const api = useArtifactsApi()
+    const keyHex = encodePageKey('网络集成')
+
+    await api.listWikiPages('a1', { draft: true, revision: 2 })
+    expect(state.requests[0]).toMatchObject({ method: 'get', url: '/api/artifacts/a1/wiki/pages' })
+    expect(state.requests[0].config.params).toEqual({ draft: true, revision: 2 })
+
+    await api.getWikiPage('a1', '网络集成', { draft: true })
+    expect(state.requests[1]).toMatchObject({ method: 'get', url: `/api/artifacts/a1/wiki/page/${keyHex}` })
+    expect(state.requests[1].config.params).toEqual({ draft: true })
+
+    await api.upsertWikiPage('a1', '网络集成', {
+      title: '网络集成',
+      page_type: 'topic',
+      frontmatter: { aliases: ['组网'] },
+      body_md: '# 正文',
+      expected_updated_at: '2026-10-16T00:00:00Z',
+    })
+    expect(state.requests[2]).toMatchObject({ method: 'put', url: `/api/artifacts/a1/wiki/page/${keyHex}` })
+    expect(state.requests[2].body).toEqual({
+      title: '网络集成',
+      page_type: 'topic',
+      frontmatter: { aliases: ['组网'] },
+      body_md: '# 正文',
+      expected_updated_at: '2026-10-16T00:00:00Z',
+    })
+
+    await api.deleteWikiPage('a1', '网络集成', '2026-10-16T00:00:00Z')
+    expect(state.requests[3]).toMatchObject({ method: 'delete', url: `/api/artifacts/a1/wiki/page/${keyHex}` })
+    expect(state.requests[3].config.data).toEqual({ expected_updated_at: '2026-10-16T00:00:00Z' })
+
+    // links 的 page_key 是明文 query 参数（query 不经网关 path 校验）
+    await api.listWikiLinks('a1', { page_key: '网络集成', direction: 'in', draft: true })
+    expect(state.requests[4]).toMatchObject({ method: 'get', url: '/api/artifacts/a1/wiki/links' })
+    expect(state.requests[4].config.params).toEqual({ page_key: '网络集成', direction: 'in', draft: true })
+
+    await api.getWikiStatus('a1')
+    expect(state.requests[5]).toMatchObject({ method: 'get', url: '/api/artifacts/a1/wiki/status' })
+  })
+
+  it('hex-encodes UTF-8 page keys losslessly without percent escapes', () => {
+    const key = '一张网接入-首页'
+    const hex = encodePageKey(key)
+    expect(hex).toMatch(/^[0-9a-f]+$/)
+    expect(hex).not.toContain('%')   // 网关拒 raw path 里一切 % 编码字节
+    // hex → UTF-8 字节 → 原文 往返无损
+    const bytes = new Uint8Array((hex.match(/.{2}/g) ?? []).map(h => Number.parseInt(h, 16)))
+    expect(new TextDecoder().decode(bytes)).toBe(key)
+    expect(encodePageKey('')).toBe('')
+  })
+
+  it('unwraps wiki pages/links/status envelopes', async () => {
+    const api = useArtifactsApi()
+
+    await expect(api.listWikiPages('a1')).resolves.toEqual([{ page_key: 'home' }])
+    await expect(api.listWikiLinks('a1')).resolves.toEqual([
+      { from_page: 'home', to_page: 'a', anchor_text: '', status: 'valid' },
+    ])
+    await expect(api.getWikiStatus('a1')).resolves.toEqual({
+      revision: 1, units: { total: 2, done: 1, failed: 0, pending: 1 },
+    })
+    await expect(api.getWikiPage('a1', 'home')).resolves.toMatchObject({ page_key: 'home' })
   })
 })

@@ -22,6 +22,11 @@ import type {
   PreviewEnvelope,
   PublishResult,
   RevisionInfo,
+  WikiLink,
+  WikiPage,
+  WikiPageMeta,
+  WikiPageType,
+  WikiStatus,
 } from '@/types/artifacts'
 
 export interface ArtifactCreateRequest {
@@ -72,6 +77,32 @@ export interface ImportRequest {
   /** build_mapping 产物，或 {sheet, header_row, column_ops} 原始 ops（后端补跑映射）。 */
   plan: Record<string, unknown>
   conflict_policy?: ImportConflictPolicy
+}
+
+/** PUT /wiki/page/{hex} 请求体（63号 §5.5 WikiPagePut 同构）。 */
+export interface WikiPagePutRequest {
+  title: string
+  page_type?: WikiPageType
+  frontmatter?: Record<string, unknown>
+  body_md?: string
+  /** 显式键：编辑流稳定寻址（title 改名不漂移）/改名流；缺省=后端按 title 归一。 */
+  page_key?: string
+  provenance?: unknown[] | null
+  flags?: Record<string, unknown> | null
+  ordinal?: number | null
+  expected_updated_at?: string
+}
+
+/**
+ * page_key 的 URL 传输编码（wiki 网关铁律）：raw path 含 % 即被网关 400，
+ * 故中文键一律 UTF-8 字节 → 纯 hex（与后端 decode_page_key 对齐）。
+ * 纯函数（模块级导出）——组件与 API 客户端共用。
+ */
+export function encodePageKey(pageKey: string): string {
+  const bytes = new TextEncoder().encode(pageKey)
+  let hex = ''
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0')
+  return hex
 }
 
 /** update_cell 返回 {row_key, data, conflicts?}（成功格回显）。 */
@@ -298,6 +329,61 @@ export function useArtifactsApi() {
         `/api/artifacts/${artifactId}/table/rows/${encodeURIComponent(rowKey)}`,
         { data: { expected_updated_at: expectedUpdatedAt } },
       )
+    },
+
+    // ── Wiki 制品（63号批次2 六端点）──
+    /** 页面清单：设计态编辑传 draft=true（rev0 工作区；干净态投影 current）；
+     * viewer 走 runtime 视图（draft=false 读 current_revision）。 */
+    async listWikiPages(
+      artifactId: string, params?: { draft?: boolean; revision?: number },
+    ): Promise<WikiPageMeta[]> {
+      const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/pages`, { params })
+      return data.pages ?? []
+    },
+
+    /** 单页全字段（page_key 自动 hex 编码进 URL——raw path 含 % 即网关 400）。 */
+    async getWikiPage(
+      artifactId: string, pageKey: string,
+      params?: { draft?: boolean; revision?: number },
+    ): Promise<WikiPage> {
+      const { data } = await client.get(
+        `/api/artifacts/${artifactId}/wiki/page/${encodePageKey(pageKey)}`, { params })
+      return data
+    },
+
+    /** 单页创建/更新：addressKey=URL 寻址键（新建=title 原文；编辑=原 page_key）。
+     * 返回后端归一定稿的完整页——前端按返回 page_key 刷新选中。 */
+    async upsertWikiPage(
+      artifactId: string, addressKey: string, payload: WikiPagePutRequest,
+    ): Promise<WikiPage> {
+      const { data } = await client.put(
+        `/api/artifacts/${artifactId}/wiki/page/${encodePageKey(addressKey)}`, payload)
+      return data
+    },
+
+    async deleteWikiPage(
+      artifactId: string, pageKey: string, expectedUpdatedAt?: string,
+    ): Promise<void> {
+      await client.delete(
+        `/api/artifacts/${artifactId}/wiki/page/${encodePageKey(pageKey)}`,
+        { data: { expected_updated_at: expectedUpdatedAt } },
+      )
+    },
+
+    /** 出入边（63号 §2.4 反向链接）：page_key 是明文 query 参数——
+     * query 不经网关 path 校验，无需 hex。 */
+    async listWikiLinks(
+      artifactId: string,
+      params?: { page_key?: string; direction?: 'out' | 'in'; draft?: boolean },
+    ): Promise<WikiLink[]> {
+      const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/links`, { params })
+      return data.links ?? []
+    },
+
+    /** units embedding 进度（运行态信息，viewer+ 可读）。 */
+    async getWikiStatus(artifactId: string): Promise<WikiStatus> {
+      const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/status`)
+      return data
     },
   }
 }

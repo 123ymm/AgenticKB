@@ -172,3 +172,55 @@ export interface ImportReport {
   missing_columns?: Array<{ column_id: string; column_name: string }>
   [key: string]: unknown
 }
+
+// ── Wiki 制品（63号 §2 对象层 / §4.3 页型）──
+
+/** 页面类型全集（63号 §4.3，与后端 PAGE_TYPES 对齐）。 */
+export type WikiPageType = 'topic' | 'glossary' | 'contradiction' | 'open_question'
+/** 页面来源（63号 §3.2）：machine=编译管线产物；manual=人工编辑。 */
+export type WikiPageOrigin = 'machine' | 'manual'
+
+/** 页面轻量清单行（GET /wiki/pages 信封 {pages}；不含 body_md/frontmatter，
+ * aliases 自 frontmatter.aliases 派生为 list[str]——阅读器链接解析兜底用）。 */
+export interface WikiPageMeta {
+  page_key: string
+  title: string
+  page_type: WikiPageType
+  origin: WikiPageOrigin
+  ordinal: number
+  flags: Record<string, unknown> | null
+  aliases: string[]
+  updated_at: string
+  updated_by: string
+}
+
+/** 单页全字段（GET/PUT /wiki/page/{hex} 同形——PUT 返回 get_page 结果，
+ * page_key 为后端归一定稿键）。 */
+export interface WikiPage extends WikiPageMeta {
+  frontmatter: Record<string, unknown>
+  body_md: string
+  provenance?: unknown[] | null
+}
+
+/** 页面边（GET /wiki/links 信封 {links}；to_page 已按 page_key ∪ aliases
+ * 归一到 canonical 键——反向链接与阅读器跳转的正确性前提）。 */
+export interface WikiLink {
+  from_page: string
+  to_page: string
+  anchor_text: string
+  status: 'valid' | 'broken'
+}
+
+/** units embedding 进度四计数（GET /wiki/status 的 units 面）。 */
+export interface WikiUnitsStatus {
+  total: number
+  done: number
+  failed: number
+  pending: number
+}
+
+/** GET /wiki/status 返回体：{revision, units 四计数}。 */
+export interface WikiStatus {
+  revision: number
+  units: WikiUnitsStatus
+}
