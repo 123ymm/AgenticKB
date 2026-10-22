@@ -537,6 +537,22 @@ class CompileInputsDB:
             row = await cur.fetchone()
             return dict(row) if row else None
 
+    async def batch_state(self, batch_id: str) -> dict[str, Any] | None:
+        """单批读取（含 details）——**僵尸任务停止位按本批 batch_id 查**
+        （审查 F1）：旧 writing 任务若查 latest 会读到新轮的 preparing/
+        awaiting_toc 而误判「仍在飞」继续写页；本查询让旧任务看到自己的
+        终态（cancelled/failed）即停。无该批 → None。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT batch_id, artifact_id, channel, file_name, sheet_name,
+                          row_count, created_by, created_at, details
+                   FROM kb_artifact_batches
+                   WHERE batch_id = %s""",
+                (batch_id,),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
     # ------------------------------------------------------------ 内部共用
 
     async def _assert_expected_updated_at(

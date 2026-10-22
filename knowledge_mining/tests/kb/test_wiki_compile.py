@@ -300,6 +300,14 @@ class FakeCompileInputsDB:
         return {**dict(latest),
                 "details": dict(self.batch_details.get(latest["batch_id"], {}))}
 
+    async def batch_state(self, batch_id: str) -> dict | None:
+        """单批读取（含 details）——F1 僵尸停止位数据源。"""
+        for b in self.batches:
+            if b["batch_id"] == batch_id:
+                return {**dict(b),
+                        "details": dict(self.batch_details.get(batch_id, {}))}
+        return None
+
 
 # ---------------------------------------------------------------- helpers
 
@@ -617,6 +625,120 @@ async def test_cancel_writing_stops_at_batch_boundary(env):
     assert det["stats"]["pages_written"] == 50, det  # 批1+批2；批3 未开写
     assert det["progress"] == {"batch": "2/3", "pages_done": 50}, det
     assert batch["row_count"] == 0                  # complete_batch 未执行
+
+
+async def test_zombie_writing_cross_round_stops_and_keeps_new_cache(env):
+    """审查 F1：cancel 后立刻 start 新轮——旧 writing 僵尸在批边界按**本批**
+    batch_id 读 state（不读 latest，否则误读新轮 preparing/awaiting_toc 续写）
+    停止；退出路径不抹新轮 cache（归属判断）；新轮可正常 confirm→completed。"""
+    titles = [f"页{i}" for i in range(51)]        # 旧轮 3 批
+    all_units = _seed_corpus(env, per_kb=26)
+    await _bind_all(env)
+    cid = _cluster_id(all_units)
+    env.gen.queue = (
+        [_toc_json(titles, cid)]
+        + [_page_body(t) for t in titles]
+        + [_quality("页0", "页1")])
+    await _start(env)
+    await _wait_state(env, "awaiting_toc")
+    old_batch = await env.inputs.latest_compile_batch(WID)
+    old_id = str(old_batch["batch_id"])
+    toc = _details(old_batch)["toc"]
+
+    env.gen.gate_at = 27                    # 旧轮批 2 首页卡住
+    await _confirm(env, toc)
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 5.0
+    while loop.time() < deadline and len(env.gen.calls) < 27:
+        await asyncio.sleep(0.001)
+    assert len(env.gen.calls) >= 27
+
+    await env.compile_svc.cancel(_user("u-alice"), WID)
+    assert _details(await env.inputs.latest_compile_batch(WID))["state"] \
+        == "cancelled"
+    assert WID not in _PREPARE_CACHE       # F7：cancel 即释放本批缓存
+
+    # 立刻开新轮（旧僵尸仍在飞——守卫按 DB 在飞判定=旧批已 cancelled，放行；
+    # 进程内 in-flight 键不作前置）。队列：新 TOC 在前（call 28 消费），随后
+    # 25 条僵尸素材供旧任务批 2 放行后消费，最后新轮写作素材。
+    env.gen.queue = (
+        [_toc_json(["新页A"], cid)]
+        + [_page_body("僵尸页", broken=False) for _ in range(25)]
+        + [_page_body("新页A", broken=False), _quality("新页A", "新页A")])
+    r2 = await _start(env)
+    new_id = str(r2["batch_id"])
+    assert new_id != old_id
+    await _wait_state(env, "awaiting_toc")   # 新轮 prepare（TOC=call 28）
+    assert _PREPARE_CACHE[WID].batch_id == new_id
+
+    env.gen.release_gate()
+    # 旧僵尸：写完批 2（25 条僵尸素材）→ 批 3 边界读**本批** state=cancelled 停
+    settle = loop.time() + 5.0
+    while loop.time() < settle:
+        old_det = env.inputs.batch_details[old_id]
+        if old_det.get("stats", {}).get("pages_written") == 50:
+            break
+        await asyncio.sleep(0.001)
+    await asyncio.sleep(0.02)               # 让批 3 边界检查与 finally 收尾跑完
+
+    old_now = await env.inputs.batch_state(old_id)
+    assert _details(old_now)["state"] == "cancelled"   # 未被 completed 覆写
+    assert old_now["row_count"] == 0
+    assert _PREPARE_CACHE[WID].batch_id == new_id      # 僵尸未抹新轮缓存
+
+    # 新轮照常完结（缓存完好可用）
+    new_toc = _details(await env.inputs.latest_compile_batch(WID))["toc"]
+    await _confirm(env, new_toc)
+    await _wait_state(env, "completed")
+    assert (await env.inputs.batch_state(new_id))["row_count"] == 1
+
+
+async def test_cancel_after_last_batch_skips_quality(env):
+    """审查 F8：末批页写完后、质量 LLM 前的停止位复查——cancelled 则跳过
+    质量+专页，不落 completed/row_count（质量调用未发生）。"""
+    titles = ["页A", "页B", "页C"]          # 单批 3 页
+    all_units = _seed_corpus(env)
+    await _bind_all(env)
+    cid = _cluster_id(all_units)
+    env.gen.queue = [
+        _toc_json(titles, cid, glossary=[
+            {"term": "术语X", "definition_hint": "d"}]),
+        _page_body("页A", broken=False), _page_body("页B", broken=False),
+        _page_body("页C", broken=False),
+        _quality("页A", "页B")]
+    await _start(env)
+    await _wait_state(env, "awaiting_toc")
+    toc = _details(await env.inputs.latest_compile_batch(WID))["toc"]
+
+    env.gen.gate_at = 4                     # TOC(1)+3 页 → 第 4 次调用=末页
+    await _confirm(env, toc)
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 5.0
+    while loop.time() < deadline and len(env.gen.calls) < 4:
+        await asyncio.sleep(0.001)
+    assert len(env.gen.calls) >= 4
+
+    await env.compile_svc.cancel(_user("u-alice"), WID)
+    assert _details(await env.inputs.latest_compile_batch(WID))["state"] \
+        == "cancelled"
+    env.gen.release_gate()
+
+    settle = loop.time() + 5.0              # 等末页写完+批后处理+复查退出
+    while loop.time() < settle:
+        det = _details(await env.inputs.latest_compile_batch(WID))
+        if det.get("stats", {}).get("pages_written") == 3:
+            break
+        await asyncio.sleep(0.001)
+    await asyncio.sleep(0.02)
+
+    batch = await env.inputs.latest_compile_batch(WID)
+    det = _details(batch)
+    assert det["state"] == "cancelled"      # F8 复查拦下 completed
+    assert det["stats"]["pages_written"] == 3
+    assert det["progress"] == {"batch": "1/1", "pages_done": 3}
+    assert batch["row_count"] == 0
+    assert len(env.gen.calls) == 4          # 质量 LLM 调用未发生
+    assert det["stats"].get("glossary_pages") is None   # 专页未生成
 
 
 # ------------------------------------------------------------ start 护栏

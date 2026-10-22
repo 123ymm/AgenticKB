@@ -215,7 +215,12 @@ def page_flags(
 ) -> dict[str, Any]:
     """页级引用校验三件（§4.4，确定性代码非 LLM）→ flags：
     provenance 空（仅 topic 计）→ provenance_missing；行内 src ∉ 取材全集 →
-    dangling_refs=[...]；连续 ≥3 事实句无引用 → density_warning。"""
+    dangling_refs=[...]；连续 ≥3 事实句无引用 → density_warning。
+
+    悬空口径分层（审查 F3，两处有意不同）：**编译期（本函数）= 当轮全语料
+    取材全集**（严——LLM 只准引用给定素材）；**发布期
+    （validate_pages_for_publish）= rev0 provenance unit_ids 并集**（宽——
+    发布时已拿不到编译语料全集，rev0 内证有据即放行，err-safe 方向为放行）。"""
     flags: dict[str, Any] = {}
     if page_type == "topic" and not provenance:
         flags["provenance_missing"] = True
@@ -258,15 +263,20 @@ async def validate_pages_for_publish(
 
     返回 (blocking, warnings)：
     - 任何页行内 ``[[src:]]`` 悬空（∉ 该页 provenance unit_ids ∪ 全 rev0
-      provenance 并集）→ blocking（§4.4 铁律：LLM 只复核不判存在性）；
+      provenance 并集）→ blocking（§4.4 铁律：LLM 只复核不判存在性）。
+      **悬空口径分层（审查 F3）**：编译期（page_flags）用当轮全语料取材
+      全集（严）；本函数收窄到 rev0 provenance 并集——发布时拿不到编译语料
+      全集，rev0 内证有据即放行（err-safe 方向为放行），有意分层非不一致；
     - machine **topic** 页 provenance 空 → blocking（机器可查来源账硬性）；
     - manual 页 provenance 空 → warning（记录偏差：设计「硬性」降警告——批次2
       编辑器无 provenance 录入 UI，硬阻断封死人工页发布路径；补录入 UI 后可
       收紧）；
     - 密度（连续 ≥3 事实句无引用）→ warning（告警不阻断）；
-    - 专页宽免：contradiction/open_question/glossary 的 machine 页无直接
-      取材单元（来源账在 frontmatter source_a/source_b/definition_source；
-      contradiction 页自身带双方来源页 provenance 并集，天然非空）。
+    - 专页宽免：contradiction/open_question/glossary 的 machine 页不参与
+      provenance 门（来源账在 frontmatter source_a/source_b/
+      definition_source）。contradiction 页的 provenance 取双方来源页并集，
+      通常非空但来源页自身无 provenance 时可为空——一律按专页宽免处理，
+      不做非空断言。
     """
     blocking: list[str] = []
     warnings: list[str] = []

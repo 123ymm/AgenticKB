@@ -103,10 +103,13 @@ _INFLIGHT_STATES = ("preparing", "awaiting_toc", "writing")
 #: onenet._bg_tasks 模式；done 回调释放）。
 _COMPILE_TASKS: set["asyncio.Task[None]"] = set()
 
-#: artifact_id 在飞键（start 进程内预检；权威判定在 try_start_guard 事务）。
+#: artifact_id 在飞键（**纯簿记**——强引用集伴随；不作 start 前置：在飞判定
+#: 权威只在 try_start_guard 事务，进程内预检会把 cancel 后的合法新轮误拒
+#: 成 409，审查 F1 裁定移除前置）。
 _COMPILE_INFLIGHT: set[str] = set()
 
-#: prepare 产物缓存（artifact_id → 取材账）。**进程重启即丢**：awaiting_toc
+#: prepare 产物缓存（artifact_id → 取材账，值携带 batch_id 归属——释放时
+#: 归属判断防僵尸任务抹掉新轮缓存，审查 F1）。**进程重启即丢**：awaiting_toc
 #: 批次作废（confirm 后 writing 首步发现缺缓存 → failed 提示重编）。写库持久
 #: 30k 单元摘要不值当（MVP 裁定，见模块 docstring）。
 _PREPARE_CACHE: dict[str, "PreparedCorpus"] = {}
@@ -116,11 +119,14 @@ _PREPARE_CACHE: dict[str, "PreparedCorpus"] = {}
 class PreparedCorpus:
     """prepare 阶段产物（writing 阶段的取材账，内存缓存）。
 
-    units 为摘要行（content_text 截 800 字——写作素材上限即 build_cluster_
-    context 的 per_unit_chars 口径）；clusters 保留 Cluster 全量（成员映射+
-    digest 取材）；glossary/open_questions 来自目录 LLM（专页生成源）。
+    batch_id 是归属账（F1）：cancel/完结/失败释放缓存前比对该键——新一轮
+    prepare 已覆盖同 artifact_id 缓存时旧任务不得动它。units 为摘要行
+    （content_text 截 800 字——写作素材上限即 build_cluster_context 的
+    per_unit_chars 口径）；clusters 保留 Cluster 全量（成员映射+digest
+    取材）；glossary/open_questions 来自目录 LLM（专页生成源）。
     """
 
+    batch_id: str
     units: list[dict[str, Any]]
     clusters: tuple[Cluster, ...]
     stats: dict[str, Any]
@@ -151,11 +157,12 @@ class CompileService:
         expected_updated_at: Any = None,
     ) -> dict[str, Any]:
         """启动编译：ROLE_DESIGN + 新鲜度 → 守卫事务（查在飞/护栏/建批）→
-        同步落 preparing → 后台 _run_prepare。返回 {batch_id, state}。"""
+        同步落 preparing → 后台 _run_prepare。返回 {batch_id, state}。
+
+        在飞判定**只在守卫事务**（审查 F1）：进程内 _COMPILE_INFLIGHT 仅簿记
+        ——若拿它当前置，cancel 后立刻重编会被尚在批边界徘徊的旧任务误拒
+        （旧批 DB 态已 cancelled，守卫放行才是正确语义）。"""
         await self._gate(user, artifact_id, expected_updated_at)
-        if artifact_id in _COMPILE_INFLIGHT:
-            # 进程内预检（权威判定在守卫事务——此分支只挡同进程竞态）
-            raise WikiError("compile_in_progress")
         guard = await self._inputs.try_start_guard(
             artifact_id, str(user["id"]), max_units=MAX_UNITS)
         if guard.get("in_flight") is not None:
@@ -232,19 +239,28 @@ class CompileService:
     async def cancel(
         self, user: dict[str, Any], artifact_id: str,
     ) -> dict[str, Any]:
-        """取消：在飞态 → 合并 {state: cancelled}（awaiting_toc 无后台任务
-        直接生效；writing 后台任务在批边界读 details.state 停止）。终态 →
-        409 invalid_compile_state。不做乐观锁校验——取消是安全操作，且编译
-        页写持续推令牌，校验必假阳性。"""
+        """取消：在飞态 → 守卫写 {state: cancelled}（审查 F2：守卫=在飞态
+        白名单——读写间隙竞态翻到 completed/failed 时不覆写）；同时释放本批
+        的 _PREPARE_CACHE（审查 F7：awaiting_toc 取消即弃语料账，带 batch_id
+        归属判断——新一轮已覆盖缓存则不动）。writing 后台任务在批边界按
+        **本批** batch_id 读 state 停止（F1）。终态 → 409
+        invalid_compile_state。不做乐观锁校验——取消是安全操作，且编译页写
+        持续推令牌，校验必假阳性。"""
         await self._gate(user, artifact_id)
         batch = await self._inputs.latest_compile_batch(artifact_id)
         if batch is None:
             raise WikiError("compile_not_found")
+        batch_id = str(batch["batch_id"])
         state = str((batch.get("details") or {}).get("state") or "")
         if state not in _INFLIGHT_STATES:
             raise WikiError("invalid_compile_state")
-        await self._inputs.update_batch_details(
-            str(batch["batch_id"]), {"state": "cancelled"})
+        ok = await self._inputs.update_batch_details(
+            batch_id, {"state": "cancelled"},
+            guard_states=list(_INFLIGHT_STATES))
+        if not ok:
+            # 读写间隙状态已离在飞集（终态竞态）——对用户语义同 invalid
+            raise WikiError("invalid_compile_state")
+        self._pop_cache_if_mine(artifact_id, batch_id)
         return {"state": "cancelled"}
 
     # ------------------------------------------------------ prepare 阶段
@@ -286,6 +302,7 @@ class CompileService:
                                         or 0.0),
             }
             _PREPARE_CACHE[artifact_id] = PreparedCorpus(
+                batch_id=batch_id,
                 units=[{
                     "representation_id": str(u["representation_id"]),
                     "kb_id": str(u.get("kb_id") or ""),
@@ -318,12 +335,14 @@ class CompileService:
                 },
             }, guard_states=["preparing"])
             if not ok:
-                # 被 cancel 抢先：缓存随批次作废释放
-                _PREPARE_CACHE.pop(artifact_id, None)
+                # 被 cancel 抢先：缓存随本批作废释放（归属判断——新一轮已
+                # 覆盖则不动，审查 F1）
+                self._pop_cache_if_mine(artifact_id, batch_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("wiki 编译 prepare 失败 artifact=%s", artifact_id)
             await self._fail(batch_id, f"prepare_failed:{type(exc).__name__}",
                              ("preparing", "writing"))
+            self._pop_cache_if_mine(artifact_id, batch_id)
         finally:
             _COMPILE_INFLIGHT.discard(artifact_id)
 
@@ -404,15 +423,23 @@ class CompileService:
 
     async def _run_writing(self, batch_id: str, artifact_id: str) -> None:
         """后台②：确认目录展开 → 25 页/批簇级写作（批间约束注入）→ 每批后
-        全量链接重算 → 页级引用校验 → 质量 LLM 一次 → 专页 → 守卫完结。"""
+        全量链接重算 → 页级引用校验 → 质量 LLM 一次 → 专页 → 守卫完结。
+
+        停止位一律按**本批** batch_id 读 state（审查 F1——僵尸任务查 latest
+        会误读新轮的在飞态）：本批 state ≠ writing 即停（cancel 抢先/任何
+        状态漂移），缓存释放带归属判断（新一轮已覆盖则不动）。"""
         try:
             prepared = _PREPARE_CACHE.get(artifact_id)
-            batch = await self._inputs.latest_compile_batch(artifact_id)
+            batch = await self._inputs.batch_state(batch_id)
             if batch is None:
                 return
             details = batch.get("details") or {}
             user = str(batch.get("created_by") or "wiki_compile")
-            if prepared is None:
+            if str(details.get("state") or "") != "writing":
+                # 启动即非在飞（cancel 在 spawn 后抢先）——静默停
+                self._pop_cache_if_mine(artifact_id, batch_id)
+                return
+            if prepared is None or prepared.batch_id != batch_id:
                 await self._fail(
                     batch_id, "prepare cache lost——服务可能重启，请重新编译",
                     ("writing",))
@@ -443,10 +470,12 @@ class CompileService:
             constraint = ""
 
             for batch_idx in range(total_batches):
-                # 批边界停止位（决策1：cancel 抢先写 cancelled，此处感知即停）
-                latest = await self._inputs.latest_compile_batch(artifact_id)
-                if str(((latest or {}).get("details") or {})
-                       .get("state") or "") == "cancelled":
+                # 批边界停止位（决策1+F1：本批 state 非 writing 即停——cancel
+                # 抢先 / 僵尸批次的终态都在此感知）
+                own = await self._inputs.batch_state(batch_id)
+                if own is None or str(((own.get("details") or {})
+                                       .get("state") or "")) != "writing":
+                    self._pop_cache_if_mine(artifact_id, batch_id)
                     return
                 chunk = pages[batch_idx * PAGES_PER_BATCH:
                               (batch_idx + 1) * PAGES_PER_BATCH]
@@ -472,6 +501,14 @@ class CompileService:
                     "conflicts": [dict(c) for c in conflicts],
                 })
 
+            # 末批复查（审查 F8）：页写完到质量调用之间的窗口里 cancel 落地
+            # → 跳过质量+专页直接停（不落 completed/row_count）。
+            own = await self._inputs.batch_state(batch_id)
+            if own is None or str(((own.get("details") or {})
+                                   .get("state") or "")) != "writing":
+                self._pop_cache_if_mine(artifact_id, batch_id)
+                return
+
             # 质量 LLM（一次）+ 专页生成（模板在 wiki_compile_pages）
             quality = await self._quality_llm(artifact_id, written)
             derived = await write_derived_pages(
@@ -493,12 +530,13 @@ class CompileService:
                     "conflicts": [dict(c) for c in conflicts],
                 },
                 row_count=int(stats["pages_written"]))
-            _PREPARE_CACHE.pop(artifact_id, None)
+            self._pop_cache_if_mine(artifact_id, batch_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("wiki 编译 writing 失败 artifact=%s", artifact_id)
             await self._fail(batch_id,
                              f"writing_failed:{type(exc).__name__}",
                              ("preparing", "writing"))
+            self._pop_cache_if_mine(artifact_id, batch_id)
         finally:
             _COMPILE_INFLIGHT.discard(artifact_id)
 
@@ -698,6 +736,15 @@ class CompileService:
         task = asyncio.create_task(coro)
         _COMPILE_TASKS.add(task)
         task.add_done_callback(_COMPILE_TASKS.discard)
+
+    @staticmethod
+    def _pop_cache_if_mine(artifact_id: str, batch_id: str) -> None:
+        """释放 _PREPARE_CACHE（带归属判断，审查 F1）：缓存条目携带 batch_id
+        ——仅当仍是本批的缓存才 pop；新一轮 prepare 已覆盖时（僵尸任务退出
+        路径）不动新轮的账。"""
+        cached = _PREPARE_CACHE.get(artifact_id)
+        if cached is not None and cached.batch_id == batch_id:
+            _PREPARE_CACHE.pop(artifact_id, None)
 
     async def _fail(
         self, batch_id: str, error: str, guard: tuple[str, ...],

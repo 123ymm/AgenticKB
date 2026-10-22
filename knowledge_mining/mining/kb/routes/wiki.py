@@ -137,7 +137,8 @@ _WIKI_HTTP_STATUS: dict[str, int] = {
     "too_many_pages": 422,
 }
 
-#: 409 信封文案（对齐 routes/artifacts 的 {code, message} 形态）。
+#: 409/404 信封文案（对齐 routes/artifacts 的 {code, message} 形态；审查 F5
+#: 补 compile_not_found——404 也走信封，与其他编译码一致）。
 _WIKI_MESSAGES: dict[str, str] = {
     "stale_artifact": "制品已被他人修改，请刷新后重试",
     "page_key_conflict": "目标 page_key 已被其他页占用——改名=新页+旧页删，"
@@ -146,6 +147,7 @@ _WIKI_MESSAGES: dict[str, str] = {
                            "writing），请先等待或取消",
     "invalid_compile_state": "编译状态不允许该操作（如确认目录仅限 "
                              "awaiting_toc 态）",
+    "compile_not_found": "该制品尚无编译批次（先启动编译）",
     "no_sources": "未绑定任何知识库来源，请先在来源面板绑定",
     "too_many_units": "绑定范围内检索单元超上限（30000），请收窄目录范围",
     "too_many_pages": "确认目录展开页数超上限（200），请删减后再确认",
