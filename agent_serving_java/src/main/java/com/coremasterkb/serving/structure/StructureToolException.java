@@ -16,6 +16,10 @@ import java.util.Map;
  *       重新 search 拿新 ref；</li>
  *   <li>{@code unknown_field}/{@code type_mismatch}/{@code unsupported_operation}（400）——
  *       structured query DSL 校验失败，details 携带允许字段/期望类型供 Agent 修正；</li>
+ *   <li>{@code invalid_query}（400）——wiki 检索协议参数校验失败（q 空白/mode/direction
+ *       非法，63号批次4）；details.allowed 携带合法值清单供修正；</li>
+ *   <li>{@code page_not_found}（404）——wiki 页不在当前 revision（制品可见而页缺，
+ *       非反探测面）；核对 page_key 或先取卡片/页面链接确认页清单；</li>
  *   <li>{@code structured_query_unavailable}（409）——资产未过 readiness；退回 search /
  *       get_evidence；</li>
  *   <li>{@code result_too_large}（413）——缩小范围、增加 filter 或使用 cursor。</li>
@@ -31,6 +35,10 @@ public class StructureToolException extends RuntimeException {
     public static final String UNKNOWN_FIELD = "unknown_field";
     public static final String TYPE_MISMATCH = "type_mismatch";
     public static final String UNSUPPORTED_OPERATION = "unsupported_operation";
+    /** 63号批次4：wiki 检索协议参数校验（q 空白/mode/direction 非法）。 */
+    public static final String INVALID_QUERY = "invalid_query";
+    /** 63号批次4：wiki 页不在当前 revision（制品可见而页缺）。 */
+    public static final String PAGE_NOT_FOUND = "page_not_found";
     public static final String STRUCTURED_QUERY_UNAVAILABLE = "structured_query_unavailable";
     public static final String RESULT_TOO_LARGE = "result_too_large";
     public static final String KNOWLEDGE_SERVICE_UNAVAILABLE = "knowledge_service_unavailable";
@@ -86,6 +94,16 @@ public class StructureToolException extends RuntimeException {
 
     public static StructureToolException unsupportedOperation(String message, Map<String, Object> details) {
         return new StructureToolException(UNSUPPORTED_OPERATION, HttpStatus.BAD_REQUEST, message, details);
+    }
+
+    /** 63号批次4：wiki 检索协议参数校验失败（q 空白/mode/direction 非法，400）。 */
+    public static StructureToolException invalidQuery(String message, Map<String, Object> details) {
+        return new StructureToolException(INVALID_QUERY, HttpStatus.BAD_REQUEST, message, details);
+    }
+
+    /** 63号批次4：wiki 页不在当前 revision（制品可见而页缺——404 typed，非反探测面）。 */
+    public static StructureToolException pageNotFound(String message) {
+        return new StructureToolException(PAGE_NOT_FOUND, HttpStatus.NOT_FOUND, message, Map.of());
     }
 
     public static StructureToolException structuredQueryUnavailable(String message) {

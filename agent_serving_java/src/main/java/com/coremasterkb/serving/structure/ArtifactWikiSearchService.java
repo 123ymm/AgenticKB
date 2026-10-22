@@ -14,7 +14,6 @@ import com.coremasterkb.serving.operator.operators.fuse.RrfSupport;
 import com.coremasterkb.serving.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
@@ -178,11 +177,11 @@ public class ArtifactWikiSearchService {
                                  String domain, String username, boolean isAdmin, String keyId) {
         WikiContext ctx = requireWiki(artifactRef, domain, username, isAdmin, keyId);
         if (q == null || q.isBlank()) {
-            throw invalidQuery("q 必填且不能为空白（wiki 检索文本）", Map.of());
+            throw StructureToolException.invalidQuery("q 必填且不能为空白（wiki 检索文本）", Map.of());
         }
         String effectiveMode = mode == null || mode.isBlank() ? "fusion" : mode;
         if (!MODES.contains(effectiveMode)) {
-            throw invalidQuery("mode 非法: " + effectiveMode,
+            throw StructureToolException.invalidQuery("mode 非法: " + effectiveMode,
                     Map.of("allowed", List.of("fusion", "dense", "keyword")));
         }
         int k = topK == null ? DEFAULT_TOP_K : Math.max(1, Math.min(MAX_TOP_K, topK));
@@ -244,7 +243,7 @@ public class ArtifactWikiSearchService {
         WikiPageRow page = wikiMapper.selectWikiPage(
                 ctx.artifactId(), ctx.revision(), pageKey);
         if (page == null) {
-            throw pageNotFound(pageKey);
+            throw StructureToolException.pageNotFound("wiki 页面不存在: " + pageKey);
         }
         List<WikiLinkItem> out = linkItems(wikiMapper.selectWikiLinks(
                 ctx.artifactId(), ctx.revision(), pageKey, "out"), LINKS_SUMMARY_LIMIT);
@@ -265,7 +264,7 @@ public class ArtifactWikiSearchService {
         requirePageKey(pageKey);
         String dir = direction == null || direction.isBlank() ? "out" : direction;
         if (!"out".equals(dir) && !"in".equals(dir)) {
-            throw invalidQuery("direction 非法: " + direction,
+            throw StructureToolException.invalidQuery("direction 非法: " + direction,
                     Map.of("allowed", List.of("out", "in")));
         }
         return new WikiLinksView(artifactRef, ctx.revision(), pageKey, dir,
@@ -452,21 +451,8 @@ public class ArtifactWikiSearchService {
 
     private static void requirePageKey(String pageKey) {
         if (pageKey == null || pageKey.isBlank()) {
-            throw invalidQuery("page_key 必填（wiki 页键）", Map.of());
+            throw StructureToolException.invalidQuery("page_key 必填（wiki 页键）", Map.of());
         }
-    }
-
-    /** wiki 页不在该 revision（制品可见而页缺——404 typed，非反探测面）。 */
-    private static StructureToolException pageNotFound(String pageKey) {
-        return new StructureToolException("page_not_found", HttpStatus.NOT_FOUND,
-                "wiki 页面不存在: " + pageKey, Map.of());
-    }
-
-    /** wiki 检索协议参数校验失败（400；q 空白/mode 非法/direction 非法）。 */
-    private static StructureToolException invalidQuery(String message,
-                                                       Map<String, Object> details) {
-        return new StructureToolException("invalid_query", HttpStatus.BAD_REQUEST,
-                message, details);
     }
 
     /** 与 ArtifactQueryService.parseRef 同文法（ref 收口：前缀 + 非空 id）。 */

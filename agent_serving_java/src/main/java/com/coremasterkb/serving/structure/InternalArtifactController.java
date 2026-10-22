@@ -30,6 +30,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -60,6 +61,11 @@ import java.util.Map;
 public class InternalArtifactController {
 
     private static final Logger log = LoggerFactory.getLogger(InternalArtifactController.class);
+
+    /** wiki updated_at 序列化定格式（恒含秒；OffsetDateTime.toString() 整分秒掉秒，
+     *  Python ≤3.10 fromisoformat 不可解析）。 */
+    private static final DateTimeFormatter WIKI_UPDATED_AT_FORMAT =
+            DateTimeFormatter.ISO_OFFSET_DATE_TIME;
 
     private final ServingProperties properties;
     private final ArtifactQueryService artifactService;
@@ -278,7 +284,10 @@ public class InternalArtifactController {
         out.put("body_md", page.bodyMd());
         out.put("provenance", page.provenance());
         out.put("origin", page.origin());
-        out.put("updated_at", page.updatedAt() == null ? null : page.updatedAt().toString());
+        // 定格式 ISO_OFFSET_DATE_TIME（恒含秒）——OffsetDateTime.toString() 整分秒会
+        // 掉秒（…T09:30+08:00），Python ≤3.10 datetime.fromisoformat 解析不了
+        out.put("updated_at", page.updatedAt() == null ? null
+                : page.updatedAt().format(WIKI_UPDATED_AT_FORMAT));
         return out;
     }
 

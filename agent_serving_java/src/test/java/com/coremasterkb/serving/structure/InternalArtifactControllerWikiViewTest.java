@@ -132,13 +132,15 @@ class InternalArtifactControllerWikiViewTest {
 
         assertThat(out.get("view")).isEqualTo("wiki_page");
         Map<String, Object> page = (Map<String, Object>) out.get("page");
+        // updated_at 定格式恒含秒——整分秒（09:30:00）不得掉成 09:30
+        //（OffsetDateTime.toString() 的坑，Python ≤3.10 fromisoformat 解析不了无秒形态）
         assertThat(page).containsEntry("page_key", "home")
                 .containsEntry("title", "首页")
                 .containsEntry("page_type", "overview")
                 .containsEntry("frontmatter", Map.of("tags", List.of("net")))
                 .containsEntry("body_md", "# 正文")
                 .containsEntry("origin", "mined")
-                .containsEntry("updated_at", "2026-10-20T09:30+08:00");
+                .containsEntry("updated_at", "2026-10-20T09:30:00+08:00");
         Map<String, Object> links = (Map<String, Object>) out.get("links");
         assertThat((List<Map<String, Object>>) links.get("out")).hasSize(1);
         assertThat(((List<Map<String, Object>>) links.get("out")).get(0))
@@ -195,9 +197,8 @@ class InternalArtifactControllerWikiViewTest {
     @DisplayName("错误映射：invalid_query 经 handleTyped → 400 + code/message 透传")
     void typedErrorMapping() {
         // 直调不经 Spring MVC 派发（@ExceptionHandler 不参与）——typed 错误到 HTTP 的
-        // 映射点就是 handleTyped 本身，直调断言其契约
-        ResponseEntity<?> resp = controller.handleTyped(new StructureToolException(
-                "invalid_query", org.springframework.http.HttpStatus.BAD_REQUEST,
+        // 映射点就是 handleTyped 本身，直调断言其契约；异常构造走规范工厂
+        ResponseEntity<?> resp = controller.handleTyped(StructureToolException.invalidQuery(
                 "q 必填且不能为空白（wiki 检索文本）", Map.of()));
 
         assertThat(resp.getStatusCode().value()).isEqualTo(400);
