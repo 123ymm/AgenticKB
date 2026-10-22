@@ -17,8 +17,13 @@ export function renderMarkdown(md: string): string {
 
 /** 溯源角标标记：[[src:unit_id]]（先于双链匹配，否则会被当成页面键）。 */
 const WIKI_SRC_RE = /\[\[src:([^\]|]+)\]\]/g
-/** 站内双链标记：[[页面key]] / [[页面key|锚文本]]。 */
-const WIKI_LINK_RE = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g
+/** 站内双链标记：[[页面key]] / [[页面key|锚文本]]。
+ *
+ * 字符口径对齐后端 db_wiki._WIKI_LINK_RE（方括号一律禁入；键另禁 |，
+ * 锚文本允许含 |——后端 partition 取首个 | 后的余段）。捕获后 key/anchor
+ * 各自 trim（同 extract_wiki_links），键 trim 后为空=后端不记边。
+ */
+const WIKI_LINK_RE = /\[\[([^\[\]|]+)(?:\|([^\[\]]+))?\]\]/g
 
 /** HTML 转义（属性值与内联文本共用——键/锚文本/unit_id 不可信，先转义再插值）。 */
 function escapeHtml(value: string): string {
@@ -33,7 +38,8 @@ function escapeHtml(value: string): string {
 /**
  * Wiki 正文渲染：站内标记预处理 → renderMarkdown（marked → DOMPurify）。
  *
- * 三种标记（key/锚文本/unit_id 均 HTML 转义后插属性，杜绝属性逃逸）：
+ * 三种标记（key/锚文本/unit_id 均 HTML 转义后插属性，杜绝属性逃逸；
+ * key/锚文本捕获后 trim——与后端 extract_wiki_links 记边口径一致）：
  *   [[页面key]]       → <a href="#" data-wiki-page="key">key</a>
  *   [[页面key|锚文本]] → <a href="#" data-wiki-page="key">锚文本</a>
  *   [[src:unit_id]]   → <sup class="wiki-src" data-unit-id="id" title="id">¶</sup>
@@ -49,9 +55,12 @@ export function renderWikiMarkdown(md: string): string {
       (_match, unitId: string) =>
         `<sup class="wiki-src" data-unit-id="${escapeHtml(unitId)}" title="${escapeHtml(unitId)}">¶</sup>`,
     )
-    .replace(WIKI_LINK_RE, (_match, key: string, anchor?: string) => {
-      const text = anchor ?? key
-      return `<a href="#" data-wiki-page="${escapeHtml(key)}">${escapeHtml(text)}</a>`
+    .replace(WIKI_LINK_RE, (match, key: string, anchor?: string) => {
+      const pageKey = key.trim()
+      // 与后端同口径：空键不记边 → 保留原文纯文本，不产可点击链
+      if (!pageKey) return match
+      const anchorText = (anchor ?? '').trim()
+      return `<a href="#" data-wiki-page="${escapeHtml(pageKey)}">${escapeHtml(anchorText || pageKey)}</a>`
     })
   return renderMarkdown(preprocessed)
 }

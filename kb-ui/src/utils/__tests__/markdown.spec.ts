@@ -61,6 +61,25 @@ describe('renderWikiMarkdown', () => {
     expect(host.querySelector('h1')?.textContent).toBe('标题')
     expect(host.querySelector('p a[data-wiki-page="home"]')).not.toBeNull()
   })
+
+  it('键/锚文本 trim（I1）——[[ home ]] 跳转属性与后端 extract_wiki_links 记边口径一致', () => {
+    const host = renderToHost('见 [[ home ]] 与 [[ home | 首页 ]] 及空锚 [[ home |  ]]')
+    const anchors = host.querySelectorAll('a[data-wiki-page]')
+    expect(anchors).toHaveLength(3)
+    expect(anchors[0].getAttribute('data-wiki-page')).toBe('home')
+    expect(anchors[0].textContent).toBe('home')
+    expect(anchors[1].getAttribute('data-wiki-page')).toBe('home')
+    expect(anchors[1].textContent).toBe('首页')   // 锚文本 trim 后展示
+    expect(anchors[2].textContent).toBe('home')   // 空锚回退键文本
+  })
+
+  it('括号口径对齐后端（M1）——[[a[b]] 不产活链、保留纯文本；空键不产链', () => {
+    const host = renderToHost('幽灵链 [[a[b]] 与空键 [[ ]]')
+    // 后端 _WIKI_LINK_RE 禁括号 → 不记边；前端同口径不产可点击链
+    expect(host.querySelector('a[data-wiki-page]')).toBeNull()
+    expect(host.textContent).toContain('[[a[b]]')
+    expect(host.textContent).toContain('[[ ]]')
+  })
 })
 
 describe('extractWikiNavTarget / extractWikiSrcUnit（点击委托）', () => {
