@@ -95,3 +95,31 @@
 3. MCP 契约：四种 query 形态透传钉死；表格 DSL 回归。
 4. web 搜索框→转发端点→serving 链路（Mock 层）+ 阅读器跳页。
 5. 门禁：Java mvn test 全绿+jar 校验；Python 差分零新增；MCP/前端全绿。
+
+---
+
+## 批次4 完成记录（2026-10-23 定稿）
+
+**提交链**（基于批次3 完成点 1f79fde）：8af36ab 计划 → 808002f T1 WikiArtifactToolMapper（五方法+四 record+XML 形态测试 6）→ 4cb70f5 T2 ArtifactWikiSearchService+分流+三端点（+30 测试）→ ba3004d T2 收口（时间戳 ISO 恒含秒+错误码工厂对齐码表）→ 034b626 T3 MCP 文案+透传契约（+5）→ 9b2c972 T4 mining 转发+前端搜索框（Python +18/前端 +6）。
+
+**门禁**：Java `mvn test` **520 全绿**（基线 484+36）+ `mvn -DskipTests package` 纯源码重build + **zipfile 校验通过**（jar 内 BOOT-INF/classes/mapper/WikiArtifactToolMapper.xml 含全部关键 SQL 标记；11 mappers；ArtifactWikiSearchService/RrfSupport 全部新类在包内）；Python kb 14f/**514p**/1s/252e（差分 +18 零新增失败）；MCP **170 passed**（165+5）；前端 **623 全绿**+build 零类型错。审查链：T1 合并审（审查者额外做 MyBatis 真解析验证）/T2 规格+质量两审+收口/T4 合并审（body 契约逐字核对全一致+epoch 防护实测）。
+
+**协议定稿（MCP art_ wiki query，dict-only）**：`{"q"[,"mode","top_k"]}`→三通道搜索（fusion 默认）；`{"page"}`→页面整读；`{"links"[,"direction"]}`→单跳；query=null→wiki 卡片（WikiArtifactCard 独立 record：page_count=发布页数+embedding 四态进度）。**无字符串形态**（get_knowledge 签名 dict|None 入口即拒）。分流域=Java ArtifactQueryService（表格 DSL 分支零改动）；MCP 零逻辑改动。
+
+**实现定稿（批次5 依赖）**：
+- dense 五口径降级（done=0 不发 embedding 调用/客户端抛/向量空/**维度≠1024**/SQL 抛）→空通道+`degraded_dense`；keyword 是保底通道硬失败不降级；fusion=RrfSupport.fuse(k=60,等权)（**service 层用全参构造器显式 channelRank**——legacy 5 参的共享计数器会让后进通道名次偏移 7.5 倍，融合名存实亡）。
+- 候选预算：dense min(400,max(5·topK,100))；keyword 3·topK；service 层按 topK 截断（mapper 外层无 LIMIT）。
+- 装配键 snake_case（照 controller 全局风格）；updated_at ISO_OFFSET_DATE_TIME 恒含秒（Python ≤3.10 可解析）。
+- mining 转发：`/api/artifacts/{id}/wiki/search` ROLE_RUNTIME_READ 前置（非成员 404 即拦不转发）→ httpx 单例→serving `/api/internal/artifact-wiki-search`（X-Internal-Auth；env 同容器共享已核实 compose 单 app 服务）；错误矩阵 404 透传/400→422/503·超时·其他→502 三码。
+- web 搜索框：目录侧栏顶部；epoch 迟到防护；点击跳页 alias 兜底。
+
+**偏差记录**：①T2 的 ArtifactQueryService 非 table 守卫消息行微调（"wiki 走来源挂载阅读"已失真→kind detail；wiki 已提前分流不可达该守卫，无测试断裂）；②mining 转发 is_admin 恒 false——站点管理员非制品成员时 UI 可见制品但搜索得 404（规格定稿口径，批次5 E2E 观察）；③kind≠wiki 制品手工打 search 端点→serving 400 被翻 invalid_query（边缘，批次5 裁定）；④T3 实施者扩了 get_knowledge docstring（原"仅 st_ 收 query"已错，属纠错性文案，审查确认）；⑤63号 §5.6 `/api/v1/artifacts` 前缀系设计笔误，实装 `/api/artifacts`。
+
+**显式延期**：质量账三本合一面板（批次3 挂账）→ 批次5 或后续版本。
+
+### 批次5 接手注意事项
+
+1. **真库 E2E 是批次5 主战场**：本批次全部 Mock/单测级；三通道真链路（发布→units 就绪→HNSW 检索）须真 PG+真 llm_service（或桩 llm 但真库）。Java IT 形态：`@Tag("pg-integration")`+`@ActiveProfiles("test-pg")` 照 DenseVectorAnnIT（EXPLAIN 必含 idx_wiki_units_hnsw）。
+2. **jar 部署**：1.1.16 发版 jar 必须重build（本批次 Java 常量未变但类新增；纯源码构建+zipfile 校验铁律已演练通过）。
+3. **遗留挂账**（不阻断）：T2 parseRef/requireDomain 刻意复制（同文法两份）；degraded_dense 无原因字段；ArtifactQueryService 测试遗留单参构造；发布校验 N+1；编辑器 provenance 录入 UI；conflicts 账编辑器内提示；quality 面板。
+4. **MCP 顶层浏览**（_browse_top artifacts 段）对 wiki 卡片自然生效（artifact-list 通道 kind 无关）——E2E 验一下即可。
