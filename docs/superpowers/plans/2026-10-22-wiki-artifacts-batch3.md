@@ -116,3 +116,29 @@
 3. 引用规范：machine 页 provenance 非空、src 悬空入 flags、密度告警、draft 宽免。
 4. 重跑稳定性基础：同输入聚类结果逐字节相等；LLM 幂等键稳定（prompt_version 冻结）。
 5. 门禁：Python 差分零新增失败；前端全绿+build 零错；表格路径零回归。
+
+---
+
+## 批次3 完成记录（2026-10-22 定稿）
+
+**提交链**（基于批次2 完成点 2139768）：d451abc 计划 → 56cd904 T1 sources 绑定 → ce5151d T1 修复（指纹 scope 感知/dirty 遮蔽/输入硬化）→ a5ee7f0 T2 取材+聚类 → 39a1b6c T2 修复（质心缓存+种子准入 3.8x/内存 array 化/共享快照去重）→ 75c8597 T3 编译主体 → adcced0 T3 修复（僵尸跨轮/停止位按 batch_id/cache 归属）→ 7c4536c T3 收口（start 建批原子化/缓存删除清理/悬空口径收窄簇成员）→ 17f0672 计划对齐 → 14ac7e2 T4 前端编译面板 → bf5c904 T4 修复（awaiting_toc 停轮询保编辑/切换重启）→ 4d171f7 T4 收口（过期响应防护/错误路径测试/僵尸定时器）。
+
+**门禁**：Python 全量 37f/**2159p**/22s/261e（merge-base 基线 37f/2087p/21s/261e——失败/错误数完全一致，+72 passed=批次3 新增）；MCP 165 passed；Java `mvn compile` 零牵连；前端 **617 用例全绿**（93 文件）+ `npm run build` 零类型错。审查链：每任务规格+质量两审共 8 轮+5 轮修复（计划审查 1C/4H/5M/7L 全修；T2 性能实测 3.8x；T3 并发对抗核验双任务交错测试）。
+
+**关键实现定稿（批次4/5 依赖）**：
+- **指纹 scope 感知**：`current_fingerprint(kb_id, directories)`——dirty=绑定范围内编译语料变化；`_run_prepare` 落库指纹**必须同参**调用（两侧同形铁律）。
+- **量级护栏**：Σscope 单元 >30000（MAX_UNITS）→ 422 too_many_units；向量 array('f') 4KB/条；聚类 O(N·max_seeds=500·D)（实测 600 单元 4.4s，30k 外推 ~6 分钟）。
+- **编译状态机**：kb_artifact_batches.details（jsonb 增量合并+guard_states 守卫写）；start=advisory lock 事务内建批原子带 `{"state":"preparing"}`；停止位按**本批 batch_id** 的 state≠writing 即停；_PREPARE_CACHE 进程内存（键=artifact_id 值带 batch_id 归属账；重启丢=awaiting_toc 作废提示重编；制品硬删时 drop_prepare_cache 延迟 import 尽力清理）。
+- **悬空引用三接缝分层**：编译期=页簇成员并集（严）/发布期=rev0 provenance 并集（宽，err-safe）；发布校验（validate_pages_for_publish）：machine topic 页 provenance 空或悬空→阻断 409 publish_validation_failed；manual 页空 provenance→warning（**偏差记录**：设计"硬性"对人工页降为警告——编辑器无 provenance 录入 UI）；专页（glossary/open_question/contradiction）一律宽免。
+- **create_batch**：file_name/sheet_name 传空串（NOT NULL DEFAULT ''）。
+- **前端轮询**：usePolling 复用；POLL_STATES={preparing,writing}（awaiting_toc/终态停）；epoch+artifactId 双防护过期响应；终态 emit changed 刷新乐观锁令牌。
+
+**对设计的偏差记录**：①不做"凝聚度低重聚"（§4.2 ②）；②人工页发布 provenance 降警告（§4.4）；③TOC 输入 top-150 簇折叠（§4.2 ③输入有界化）；④质量账三本合一面板只有编译报告一处展示（§4.5——挂账批次4/5）。
+
+### 批次4 接手注意事项
+
+1. **检索侧依赖**：kb_wiki_page_units 按 (artifact_id, revision=current_revision, embed_status='done') 过滤——批次2 发布投影+embedding 异步已产数据；HNSW 走 idx_wiki_units_hnsw（009 经验：ANN 两层 SQL+force_custom_plan 会话参数已全局生效于域池）。
+2. **conflicts 账前端展示位**：编译报告已有 conflicts 明细；编辑器内冲突提示未做（用户裁决=手工删/改其一）。
+3. **编辑器 provenance 录入 UI**（收紧人工页发布校验的前置）未做——manual 页发布仍走 warning 通道。
+4. **挂账小项**：发布校验 N+1（list_pages+逐页 get_page）；写作上下文 dataclass 化；_run_writing ~118 行；system 角色界定；轮询失败恢复交互（现=停轮询单次提示）；脏横幅直达重编译按钮（裁定省略——编译区就在下方）；errorCode 共享工具。
+5. **真库验收提醒**：PG 门控用例集（test_wiki_db.py 含批次3 新增 collect_units/指纹/守卫/共享快照用例）须 py≥3.12 环境跑；编译管线全链真库预演属批次5。
