@@ -1,7 +1,15 @@
 <template>
   <div class="import-wizard">
+    <el-radio-group v-model="source" :disabled="uploading || importing" aria-label="导入来源" data-test="import-source">
+      <el-radio-button value="excel">上传 Excel</el-radio-button>
+      <el-radio-button value="kb">从知识库选择</el-radio-button>
+    </el-radio-group>
+    <el-card v-if="kbSourceOpened" v-show="source === 'kb'" class="import-wizard__step" shadow="never">
+      <template #header><b>① 选择知识库来源</b></template>
+      <ArtifactKbSourcePicker :key="artifactId" :domain="domain" :active="active && source === 'kb'" />
+    </el-card>
     <!-- 卡① 选文件：上传 xlsx → 拿 preview_token + 预览（sheet 选择） -->
-    <el-card class="import-wizard__step" shadow="never">
+    <el-card v-show="source === 'excel'" class="import-wizard__step" shadow="never">
       <template #header>
         <b>① 选择文件</b>
         <span class="import-wizard__hint">（.xlsx，≤50MB；解析后 1 小时内有效）</span>
@@ -36,7 +44,7 @@
     </el-card>
 
     <!-- 卡② 列映射：左=文件列推断；右=逐列映射（已有列→map_to/新建/丢弃） -->
-    <el-card v-if="envelope" class="import-wizard__step" shadow="never">
+    <el-card v-if="source === 'excel' && envelope" class="import-wizard__step" shadow="never">
       <template #header>
         <b>② 列映射</b>
         <span class="import-wizard__hint">（{{ hasExisting ? '追加模式：至少一列映射到已有列；文件新列可新建' : '建表模式：为每列选择目标类型，建议指定主键' }}）</span>
@@ -148,7 +156,7 @@
     </el-card>
 
     <!-- 卡③ 预览确认：投影前 50 行 + 冲突策略 + 执行导入 → 报告 -->
-    <el-card v-if="envelope && mappingConfirmed" class="import-wizard__step" shadow="never">
+    <el-card v-if="source === 'excel' && envelope && mappingConfirmed" class="import-wizard__step" shadow="never">
       <template #header>
         <b>③ 预览确认</b>
         <span class="import-wizard__hint">（按映射投影的前 {{ projectedRows.length }} 行样例）</span>
@@ -226,6 +234,7 @@ import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
+import ArtifactKbSourcePicker from './ArtifactKbSourcePicker.vue'
 import type {
   ArtifactColumn, ImportConflictPolicy, ImportReport, PreviewColumn,
   PreviewEnvelope, SheetPreview,
@@ -256,9 +265,14 @@ interface ColumnMapping {
 
 const props = withDefaults(defineProps<{
   artifactId: string
+  domain?: string
   /** 所在 tab 是否激活（懒加载已有列）。 */
   active?: boolean
-}>(), { active: true })
+}>(), { active: true, domain: '' })
+
+const source = ref<'excel' | 'kb'>('excel')
+const kbSourceOpened = ref(false)
+watch(source, value => { if (value === 'kb') kbSourceOpened.value = true })
 
 const emit = defineEmits<{ imported: [report: ImportReport] }>()
 

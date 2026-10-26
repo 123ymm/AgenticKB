@@ -173,8 +173,18 @@ async def lifespan(app: FastAPI):
 
     # Domain-specific async/sync pools are opened lazily by API dependencies.
     app.state.domain_pools = DomainPoolManager(cfg)
+    from knowledge_mining.mining.kb.services.artifact_pipeline_service import service_for
+
+    async def execute_artifact(candidate):
+        service = await service_for(app, candidate["domain"])
+        return await service.execute(candidate)
+
+    event_loop = asyncio.get_running_loop()
     app.state.domain_run_dispatcher = build_domain_run_dispatcher(
         app.state.domain_pools, cfg,
+        artifact_executor=lambda candidate: asyncio.run_coroutine_threadsafe(
+            execute_artifact(candidate), event_loop,
+        ).result(),
     )
 
     from knowledge_mining.mining.infra.domain_pack import load_domain_registry

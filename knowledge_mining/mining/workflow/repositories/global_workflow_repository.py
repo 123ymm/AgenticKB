@@ -12,7 +12,9 @@ class GlobalWorkflowRepository:
         self._pool = pool
 
     async def list_workflows(self, *, include_archived: bool = False) -> list[dict]:
-        where = "" if include_archived else "WHERE status = 'active'"
+        where = "WHERE COALESCE(metadata_json->>'profile','') <> 'artifact_table'"
+        if not include_archived:
+            where += " AND status = 'active'"
         async with self._pool.connection() as conn:
             cursor = await conn.execute(
                 f"SELECT * FROM mining_workflows {where} "
@@ -22,12 +24,14 @@ class GlobalWorkflowRepository:
 
     async def get_workflow(self, workflow_id: str) -> dict | None:
         return await self._fetch_one(
-            "SELECT * FROM mining_workflows WHERE id = %s", (workflow_id,)
+            "SELECT * FROM mining_workflows WHERE id = %s "
+            "AND COALESCE(metadata_json->>'profile','') <> 'artifact_table'", (workflow_id,)
         )
 
     async def get_by_name(self, name: str) -> dict | None:
         return await self._fetch_one(
-            "SELECT * FROM mining_workflows WHERE name = %s", (name,)
+            "SELECT * FROM mining_workflows WHERE name = %s "
+            "AND COALESCE(metadata_json->>'profile','') <> 'artifact_table'", (name,)
         )
 
     async def insert_workflow(self, record: dict) -> dict:

@@ -390,6 +390,10 @@ class TestSixtyOneAcceptanceCases:
 
         env.holder["user"] = OWNER
         r = await env.client.delete(f"/api/artifacts/{aid}")
+        assert r.status_code == 409  # 已发布资产必须先停用，权限不会绕过生命周期门禁。
+        r = await env.client.post(f"/api/artifacts/{aid}/deprecate", json={})
+        assert r.status_code == 200
+        r = await env.client.delete(f"/api/artifacts/{aid}")
         assert r.status_code == 200
         # fake 记账断言六表清理（kb_artifacts / members / revisions / batches /
         # columns / rows[rev0+历史]）

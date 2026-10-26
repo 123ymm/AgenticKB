@@ -460,6 +460,10 @@ class LLMService:
         priority: int = 100,
     ) -> str:
         actual_model = model or getattr(self._model_provider, "embedding_model", None) or dig(self._config, "embedding", "model")
+        actual_dimensions = (
+            dimensions if dimensions is not None
+            else self._config.get("embedding", {}).get("dimensions")
+        )
 
         return await self._submit_with_idempotency(
             idempotency_key=idempotency_key,
@@ -470,7 +474,7 @@ class LLMService:
             request_params=(
                 "embedding", actual_model, None,
                 "[]",
-                json.dumps({"texts": texts, "model": actual_model, "dimensions": dimensions}),
+                json.dumps({"texts": texts, "model": actual_model, "dimensions": actual_dimensions}),
                 "{}", "embedding", "{}",
             ),
             event_message="embedding task submitted",

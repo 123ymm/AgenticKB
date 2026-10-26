@@ -93,9 +93,9 @@ function seedRoot(opts: { files?: number } = {}) {
   )
 }
 
-async function mountFm() {
+async function mountFm(selectionOnly = false, includeSubdirectories = true) {
   const wrapper = mount(KbFileManager, {
-    props: { kbId: 'kb-1', canWrite: true, workflowId: 'wf-1', active: true },
+    props: { kbId: 'kb-1', canWrite: !selectionOnly, workflowId: 'wf-1', active: true, selectionOnly, includeSubdirectories },
     global: { stubs: { ElPagination: ElPaginationStub, ElCheckbox: ElCheckboxStub, ElTooltip: { template: '<span><slot /></span>' } } },
   })
   await flushPromises()
@@ -130,6 +130,73 @@ describe('文件管理器：默认分页', () => {
     const wrapper = await mountFm()
     expect(wrapper.findAll('.fm__row--file')).toHaveLength(10)
     expect(wrapper.find('[data-testid="fm-pagination"]').exists()).toBe(false)
+  })
+})
+
+describe('制品来源：复用文件管理器的仅选择模式', () => {
+  beforeEach(() => { vi.clearAllMocks(); seedRoot() })
+
+  function selected(wrapper: Awaited<ReturnType<typeof mountFm>>) {
+    const events = wrapper.emitted('selection-change') ?? []
+    return (events.at(-1)?.[0] ?? []) as Array<{ id: string; document_name: string }>
+  }
+
+  it('递归展开分批读取超过 500 个文件，手选和目录选择去重，取消目录保留手选', async () => {
+    kbApi.listDocuments.mockImplementation(async (_kb: string, dir: string, limit: number, offset: number) => {
+      const docs = dir === '2025 报表/Q1' ? [file('nested', '子文件.xlsx')]
+        : dir === '2025 报表' ? Array.from({ length: 501 }, (_, i) => file(`r-${i}`, `${i}.xlsx`))
+          : [file('r-0', '0.xlsx')]
+      return docs.slice(offset, offset + limit)
+    })
+    const wrapper = await mountFm(true)
+    await wrapper.find('.fm__row--file input').setValue(true)
+    await wrapper.find('.fm__row--folder input').setValue(true)
+    await flushPromises()
+    expect(selected(wrapper)).toHaveLength(502)
+    expect(kbApi.listDocuments).toHaveBeenCalledWith('kb-1', '2025 报表', 500, 500)
+    expect(selected(wrapper).find(doc => doc.id === 'nested')?.document_name).toBe('子文件.xlsx')
+    await wrapper.find('.fm__row--folder input').setValue(false)
+    expect(selected(wrapper).map(doc => doc.id)).toEqual(['r-0'])
+    expect(wrapper.find('[data-testid="fm-batch-mine"]').exists()).toBe(false)
+    expect(kbApi.mineKb).not.toHaveBeenCalled()
+  })
+
+  it('可不含子目录；从汇总移除后目录仍选中但不会重新加入被移除文件', async () => {
+    const wrapper = await mountFm(true, false)
+    await wrapper.find('.fm__row--folder input').setValue(true)
+    await flushPromises()
+    expect(selected(wrapper).map(doc => doc.id)).toEqual(['r-1'])
+    expect(kbApi.listDocuments).not.toHaveBeenCalledWith('kb-1', '2025 报表/Q1', 500, 0)
+    wrapper.vm.removeSelected('r-1')
+    await flushPromises()
+    expect(selected(wrapper)).toEqual([])
+  })
+
+  it('点击文件只选择；跨页保留文件资料，清空后不残留', async () => {
+    const wrapper = await mountFm(true)
+    await wrapper.find('.fm__row--file').trigger('click')
+    await wrapper.find('.pager-next').trigger('click')
+    await flushPromises()
+    await wrapper.find('.fm__row--file').trigger('click')
+    expect(selected(wrapper).map(doc => doc.id)).toEqual(['root-0', 'root-50'])
+    expect(wrapper.find('.fm__row--file').attributes('draggable')).toBe('false')
+    wrapper.vm.clearSelection()
+    await flushPromises()
+    expect(selected(wrapper)).toEqual([])
+  })
+
+  it('切换知识库会丢弃仍在执行的目录展开结果', async () => {
+    const wrapper = await mountFm(true)
+    let finish!: (docs: ReturnType<typeof file>[]) => void
+    kbApi.listDocuments.mockImplementation((_kb: string, dir: string) => dir === '2025 报表'
+      ? new Promise(resolve => { finish = resolve }) : Promise.resolve([]))
+    await wrapper.find('.fm__row--folder input').setValue(true)
+    await wrapper.setProps({ kbId: 'kb-2' })
+    await flushPromises()
+    finish([file('stale', '旧库文件.xlsx')])
+    await flushPromises()
+    expect(selected(wrapper)).toEqual([])
+    expect(wrapper.find('.fm__batch').exists()).toBe(false)
   })
 })
 

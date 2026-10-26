@@ -60,6 +60,133 @@ from knowledge_mining.mining.infra.domain_pack import (
 
 router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
 
+
+class TableExtractRequest(BaseModel):
+    kb_id: str = Field(min_length=1, max_length=128)
+    document_ids: list[str] = Field(min_length=1, max_length=2000)
+
+
+class PipelineStepRequest(BaseModel):
+    parent_run_id: str
+    operator: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/{artifact_id}/pipeline/operators")
+async def pipeline_operators(artifact_id: str, user: dict = Depends(current_user)):
+    # Registry metadata is public; every data operation below rechecks authorization.
+    from knowledge_mining.mining.workflow.artifact_table_ops import CATALOG
+    return {"items": [{"id": k, "name": v, "version": "1"} for k, v in CATALOG]}
+
+
+async def get_pipeline_service(
+    artifact_id: str, request: Request,
+    user: dict = Depends(current_user),
+    artifacts: ArtifactService = Depends(get_artifact_service),
+):
+    from knowledge_mining.mining.kb.services.artifact_pipeline_service import service_for
+    try:
+        artifact, _ = await artifacts._assert_role(user, artifact_id, "owner", "editor")
+        return await service_for(request.app, artifact["domain_id"])
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/pipeline/extract", status_code=202)
+async def extract_tables(
+    artifact_id: str, body: TableExtractRequest, request: Request,
+    user: dict = Depends(current_user), service=Depends(get_pipeline_service),
+):
+    try:
+        run_id = await service.submit(user, artifact_id, body.kb_id, body.document_ids)
+        artifact = await service.authorize(user, artifact_id)
+        request.app.state.domain_run_dispatcher.kick(artifact["domain_id"])
+        return {"run_id": run_id}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.get("/{artifact_id}/pipeline/runs")
+async def table_pipeline_runs(
+    artifact_id: str, user: dict = Depends(current_user), service=Depends(get_pipeline_service),
+):
+    try:
+        return {"items": await service.list_runs(user, artifact_id)}
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/pipeline/steps", status_code=202)
+async def pipeline_step(artifact_id: str, body: PipelineStepRequest, request: Request,
+                        user: dict = Depends(current_user), service=Depends(get_pipeline_service)):
+    try:
+        run_id = await service.submit_step(user, artifact_id, body.parent_run_id, body.operator, body.parameters)
+        artifact = await service.authorize(user, artifact_id)
+        request.app.state.domain_run_dispatcher.kick(artifact["domain_id"])
+        return {"run_id": run_id}
+    except ArtifactError as exc: raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/pipeline/runs/{run_id}/cancel")
+async def cancel_pipeline(artifact_id: str, run_id: str, user: dict = Depends(current_user), service=Depends(get_pipeline_service)):
+    try:
+        await service.read_run(user, artifact_id, run_id)
+        await service.repo.cancel(run_id)
+        return {"status": "cancelled"}
+    except ArtifactError as exc: raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/pipeline/lookup")
+async def upload_pipeline_lookup(artifact_id: str, file: UploadFile = File(...),
+                                 user: dict = Depends(current_user), service=Depends(get_pipeline_service)):
+    try:
+        content = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(content) > MAX_UPLOAD_BYTES: raise InvalidOperation("文件过大")
+        return await service.upload_lookup(user, artifact_id, file.filename or "", content)
+    except ArtifactError as exc: raise _map_error(exc) from None
+    finally: await file.close()
+
+
+@router.post("/{artifact_id}/pipeline/runs/{run_id}/publish")
+async def publish_pipeline(artifact_id: str, run_id: str, body: dict[str, Any],
+                           confirm: bool = Query(False), user: dict = Depends(current_user), service=Depends(get_pipeline_service)):
+    from knowledge_mining.mining.kb.services.artifact_pipeline_publish import publish_snapshot
+    try: return await publish_snapshot(service, user, artifact_id, run_id, body, confirm)
+    except ArtifactError as exc: raise _map_error(exc) from None
+
+
+@router.get("/{artifact_id}/pipeline/targets")
+async def pipeline_targets(artifact_id: str, user: dict = Depends(current_user), service=Depends(get_pipeline_service)):
+    try:
+        artifact = await service.authorize(user, artifact_id)
+        values = await service.artifacts.list_artifacts(user=user, domain_id=artifact["domain_id"])
+        items = []
+        for target in values:
+            if target["kind"] != "table": continue
+            try: await service.authorize(user, target["artifact_id"])
+            except ArtifactError: continue
+            columns = await service.artifacts.list_columns(user=user, artifact_id=target["artifact_id"])
+            items.append({"artifact_id": target["artifact_id"], "title": target["title"], "columns": columns})
+        return {"items": items}
+    except ArtifactError as exc: raise _map_error(exc) from None
+
+
+@router.get("/{artifact_id}/pipeline/runs/{run_id}")
+async def table_pipeline_snapshot(
+    artifact_id: str, run_id: str, page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=50),
+    filters: str | None = Query(None, max_length=10000),
+    user: dict = Depends(current_user), service=Depends(get_pipeline_service),
+):
+    try:
+        import json
+        try: conditions = json.loads(filters) if filters else None
+        except ValueError: raise InvalidOperation("筛选条件格式错误") from None
+        if conditions is not None and (not isinstance(conditions, list) or any(not isinstance(f, dict) for f in conditions)):
+            raise InvalidOperation("筛选条件格式错误")
+        return await service.page(user, artifact_id, run_id, page, size, conditions)
+    except ArtifactError as exc:
+        raise _map_error(exc) from None
+
 #: multipart 开销预算（对齐 auth_guard 用户导入预检口径）。
 _UPLOAD_BODY_BUDGET = MAX_UPLOAD_BYTES + 256 * 1024
 

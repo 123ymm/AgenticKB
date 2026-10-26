@@ -42,11 +42,12 @@ def _row(key: str, data: dict, ordinal: int = 0, provenance: list | None = None,
 
 
 async def _index_names(pool, artifact_id: str) -> list[str]:
+    escaped_id = artifact_id.replace('_', '\\_')
     async with pool.connection() as conn:
         cur = await conn.execute(
             """SELECT indexname FROM pg_indexes
                WHERE tablename = 'kb_table_rows' AND indexname LIKE %s""",
-            (f"idx\\_kbtr\\_{artifact_id.replace('_', '\\_')}\\_%",),
+            (f"idx\\_kbtr\\_{escaped_id}\\_%",),
         )
         return sorted(str(r["indexname"]) for r in await cur.fetchall())
 

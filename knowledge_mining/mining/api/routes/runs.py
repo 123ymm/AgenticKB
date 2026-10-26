@@ -181,7 +181,8 @@ async def _require_run_domain(pool, run_id: str, domain: str) -> dict:
     async with pool.connection() as conn:
         cur = await conn.execute(
             "SELECT id, domain, status, kb_id FROM mining_runs "
-            "WHERE id = %s AND domain = %s",
+            "WHERE id = %s AND domain = %s "
+            "AND COALESCE(metadata_json->>'profile','') <> 'artifact_table'",
             [run_id, requested],
         )
         row = await cur.fetchone()
@@ -272,7 +273,7 @@ async def list_runs(
             return {"total": 0, "limit": limit, "offset": offset, "items": []}
 
     async with pool.connection() as conn:
-        conds: list[str] = ["domain = %s"]
+        conds: list[str] = ["domain = %s", "COALESCE(metadata_json->>'profile','') <> 'artifact_table'"]
         params: list[Any] = [require_domain(domain)]
         if status:
             conds.append("status = %s")

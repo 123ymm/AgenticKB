@@ -173,77 +173,85 @@ async def test_parse_upload_rejects_bad_files():
     assert excinfo.value.code == "invalid_xlsx"
 
 
-async def test_parse_allows_formula_but_execute_rejects(tmp_path):
-    """codex三审 P2-3 回归：parse 预览不拒公式（只读展示合法）；execute 重读
-    所选 sheet 时拒绝（数据值与表头双查），零写入。"""
+def _with_formula_cache(data, coordinate, value, cell_type="n"):
+    import io
+    import zipfile
+    import xml.etree.ElementTree as ET
+    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    result = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(result, "w") as target:
+        for entry in source.infolist():
+            content = source.read(entry.filename)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                root = ET.fromstring(content)
+                cell = next(c for c in root.iter(ns + "c") if c.attrib["r"] == coordinate)
+                cell.set("t", cell_type)
+                cached = cell.find(ns + "v")
+                if cached is None:
+                    cached = ET.SubElement(cell, ns + "v")
+                cached.text = value
+                content = ET.tostring(root)
+            target.writestr(entry, content)
+    return result.getvalue()
+
+
+@pytest.mark.parametrize("cached,kind,expected", [("99", "n", 99), ("-5°C", "str", "-5°C"), ("0", "n", 0), ("0", "b", False)])
+async def test_formula_import_uses_saved_cache_even_when_stale(tmp_path, cached, kind, expected):
     db, svc, imp = _make_service()
-    art = await svc.create_artifact(user=OWNER, domain_id="plant-a", title="公式表")
-    aid = art["artifact_id"]
-    # 数据值公式：parse 放行
-    data = _write_xlsx(tmp_path / "F.xlsx", ["MOP"], [["=1+1"]])
-    out = imp.parse_upload(data, "F.xlsx")
-    assert out["preview"]["sample_rows"][0]["MOP"] == "=1+1"
-    plan = imp.build_mapping(
-        out["preview_token"],
-        column_ops=[{"source": "MOP", "action": "new", "target_name": "MOP",
-                     "column_type": "text", "is_primary_key": True}])
-    with pytest.raises(ArtifactImportError) as excinfo:
-        await imp.execute_import(
-            svc, user=OWNER, artifact_id=aid,
-            preview_token=out["preview_token"], plan=plan)
-    assert excinfo.value.code == "formula_not_allowed"
+    aid = (await svc.create_artifact(user=OWNER, domain_id="plant-a", title="cache"))["artifact_id"]
+    data = _write_xlsx(tmp_path / "cache.xlsx", ["value"], [["=1+1"]])
+    data = _with_formula_cache(data, "A2", cached, kind)
+    out = imp.parse_upload(data, "cache.xlsx")
+    assert out["preview"]["sample_rows"][0]["value"] == expected
+    plan = imp.build_mapping(out["preview_token"], column_ops=[
+        {"source": "value", "action": "new", "target_name": "value", "column_type": "text"}])
+    report = await imp.execute_import(svc, user=OWNER, artifact_id=aid, preview_token=out["preview_token"], plan=plan)
+    assert report["inserted"] == 1
+    assert db.rev0_rows[aid][0]["data"]["value"] == expected
+
+
+@pytest.mark.parametrize("cache,error", [(None, "formula_cache_missing"), ("#DIV/0!", "formula_cache_error")])
+async def test_invalid_formula_cache_reports_location_before_writes(tmp_path, cache, error):
+    db, svc, imp = _make_service()
+    aid = (await svc.create_artifact(user=OWNER, domain_id="plant-a", title="cache"))["artifact_id"]
+    data = _write_xlsx(tmp_path / "cache.xlsx", ["value"], [["=1/0"]])
+    if cache is not None:
+        data = _with_formula_cache(data, "A2", cache, "e")
+    out = imp.parse_upload(data, "cache.xlsx")
+    plan = imp.build_mapping(out["preview_token"], column_ops=[
+        {"source": "value", "action": "new", "target_name": "value", "column_type": "text"}])
+    with pytest.raises(ArtifactImportError, match=error + ": Sheet1!A2"):
+        await imp.execute_import(svc, user=OWNER, artifact_id=aid, preview_token=out["preview_token"], plan=plan)
     assert db.rev0_rows[aid] == []
-    # 表头本身是公式：parse 放行、execute 表头重读时拒绝
-    data = _write_xlsx(tmp_path / "F2.xlsx", ["=SUM(A1)"], [["x"]])
-    out = imp.parse_upload(data, "F2.xlsx")
-    assert out["preview"]["columns"][0]["source_name"] == "=SUM(A1)"
-    plan = imp.build_mapping(
-        out["preview_token"],
-        column_ops=[{"source": "=SUM(A1)", "action": "new", "target_name": "MOP",
-                     "column_type": "text"}])
-    with pytest.raises(ArtifactImportError) as excinfo:
-        await imp.execute_import(
-            svc, user=OWNER, artifact_id=aid,
-            preview_token=out["preview_token"], plan=plan)
-    assert excinfo.value.code == "formula_not_allowed"
 
 
-async def test_formula_rejection_scoped_to_selected_sheet(tmp_path):
-    """codex三审 P2-3 回归：sheet1 合法数据 + sheet2 汇总公式 → 上传预览成功；
-    import sheet1 成功；import sheet2 被拒（公式只查所选 sheet）。"""
+async def test_literal_prefixes_and_other_sheet_formulas_do_not_block_import(tmp_path):
     db, svc, imp = _make_service()
-    art = await svc.create_artifact(user=OWNER, domain_id="plant-a", title="多表")
-    aid = art["artifact_id"]
-    data = _write_xlsx_multi(tmp_path / "M.xlsx", [
-        ("Sheet1", ["MOP"], [("NC-1",), ("NC-2",)]),
-        ("Sheet2", ["汇总"], [("=SUM(Sheet1!A:A)",)]),
-    ])
-    out = imp.parse_upload(data, "M.xlsx")     # 旧口径：整文件拒绝——现放行
-    assert [s["name"] for s in out["preview"]["sheets"]] == ["Sheet1", "Sheet2"]
-    # import sheet1：成功
-    plan = imp.build_mapping(
-        out["preview_token"], sheet="Sheet1",
-        column_ops=[{"source": "MOP", "action": "new", "target_name": "MOP",
-                     "column_type": "text", "is_primary_key": True}])
-    report = await imp.execute_import(
-        svc, user=OWNER, artifact_id=aid,
-        preview_token=out["preview_token"], plan=plan)
-    assert report["sheet"] == "Sheet1" and report["inserted"] == 2
-    # import sheet2：公式 → 拒绝（新 token——上一步成功已消费）；追加模式
-    # map_to 既有列（schema 已由 sheet1 建立，create 会被 schema 门禁拦）
-    out2 = imp.parse_upload(data, "M.xlsx")
-    column_ids = {c["column_name"]: c["column_id"] for c in db.columns[aid]}
-    plan2 = imp.build_mapping(
-        out2["preview_token"], sheet="Sheet2",
-        column_ops=[{"source": "汇总", "action": "map_to",
-                     "target": column_ids["MOP"]}],
-        target_columns=await svc.list_columns(user=OWNER, artifact_id=aid),
-    )
-    with pytest.raises(ArtifactImportError) as excinfo:
-        await imp.execute_import(
-            svc, user=OWNER, artifact_id=aid,
-            preview_token=out2["preview_token"], plan=plan2)
-    assert excinfo.value.code == "formula_not_allowed"
+    aid = (await svc.create_artifact(user=OWNER, domain_id="plant-a", title="text"))["artifact_id"]
+    values = ["-5°C", "-", "- list", "+48V", "@label"]
+    data = _write_xlsx_multi(tmp_path / "text.xlsx", [
+        ("Sheet1", ["value"], [(v,) for v in values]),
+        ("Sheet2", ["value"], [("=1+1",)])])
+    out = imp.parse_upload(data, "text.xlsx")
+    plan = imp.build_mapping(out["preview_token"], sheet="Sheet1", column_ops=[
+        {"source": "value", "action": "new", "target_name": "value", "column_type": "text"}])
+    report = await imp.execute_import(svc, user=OWNER, artifact_id=aid, preview_token=out["preview_token"], plan=plan)
+    assert report["inserted"] == len(values)
+    assert [r["data"]["value"] for r in db.rev0_rows[aid]] == values
+
+
+async def test_formula_header_uses_cached_text(tmp_path):
+    db, svc, imp = _make_service()
+    aid = (await svc.create_artifact(user=OWNER, domain_id="plant-a", title="header"))["artifact_id"]
+    data = _write_xlsx(tmp_path / "header.xlsx", ['="value"'], [["-5°C"]])
+    data = _with_formula_cache(data, "A1", "value", "str")
+    out = imp.parse_upload(data, "header.xlsx")
+    assert out["preview"]["columns"][0]["source_name"] == "value"
+    plan = imp.build_mapping(out["preview_token"], column_ops=[
+        {"source": "value", "action": "new", "target_name": "value", "column_type": "text"}])
+    report = await imp.execute_import(svc, user=OWNER, artifact_id=aid, preview_token=out["preview_token"], plan=plan)
+    assert report["inserted"] == 1
+    assert db.rev0_rows[aid][0]["data"]["value"] == "-5°C"
 
 
 async def test_parse_upload_column_limit(tmp_path):

@@ -50,6 +50,7 @@ function mountWizard(): VueWrapper {
     global: {
       // 卡片/告警渲染插槽——渐进披露与报告区文本断言需要（默认浅桩不渲染 slot）
       stubs: {
+        ElRadioGroup: { name: 'ElRadioGroup', template: '<div><slot /></div>' },
         ElCard: { template: '<div class="el-card"><slot name="header" /><slot /></div>' },
         ElAlert: { props: ['title'], template: '<div class="el-alert">{{ title }}<slot /></div>' },
       },
@@ -126,6 +127,23 @@ beforeEach(() => {
 })
 
 describe('ArtifactImportWizard', () => {
+  it('switches sources without importing or losing the Excel preview', async () => {
+    const wrapper = mountWizard()
+    await flushPromises()
+    await (wrapper.vm as unknown as WizardVm).doUpload(new File(['x'], 'A.xlsx'))
+    await flushPromises()
+    const source = wrapper.findComponent({ name: 'ElRadioGroup' })
+    source.vm.$emit('update:modelValue', 'kb')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'ArtifactKbSourcePicker' }).exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('② 列映射')
+    expect(state.api.importTable).not.toHaveBeenCalled()
+    source.vm.$emit('update:modelValue', 'excel')
+    await flushPromises()
+    expect(wrapper.text()).toContain('② 列映射')
+    expect((wrapper.vm as unknown as WizardVm).envelope?.preview_token).toBe('tok_1234567890ab')
+  })
+
   it('hides mapping card until a preview arrives (progressive disclosure)', async () => {
     const wrapper = mountWizard()
     await flushPromises()

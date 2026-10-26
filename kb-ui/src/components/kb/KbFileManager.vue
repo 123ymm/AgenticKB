@@ -64,7 +64,7 @@
       <span class="fm__batch-count" data-testid="fm-batch-count">
         已选 {{ selectedCount }} 个文件
         <template v-if="selectedFolderIds.length">
-          （含 {{ selectedFolderNames }} 的全部内容）
+          （含 {{ selectedFolderNames }} 的{{ includeSubdirectories ? '子目录及' : '' }}文件，允许逐个取消）
         </template>
         <template v-else-if="pageFilesSelected">（本页）</template>
       </span>
@@ -87,7 +87,7 @@
     </div>
 
     <!-- List -->
-    <div class="fm__list" v-loading="loading">
+    <div class="fm__list" v-loading="loading || selectingFolder">
       <div class="fm__row fm__row--head">
         <div class="fm__col fm__col--check">
           <el-tooltip
@@ -121,7 +121,7 @@
         :key="f.id"
         class="fm__row fm__row--folder"
         :class="{ 'fm__row--dragover': dragOverId === f.id, 'fm__row--sel': selId === f.id }"
-        draggable="true"
+        :draggable="!selectionOnly"
         @click="enterFolder(f.id)"
         @contextmenu.prevent="openCtx($event, 'folder', f)"
         @dragstart="onDragStart($event, 'folder', f.id)"
@@ -157,7 +157,7 @@
         :key="file.id"
         class="fm__row fm__row--file"
         :class="{ 'fm__row--dragover': dragOverId === file.id, 'fm__row--sel': selId === file.id }"
-        draggable="true"
+        :draggable="!selectionOnly"
         @click="openPreview(file)"
         @contextmenu.prevent="openCtx($event, 'file', file)"
         @dragstart="onDragStart($event, 'file', file.id)"
@@ -222,7 +222,8 @@
       />
     </div>
 
-    <div v-if="hint" class="fm__hint">提示：左键进入 · 双击文件名改名 · 右键更多操作 · 拖拽移动</div>
+    <div v-if="selectionOnly" class="fm__hint">勾选目录可展开其中的文件；点击文件可选择或取消。跨目录、跨页选择会保留。</div>
+    <div v-else-if="hint" class="fm__hint">提示：左键进入 · 双击文件名改名 · 右键更多操作 · 拖拽移动</div>
 
     <!-- 右键菜单 -->
     <teleport to="body">
@@ -248,7 +249,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Folder, FolderAdd, UploadFilled, Refresh, Search,
@@ -267,8 +268,16 @@ import type { KbDocument, KbFolder } from '@/types/kb'
 
 const NAME_CLICK_DELAY = 250 // 区分「单击进入」与「双击改名」
 
-const props = defineProps<{ kbId: string; canWrite: boolean; workflowId: string | null; active: boolean }>()
-const emit = defineEmits<{ (e: 'mine-queued'): void }>()
+const props = withDefaults(defineProps<{
+  kbId: string; canWrite: boolean; workflowId: string | null; active: boolean
+  selectionOnly?: boolean
+  includeSubdirectories?: boolean
+}>(), { selectionOnly: false, includeSubdirectories: true })
+const emit = defineEmits<{
+  (e: 'mine-queued'): void
+  (e: 'selection-change', documents: KbDocument[]): void
+  (e: 'selection-loading', loading: boolean): void
+}>()
 const router = useRouter()
 const kbApi = useKbApi()
 
@@ -295,6 +304,19 @@ async function onReplaced() {
 
 // ── 多选 + 批量操作（挖掘触发统一到这里，挖掘 Tab 只展示任务流） ──
 const selectedFileIds = ref<string[]>([])
+const selectedDocuments = ref<Record<string, KbDocument>>({})
+const explicitlySelectedIds = new Set<string>()
+const selectingFolder = ref(false)
+let selectionGeneration = 0
+watch(selectingFolder, value => emit('selection-loading', value))
+watch([selectedFileIds, selectedDocuments], () => {
+  if (props.selectionOnly) emit('selection-change', selectedFileIds.value
+    .map(id => selectedDocuments.value[id]).filter((doc): doc is KbDocument => !!doc))
+}, { deep: true })
+function rememberDocuments(documents: KbDocument[]) {
+  if (!props.selectionOnly) return
+  for (const doc of documents) selectedDocuments.value[doc.id] = doc
+}
 const forceRedo = ref(false)
 const selectedCount = computed(() => selectedFileIds.value.length)
 
@@ -312,12 +334,15 @@ const allPageFilesSelected = computed(
 )
 const pageFilesSelected = allPageFilesSelected
 function toggleFileSelect(id: string, checked: boolean) {
+  if (checked) explicitlySelectedIds.add(id)
+  else explicitlySelectedIds.delete(id)
   selectedFileIds.value = checked
     ? (selectedFileIds.value.includes(id) ? selectedFileIds.value : [...selectedFileIds.value, id])
     : selectedFileIds.value.filter((x) => x !== id)
 }
 function toggleAllFiles(checked: boolean) {
   const pageIds = files.value.map((f) => f.id)
+  pageIds.forEach(id => checked ? explicitlySelectedIds.add(id) : explicitlySelectedIds.delete(id))
   selectedFileIds.value = checked
     ? [...new Set([...selectedFileIds.value, ...pageIds])]
     : selectedFileIds.value.filter((x) => !pageIds.includes(x))
@@ -346,17 +371,21 @@ function descendantPathsOf(folderId: string): string[] {
   const root = folders.value.find((f) => f.id === folderId)
   if (root) {
     out.push(root.path)
-    walk(folderId)
+    if (props.includeSubdirectories) walk(folderId)
   }
   return out
 }
 async function collectFileIdsUnder(folderId: string): Promise<string[]> {
   const ids: string[] = []
+  const kbId = props.kbId
+  const generation = selectionGeneration
   for (const path of descendantPathsOf(folderId)) {
     let offset = 0
     // 与后端分页同窗（500/页）拉 id；文件夹内容通常远小于此
     for (;;) {
-      const pageDocs = await kbApi.listDocuments(props.kbId, path, 500, offset)
+      const pageDocs = await kbApi.listDocuments(kbId, path, 500, offset)
+      if (generation !== selectionGeneration) return []
+      rememberDocuments(pageDocs)
       ids.push(...pageDocs.map((f) => f.id))
       if (pageDocs.length < 500) break
       offset += 500
@@ -365,11 +394,22 @@ async function collectFileIdsUnder(folderId: string): Promise<string[]> {
   return [...new Set(ids)]
 }
 async function toggleFolderSelect(folder: KbFolder, checked: boolean) {
+  if (selectingFolder.value) return
   if (checked) {
-    const ids = await collectFileIdsUnder(folder.id)
-    folderContributedIds.value[folder.id] = ids
-    selectedFolderIds.value = [...selectedFolderIds.value, folder.id]
-    selectedFileIds.value = [...new Set([...selectedFileIds.value, ...ids])]
+    const generation = selectionGeneration
+    selectingFolder.value = true
+    try {
+      const ids = await collectFileIdsUnder(folder.id)
+      if (generation !== selectionGeneration) return
+      folderContributedIds.value[folder.id] = ids
+      selectedFolderIds.value = [...new Set([...selectedFolderIds.value, folder.id])]
+      selectedFileIds.value = [...new Set([...selectedFileIds.value, ...ids])]
+      if (!ids.length) ElMessage.info('该目录范围内没有文件')
+    } catch (error) {
+      if (generation === selectionGeneration) ElMessage.error(`展开目录失败：${await apiErrorDetail(error)}`)
+    } finally {
+      if (generation === selectionGeneration) selectingFolder.value = false
+    }
   } else {
     const contributed = folderContributedIds.value[folder.id] ?? []
     delete folderContributedIds.value[folder.id]
@@ -378,11 +418,14 @@ async function toggleFolderSelect(folder: KbFolder, checked: boolean) {
       Object.entries(folderContributedIds.value).flatMap(([, v]) => v),
     )
     selectedFileIds.value = selectedFileIds.value.filter(
-      (x) => !contributed.includes(x) || others.has(x),
+      (x) => !contributed.includes(x) || others.has(x) || explicitlySelectedIds.has(x),
     )
   }
 }
 function clearSelection() {
+  selectionGeneration++
+  selectingFolder.value = false
+  explicitlySelectedIds.clear()
   selectedFileIds.value = []
   selectedFolderIds.value = []
   folderContributedIds.value = {}
@@ -465,6 +508,7 @@ async function loadFiles() {
     ])
     if (generation !== loadFilesGeneration) return // 已有更新口径的请求，丢弃本响应
     files.value = pageData
+    rememberDocuments(pageData)
     totalFiles.value = total
   } catch (e) {
     if (generation !== loadFilesGeneration) return
@@ -486,6 +530,10 @@ async function reload() {
 function navTo(id: string | null) { currentFolderId.value = id; filePage.value = 1 }
 function enterFolder(id: string) { currentFolderId.value = id; selId.value = id; filePage.value = 1 }
 function openPreview(file: KbDocument) {
+  if (props.selectionOnly) {
+    toggleFileSelect(file.id, !selectedFileIds.value.includes(file.id))
+    return
+  }
   selId.value = file.id
   router.push(`/kb/${props.kbId}/doc/${file.id}`)
 }
@@ -503,6 +551,7 @@ function onNameClick(kind: 'file' | 'folder', item: KbDocument | KbFolder) {
 }
 function onNameDblClick(_kind: 'file' | 'folder', item: KbDocument | KbFolder) {
   if (nameTimer) { clearTimeout(nameTimer); nameTimer = null }
+  if (props.selectionOnly) return
   if ('document_name' in item) renameFile(item)
   else renameFolder(item)
 }
@@ -732,6 +781,7 @@ async function dropToRoot() {
 // ── 右键菜单 ──
 const ctx = ref<{ x: number; y: number; kind: 'file' | 'folder'; item: KbDocument | KbFolder } | null>(null)
 function openCtx(e: MouseEvent, kind: 'file' | 'folder', item: KbDocument | KbFolder) {
+  if (props.selectionOnly) return
   selId.value = item.id
   // 菜单贴右下，避免溢出视口
   const x = Math.min(e.clientX, window.innerWidth - 160)
@@ -795,6 +845,8 @@ watch(() => currentFolderId.value, loadFiles)
 // currentFolderId 会拿去请求新库列表，更糟的是「挖掘选中」会把 A 库的
 // document id 发给 B 库的挖掘接口（2026-08-31 前端审查 H1）。
 watch(() => props.kbId, () => {
+  clearSelection()
+  selectedDocuments.value = {}
   replacementDoc.value = null
   closeCtx()
   currentFolderId.value = null
@@ -812,6 +864,13 @@ watch(() => props.kbId, () => {
 watch(() => props.active, (now, prev) => {
   if (now && !prev) reload()
 })
+watch(() => props.includeSubdirectories, clearSelection)
+onBeforeUnmount(() => {
+  selectionGeneration++
+  loadFilesGeneration++
+  if (nameTimer) clearTimeout(nameTimer)
+})
+defineExpose({ clearSelection, removeSelected: (id: string) => toggleFileSelect(id, false) })
 </script>
 
 <style scoped>

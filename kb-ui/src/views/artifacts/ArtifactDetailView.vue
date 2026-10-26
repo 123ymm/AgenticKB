@@ -23,6 +23,7 @@
       </div>
       <div v-if="artifact && canWrite" class="artifact-detail__actions">
         <el-tooltip
+          v-if="activeTab !== 'design'"
           content="无待发布变更（编辑数据或改列后自动检出草稿）"
           :disabled="hasPendingChanges"
           placement="bottom"
@@ -75,31 +76,15 @@
     </div>
 
     <el-tabs v-if="artifact" v-model="activeTab" class="artifact-detail__tabs">
-      <!-- ── 设计态：导入向导 / 列定义 / 行编辑三面板（owner+editor；viewer 无设计态）── -->
+      <!-- 设计态：过程快照不写正式制品行列。 -->
       <el-tab-pane label="设计态" name="design">
         <template v-if="canWrite">
-          <ArtifactImportWizard
+          <ArtifactPipelineWorkbench
+            :key="artifactId"
             :artifact-id="artifactId"
+            :domain="artifact.domain_id"
             :active="activeTab === 'design'"
-            @imported="reloadAll"
-          />
-          <el-divider content-position="left">列定义</el-divider>
-          <ArtifactSchemaPanel
-            :artifact-id="artifactId"
-            :can-write="canWrite"
-            :columns="artifact.schema"
-            :expected-updated-at="artifact.updated_at"
-            @changed="reloadAll"
-          />
-          <el-divider content-position="left">数据编辑</el-divider>
-          <ArtifactRowsPanel
-            ref="rowsPanel"
-            :artifact-id="artifactId"
-            :can-write="canWrite"
-            :columns="artifact.schema"
-            :expected-updated-at="artifact.updated_at"
-            :draft-open="artifact.draft_open"
-            @changed="reload"
+            @published="reloadAll"
           />
         </template>
         <EmptyState v-else text="设计态仅 owner / editor 可见（你当前是 viewer——请看运行态）" />
@@ -233,9 +218,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
-import ArtifactImportWizard from '@/components/artifacts/ArtifactImportWizard.vue'
-import ArtifactSchemaPanel from '@/components/artifacts/ArtifactSchemaPanel.vue'
-import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
+import ArtifactPipelineWorkbench from '@/components/artifacts/ArtifactPipelineWorkbench.vue'
 import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
 import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.vue'
 import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
@@ -263,7 +246,6 @@ const runtimeLoaded = ref(false)
 
 // 版本面板（发布后命令式刷新 revisions）+ 行面板（跨面板变更后刷新行）
 const versionsPanel = ref<InstanceType<typeof ArtifactVersionsPanel> | null>(null)
-const rowsPanel = ref<InstanceType<typeof ArtifactRowsPanel> | null>(null)
 
 // 元信息编辑
 const metaVisible = ref(false)
@@ -309,7 +291,6 @@ async function reloadAll() {
   if (runtimeLoaded.value) {
     await Promise.all([loadRuntimeSchema(), loadRuntimeRows()])
   }
-  rowsPanel.value?.loadRows?.()
   versionsPanel.value?.loadRevisions?.()
 }
 

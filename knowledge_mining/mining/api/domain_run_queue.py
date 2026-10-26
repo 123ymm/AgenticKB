@@ -14,7 +14,7 @@ Outcome = dict[str, Any] | None
 #: 认领候选 SQL：域内 FIFO（interrupted 优先）+ 租约 fencing + 同库排队守卫
 #: （010 号：queued Run 只在本库无活跃 Run 时可被认领，见下方 NOT EXISTS）。
 _NEXT_CANDIDATE_SQL = """
-    SELECT id, domain, status, input_path, kb_id
+    SELECT id, domain, status, input_path, kb_id, metadata_json
     FROM mining_runs AS r
     WHERE r.domain = %s
       AND (
@@ -122,7 +122,7 @@ class DomainRunQueueDispatcher:
                 return
 
 
-def build_domain_run_dispatcher(domain_pools: Any, db_config: Any) -> DomainRunQueueDispatcher:
+def build_domain_run_dispatcher(domain_pools: Any, db_config: Any, *, artifact_executor=None) -> DomainRunQueueDispatcher:
     """Compose the dispatcher without introducing a second queue store."""
 
     def next_candidate(domain: str) -> Candidate | None:
@@ -133,6 +133,10 @@ def build_domain_run_dispatcher(domain_pools: Any, db_config: Any) -> DomainRunQ
             return dict(row) if row else None
 
     def execute(candidate: Candidate) -> Outcome:
+        if (candidate.get("metadata_json") or {}).get("profile") == "artifact_table":
+            if artifact_executor is None:
+                raise RuntimeError("Artifact table executor is not configured")
+            return artifact_executor(candidate)
         from knowledge_mining.mining.jobs.run import run
 
         return run(
@@ -143,6 +147,8 @@ def build_domain_run_dispatcher(domain_pools: Any, db_config: Any) -> DomainRunQ
         )
 
     def resume(candidate: Candidate) -> Outcome:
+        if (candidate.get("metadata_json") or {}).get("profile") == "artifact_table":
+            return execute(candidate)
         from knowledge_mining.mining.jobs.run import resume
 
         return resume(
