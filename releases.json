@@ -1,6 +1,18 @@
 {
-  "current": "1.1.25",
+  "current": "1.1.26",
   "releases": [
+    {
+      "version": "1.1.26",
+      "released_at": "2026-10-29",
+      "title": "LLM 配置保存即热加载 + 域覆盖管理 UI（62号一期收尾）",
+      "changes": [
+        "保存即生效：系统配置保存 llm_service.yaml、域覆盖保存/删除后，控制面自动通知 llm_service reload-config（按注册表 llm_url 寻址、X-Internal-Auth+X-KB-Role 双头）——不再需要手动重启或调接口；通知为尽力而为，失败不影响保存，结果回显 UI（提示重启后台服务生效）；幂等空删不通知",
+        "域覆盖管理 UI：设置页新 tab「LLM 域覆盖」——已覆盖域清单（chat/rerank 摘要）、新增（候选=注册表域减已覆盖，编辑器预填全注释模板与用法示例）、YAML 编辑保存、删除确认，走 1.1.25 已就绪的五条路由；语义提示常驻（只写差异/deep-merge 继承全局/embedding 锁全局/保存即热加载）",
+        "报文透传：后端 400 的结构化校验报文（如「embedding 锁全局」「不允许的顶层键」）直达用户，不再吞成一句「保存失败」；系统配置 tab 保存 llm_service.yaml 时按热加载结果分级提示（成功/失败+原因）",
+        "测试：控制面新增 4 例（通知接线矩阵：llm_service 触发/ui 不触发/覆盖 PUT+DELETE 触发/幂等空删不触发；notify 单元矩阵：无地址/缺密钥/非200/网络错/成功带双头断言）；前端新 tab 7 例；后端全量 213 passed（4 例 TestClient client= 失败为 starlette 升级既有问题），前端全量 575 passed，vue-tsc 通过",
+        "部署：Python + 前端 dist 增量（全量 pack，jar 未变），apply 重启 control + llm_service；无迁移无配置变更"
+      ]
+    },
     {
       "version": "1.1.25",
       "released_at": "2026-10-29",
