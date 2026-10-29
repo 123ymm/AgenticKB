@@ -1,10 +1,12 @@
-"""62号第一期：LLM 配置按域隔离（chat+rerank）的解析矩阵测试。
+"""62号：LLM 配置按域隔离（chat/rerank/embedding）的解析矩阵测试。
 
 覆盖：
 - DomainConfigs：回落语义 / 缓存键 / reload 原子换 / status 摘要
+- embedding_dims_locked：维度锁全局（62号二期）判定矩阵
 - ProviderResolver：(domain, model) 解析、缓存不串域、未知模型报错
-- LLMService.submit / submit_rerank：域默认模型提交侧解析落库
-- ModelService.rerank：按域选 provider 与默认模型
+- LLMService.submit / submit_rerank / submit_embedding：域默认模型提交侧解析落库
+- ModelService.rerank / embed：按域选 provider 与默认模型
+- Worker._execute_embedding：按任务域选 embedding provider
 - /admin/config-status、/admin/reload-config：闸门与热加载语义
 
 兼容性铁律（62号 §2.3）：无覆盖域的行为与单配置时代一致——由
@@ -18,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from llm_service.config import DomainConfigs, GLOBAL_DOMAIN_KEY
+from llm_service.config import DomainConfigs, GLOBAL_DOMAIN_KEY, embedding_dims_locked
 from llm_service.runtime.provider_resolver import ProviderResolver
 from llm_service.runtime.service import LLMService
 from llm_service.tests.conftest import TEST_CFG
@@ -66,6 +68,8 @@ def _domain_cfg() -> dict:
     }
     cfg["provider"] = {**cfg["provider"], "active_model": "odn-chat", "models": models}
     cfg["rerank"] = {**cfg["rerank"], "model": "rerank-odn", "api_key": "rk-odn"}
+    # 62号二期：embedding 模型/端点/密钥按域覆盖；dimensions 继承全局（锁全局）。
+    cfg["embedding"] = {**cfg["embedding"], "model": "emb-odn", "api_key": "ek-odn"}
     return cfg
 
 
@@ -103,13 +107,36 @@ async def test_domain_configs_reload_and_replace_with():
 
 async def test_domain_configs_status_summary():
     status = _dc().status()
-    assert status["global"]["active_model"] == "g-active"
+    assert status["global"] == {
+        "active_model": "g-active",
+        "embedding_model": "embedding-3",
+        "embedding_dimensions": 1024,
+    }
     assert status["domains"]["odn"] == {
         "active_model": "odn-chat", "rerank_model": "rerank-odn",
+        "embedding_model": "emb-odn", "embedding_dimensions": 1024,
     }
     assert status["invalid_domains"] == {}
     # 摘要不含密钥
     assert "api_key" not in json.dumps(status)
+
+
+# ---------------------------------------------------------------------------
+# embedding_dims_locked（维度锁全局，62号二期）
+# ---------------------------------------------------------------------------
+
+async def test_embedding_dims_locked_matrix():
+    g = {"embedding": {"dimensions": 1024}}
+    assert embedding_dims_locked({"embedding": {"dimensions": 1024}}, g) is True
+    assert embedding_dims_locked({"embedding": {"dimensions": 2048}}, g) is False
+    # fail-closed：域 effective 缺维度而全局有 → 视为漂移。控制面 deep-merge
+    # 后正常不会缺（全局有即继承），缺 = 异常数据，兜底闸从严作废。
+    assert embedding_dims_locked({}, g) is False
+    assert embedding_dims_locked({"embedding": {}}, g) is False
+    # 两边都无维度（老配置）→ None == None，一致
+    assert embedding_dims_locked({}, {}) is True
+    # 只有域声明了维度而全局没有 → 不一致（不能借覆盖引入新维度）
+    assert embedding_dims_locked({"embedding": {"dimensions": 1024}}, {}) is False
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +230,17 @@ async def test_resolver_rerank_default_and_model_provider(fake_builder):
     assert resolver.model_provider("unknown") is seeded
     assert resolver.rerank_default_model("odn") == "rerank-odn"
     assert resolver.rerank_default_model(None) == "rerank-global"
+
+
+async def test_resolver_embedding_defaults(fake_builder):
+    """62号二期：embedding 默认模型按域解析；维度锁全局（域=全局值）。"""
+    resolver = ProviderResolver(_dc())
+    assert resolver.embedding_default_model("odn") == "emb-odn"
+    assert resolver.embedding_default_model(None) == "embedding-3"
+    assert resolver.embedding_default_model("unknown") == "embedding-3"
+    # 覆盖域维度继承全局（装载闸保证一致），无覆盖域直读全局
+    assert resolver.embedding_default_dimensions("odn") == 1024
+    assert resolver.embedding_default_dimensions(None) == 1024
 
 
 async def test_resolver_clear_cache_rebuilds(fake_builder):
@@ -305,6 +343,33 @@ async def test_submit_rerank_no_override_keeps_global():
     assert _request_row(db)[3] == "rerank-global"
 
 
+async def test_submit_embedding_domain_default_model_persisted():
+    """62号二期：覆盖域提交 embedding → 域模型落 request.model + input_json。"""
+    svc, db = _svc(_dc())
+    await svc.submit_embedding(["a"], knowledge_domain="odn", idempotency_key="k6")
+    row = _request_row(db)
+    assert row[3] == "emb-odn"
+    assert json.loads(row[6]) == {
+        "texts": ["a"], "model": "emb-odn", "dimensions": 1024,
+    }
+
+
+async def test_submit_embedding_no_override_keeps_global():
+    svc, db = _svc(_dc())
+    await svc.submit_embedding(["a"], knowledge_domain="other", idempotency_key="k7")
+    row = _request_row(db)
+    assert row[3] == "embedding-3"
+    assert json.loads(row[6])["dimensions"] == 1024
+
+
+async def test_submit_embedding_explicit_model_wins_over_domain_default():
+    svc, db = _svc(_dc())
+    await svc.submit_embedding(
+        ["a"], model="embedding-3", knowledge_domain="odn", idempotency_key="k8",
+    )
+    assert _request_row(db)[3] == "embedding-3"
+
+
 # ---------------------------------------------------------------------------
 # ModelService.rerank（同步端点按域路由）
 # ---------------------------------------------------------------------------
@@ -356,6 +421,170 @@ async def test_model_service_rerank_global_domain_uses_seeded_provider():
     )
     await svc.rerank(RerankRequest(query="q", documents=["d"]))
     assert global_provider.calls == [{"query": "q", "model": "rerank-global", "top_n": None}]
+
+
+# ---------------------------------------------------------------------------
+# ModelService.embed（同步端点按域路由，62号二期）
+# ---------------------------------------------------------------------------
+
+class _FakeEmbedProvider:
+    def __init__(self, tag: str):
+        self.tag = tag
+        self.calls: list[dict] = []
+
+    async def embed(self, texts, model=None, dimensions=None):
+        self.calls.append({"texts": list(texts), "model": model, "dimensions": dimensions})
+        return {
+            "model": model or "fake",
+            "data": [
+                {"index": i, "embedding": [0.1] * (dimensions or 2)}
+                for i in range(len(texts))
+            ],
+            "usage": {"total_tokens": 1},
+        }
+
+    async def rerank(self, *a, **k):
+        return {"results": []}
+
+
+async def test_model_service_embed_routes_by_domain(monkeypatch):
+    from llm_service.models import EmbeddingRequest
+    from llm_service.runtime.model_service import ModelService
+
+    global_provider = _FakeEmbedProvider("global")
+    domain_provider = _FakeEmbedProvider("odn")
+    monkeypatch.setattr(
+        "llm_service.runtime.provider_resolver.build_model_provider",
+        lambda cfg: domain_provider,
+    )
+    resolver = ProviderResolver(_dc())
+    resolver.seed_model_provider(global_provider)
+    svc = ModelService(
+        global_provider,
+        default_embedding_model="emb-global",
+        default_embedding_dimensions=1024,
+        provider_resolver=resolver,
+    )
+
+    out = await svc.embed(EmbeddingRequest(input=["t"], knowledge_domain="odn"))
+    assert global_provider.calls == []                       # 未走全局
+    assert domain_provider.calls == [
+        {"texts": ["t"], "model": "emb-odn", "dimensions": 1024},
+    ]
+    assert out.model == "emb-odn"
+
+
+async def test_model_service_embed_global_domain_uses_seeded_provider():
+    from llm_service.models import EmbeddingRequest
+    from llm_service.runtime.model_service import ModelService
+
+    global_provider = _FakeEmbedProvider("global")
+    resolver = ProviderResolver(_dc())
+    resolver.seed_model_provider(global_provider)
+    svc = ModelService(
+        global_provider,
+        default_embedding_model="emb-global",
+        default_embedding_dimensions=1024,
+        provider_resolver=resolver,
+    )
+    await svc.embed(EmbeddingRequest(input=["t"]))
+    # resolver 全局 effective（embedding-3）优先于构造期默认 emb-global
+    assert global_provider.calls == [
+        {"texts": ["t"], "model": "embedding-3", "dimensions": 1024},
+    ]
+
+
+async def test_model_service_embed_explicit_model_and_dimensions_win():
+    from llm_service.models import EmbeddingRequest
+    from llm_service.runtime.model_service import ModelService
+
+    global_provider = _FakeEmbedProvider("global")
+    resolver = ProviderResolver(_dc())
+    resolver.seed_model_provider(global_provider)
+    svc = ModelService(
+        global_provider, default_embedding_model="emb-global",
+        provider_resolver=resolver,
+    )
+    await svc.embed(EmbeddingRequest(input=["t"], model="explicit-emb", dimensions=1024))
+    assert global_provider.calls == [
+        {"texts": ["t"], "model": "explicit-emb", "dimensions": 1024},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Worker._execute_embedding（执行侧按任务域选 provider，62号二期）
+# ---------------------------------------------------------------------------
+
+class _FakeWorkerDB:
+    def __init__(self, *, knowledge_domain: str | None, input_json: str):
+        self.executes: list[tuple[str, tuple]] = []
+        self._request = {"id": "req-1", "task_id": "task-1", "input_json": input_json}
+        self._task = {
+            "knowledge_domain": knowledge_domain,
+            "attempt_count": 0, "max_attempts": 3,
+        }
+
+    async def fetchone(self, sql, params):
+        if "FROM agent_llm_requests" in sql:
+            return self._request
+        if "FROM agent_llm_tasks" in sql:
+            return self._task
+        raise AssertionError(f"unexpected fetchone: {sql}")
+
+    async def execute(self, sql, params):
+        self.executes.append((sql, params))
+
+
+class _FakeWorkerMgr:
+    def __init__(self):
+        self.completed: list[str] = []
+        self.failed: list[tuple] = []
+
+    async def complete(self, task_id):
+        self.completed.append(task_id)
+
+    async def fail(self, task_id, error_type, error_message):
+        self.failed.append((task_id, error_type, error_message))
+
+
+async def test_worker_embedding_selects_provider_by_domain():
+    from llm_service.runtime.worker import Worker
+
+    domain_provider = _FakeEmbedProvider("odn")
+    global_provider = _FakeEmbedProvider("global")
+    svc = SimpleNamespace(model_provider_for=lambda d: domain_provider)
+    worker = Worker(
+        db=_FakeWorkerDB(
+            knowledge_domain="odn",
+            input_json=json.dumps({"texts": ["a"], "model": "emb-odn", "dimensions": 1024}),
+        ),
+        task_manager=_FakeWorkerMgr(), event_bus=None, provider=None,
+        model_provider=global_provider, llm_service=svc,
+    )
+    await worker._execute_embedding("task-1")
+    assert domain_provider.calls == [
+        {"texts": ["a"], "model": "emb-odn", "dimensions": 1024},
+    ]
+    assert global_provider.calls == []               # 覆盖域：不走全局实例
+
+
+async def test_worker_embedding_without_svc_falls_back_to_global():
+    # 测试构造（无 llm_service）回退构造期 model_provider——与 _execute_rerank 同款。
+    from llm_service.runtime.worker import Worker
+
+    global_provider = _FakeEmbedProvider("global")
+    worker = Worker(
+        db=_FakeWorkerDB(
+            knowledge_domain="odn",
+            input_json=json.dumps({"texts": ["a"], "model": "emb-odn", "dimensions": 1024}),
+        ),
+        task_manager=_FakeWorkerMgr(), event_bus=None, provider=None,
+        model_provider=global_provider,
+    )
+    await worker._execute_embedding("task-1")
+    assert global_provider.calls == [
+        {"texts": ["a"], "model": "emb-odn", "dimensions": 1024},
+    ]
 
 
 # ---------------------------------------------------------------------------

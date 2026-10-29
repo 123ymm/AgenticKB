@@ -244,11 +244,23 @@ def load_llm_config() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Per-domain configs (62号第一期：chat+rerank 按域覆盖，embedding 锁全局)
+# Per-domain configs (62号：chat/rerank/embedding 按域覆盖，embedding 维度锁全局)
 # ---------------------------------------------------------------------------
 
 #: 全局配置在 DomainConfigs 中的键（无覆盖域与 None 域共用全局配置）。
 GLOBAL_DOMAIN_KEY = "__global__"
+
+
+def embedding_dims_locked(domain_data: dict, global_cfg: dict) -> bool:
+    """域 effective 的 embedding.dimensions 必须与全局一致（62号二期）。
+
+    模型/端点/密钥可按域覆盖；维度锁全局——检索表向量列定长（vector(N)），
+    所有域共享，维度漂移会在入库/检索两侧同时炸。严格相等、fail-closed：
+    域 effective 缺维度而全局有（控制面 deep-merge 后正常不会发生）也判漂移。
+    """
+    d_dim = (domain_data.get("embedding") or {}).get("dimensions")
+    g_dim = (global_cfg.get("embedding") or {}).get("dimensions")
+    return d_dim == g_dim
 
 
 class DomainConfigs:
@@ -311,12 +323,20 @@ class DomainConfigs:
         def _active(cfg: dict[str, Any]) -> Any:
             return (cfg.get("provider") or {}).get("active_model") or (cfg.get("provider") or {}).get("model")
 
+        def _emb(cfg: dict[str, Any]) -> dict[str, Any]:
+            emb = cfg.get("embedding") or {}
+            return {
+                "embedding_model": emb.get("model"),
+                "embedding_dimensions": emb.get("dimensions"),
+            }
+
         return {
-            "global": {"active_model": _active(self._global)},
+            "global": {"active_model": _active(self._global), **_emb(self._global)},
             "domains": {
                 did: {
                     "active_model": _active(cfg),
                     "rerank_model": (cfg.get("rerank") or {}).get("model"),
+                    **_emb(cfg),
                 }
                 for did, cfg in self._domains.items()
             },
@@ -333,8 +353,8 @@ def fetch_llm_domain_overrides(
 
     返回 ``(domain_cfgs, invalid)``。清单接口不可达时返回两个空 dict——
     兼容控制面未升级到 62号 的部署（llm_service 先到、控制面后到）。
-    ``global_cfg`` 提供时复验各域 embedding 段与全局逐字节一致（62号 B2：
-    embedding 锁全局，控制面校验之外的兜底闸）。
+    ``global_cfg`` 提供时复验各域 embedding 维度与全局一致（62号二期：
+    模型/端点/密钥按域可变、维度锁全局——控制面校验之外的兜底闸）。
     """
     url = (base_url or CONTROL_PLANE_BASE_URL).rstrip("/")
     try:
@@ -374,10 +394,12 @@ def fetch_llm_domain_overrides(
                 raise ValueError(f"non-dict YAML for domain {did!r}")
             data = _resolve_env_vars(data)
             _validate_required(data)
-            if global_cfg is not None and data.get("embedding") != global_cfg.get("embedding"):
+            if global_cfg is not None and not embedding_dims_locked(data, global_cfg):
                 raise ValueError(
-                    "embedding section differs from global — per-domain embedding "
-                    "is locked to global in phase 1 (62号)"
+                    f"embedding dimensions {dig_optional(data, 'embedding', 'dimensions')} != global "
+                    f"{dig_optional(global_cfg, 'embedding', 'dimensions')} — per-domain embedding "
+                    "model override is allowed but dimensions are locked to global "
+                    "(shared fixed-width vector column, 62号 phase 2)"
                 )
             domain_cfgs[did] = data
         except Exception as exc:

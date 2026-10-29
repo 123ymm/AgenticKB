@@ -444,3 +444,131 @@ def test_llm_embedding_client_does_not_turn_transport_error_into_empty_list(
     generator = LLMServiceEmbeddingGenerator(base_url="http://llm.invalid")
     with pytest.raises(httpx.TimeoutException, match="upstream timed out"):
         generator.embed(["正文"])
+
+
+def test_llm_embedding_client_describe_captures_model_and_dimension(
+    monkeypatch,
+) -> None:
+    """62号二期：同步生成器从响应体捕获实际 model/维度供 describe() 冻结。"""
+    import httpx
+
+    from knowledge_mining.mining.infra.embedding import (
+        LLMServiceEmbeddingGenerator,
+    )
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            return httpx.Response(
+                200,
+                json={
+                    "model": "embedding-3",
+                    "data": [{"index": 0, "embedding": [0.1] * 4}],
+                },
+                request=httpx.Request("POST", "http://llm.invalid/api/v1/models/embeddings"),
+            )
+
+    monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _Client())
+
+    generator = LLMServiceEmbeddingGenerator(base_url="http://llm.invalid")
+    assert generator.describe() == {
+        "provider": "llm_service", "model": "unknown",
+        "version": "unknown", "dimension": 0,
+    }
+    out = generator.embed(["正文"])
+    assert len(out[0]) == 4
+    assert generator.describe() == {
+        "provider": "llm_service", "model": "embedding-3",
+        "version": "embedding-3", "dimension": 4,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 62号二期：门面跑后 describe 刷新——record 冻结真实 model，不再 unknown
+# ---------------------------------------------------------------------------
+
+
+def _seeded_facade(generator) -> "SimpleNamespace":
+    """单 prose 表示的 facade + 内存表示仓（跑后刷新/旧生成器两用）。"""
+    import asyncio
+
+    from knowledge_mining.mining.retrieval_projection.embedding import EmbeddingFacade
+    from knowledge_mining.mining.retrieval_projection.repositories_memory import (
+        MemoryRepresentationStore,
+    )
+
+    store = MemoryRepresentationStore()
+
+    async def seed():
+        await store.replace_for_snapshot(
+            "s1", (_rep("prose"),), "proj-v1", document_key="d",
+        )
+
+    asyncio.new_event_loop().run_until_complete(seed())
+
+    class _EmbeddingStore:
+        async def replace_for_snapshot(self, snapshot_id, records, fingerprint, *, document_key, vectors=()):
+            return len(records)
+
+    return EmbeddingFacade(
+        representation_store=store,
+        embedding_store=_EmbeddingStore(),
+        generator=generator,
+    )
+
+
+def test_facade_refreshes_provenance_from_post_run_describe() -> None:
+    """latching 生成器（llm_service 同款语义）：跑前 unknown → 跑后真实值。"""
+
+    class _LatchingGenerator:
+        capabilities = frozenset({"skip", "isolated", "structural"})
+
+        def __init__(self):
+            self._model = None
+            self._dim = 0
+
+        def describe(self):
+            return {
+                "provider": "llm_service",
+                "model": self._model or "unknown",
+                "version": self._model or "unknown",
+                "dimension": self._dim,
+            }
+
+        def embed_batch(self, texts):
+            self._model = "embedding-3"
+            self._dim = 4
+            return [[0.1] * 4 for _ in texts]
+
+    outcome = _seeded_facade(_LatchingGenerator()).embed_for_snapshot(
+        snapshot_id="s1", params={},
+    )
+    rec = outcome.records[0]
+    assert rec.provider == "llm_service"
+    assert rec.model == "embedding-3"
+    assert rec.model_version == "embedding-3"      # 无厂商版本概念：用模型串
+    assert rec.dimension == 4
+
+
+def test_facade_legacy_generator_without_describe_stays_unknown() -> None:
+    """红线：无 describe() 的旧生成器——unknown 溯源 + 首向量维度回填，不变。"""
+
+    class _LegacyGenerator:
+        capabilities = frozenset({"skip", "isolated", "structural"})
+
+        def embed_batch(self, texts):
+            return [[0.5] * 6 for _ in texts]
+
+    outcome = _seeded_facade(_LegacyGenerator()).embed_for_snapshot(
+        snapshot_id="s1", params={},
+    )
+    rec = outcome.records[0]
+    assert rec.provider == "unknown"
+    assert rec.model == "unknown"
+    assert rec.model_version == "unknown"
+    assert rec.dimension == 6                      # 既有首向量回填路径

@@ -88,7 +88,7 @@ def test_obsolete_sync_and_reload_endpoints_are_removed(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 62号第一期：LLM 域覆盖（chat+rerank 按域覆盖，embedding 锁全局）
+# 62号：LLM 域覆盖（chat/rerank/embedding 按域覆盖，embedding.dimensions 锁全局）
 # ---------------------------------------------------------------------------
 
 _LLM_YAML = """\
@@ -99,6 +99,14 @@ provider:
       model: g-active
       base_url: https://global.example/v1
       api_key: gk1
+embedding:
+  base_url: https://global.example/embeddings
+  api_key: ek-global
+  model: embedding-3
+  dimensions: 1024
+  timeout: 60
+  bypass_proxy: false
+  headers: {}
 rerank:
   base_url: https://global.example/rerank
   api_key: rk-global
@@ -134,6 +142,8 @@ def test_llm_domain_override_crud_roundtrip(tmp_path: Path) -> None:
         "      model: odn-chat\n"
         "      base_url: https://odn.example/v1\n"
         "      api_key: odn-k2\n"
+        "embedding:\n"
+        "  model: emb-odn\n"
         "rerank:\n"
         "  model: rerank-odn\n"
     )
@@ -146,25 +156,29 @@ def test_llm_domain_override_crud_roundtrip(tmp_path: Path) -> None:
 
         items = c.get("/api/v1/system/llm_service/domains").json()["items"]
         assert items == [{"domain_id": "odn", "active_model": "odn-chat",
-                          "rerank_model": "rerank-odn"}]
+                          "rerank_model": "rerank-odn", "embedding_model": "emb-odn"}]
 
         raw = c.get("/api/v1/system/llm_service/domains/odn/raw")
         assert raw.status_code == 200
         assert "odn-chat" in raw.text
 
         eff = c.get("/api/v1/system/llm_service/effective/odn").json()
-        # 域差异生效 + 全局模型仍可用（merge 按键合并）+ embedding 锁全局
+        # 域差异生效 + 全局模型仍可用（merge 按键合并）+ embedding 同维度覆盖继承全局
         assert eff["provider"]["active_model"] == "odn-chat"
         assert "g-active" in eff["provider"]["models"]
         assert "odn-chat" in eff["provider"]["models"]
         assert eff["rerank"]["model"] == "rerank-odn"
         assert eff["rerank"]["api_key"] == "rk-global"   # 未覆盖字段继承全局
+        assert eff["embedding"]["model"] == "emb-odn"     # 62号二期：embedding 按域
+        assert eff["embedding"]["api_key"] == "ek-global"  # 未覆盖字段继承全局
+        assert eff["embedding"]["dimensions"] == 1024     # dimensions 锁全局
 
         r = c.delete("/api/v1/system/llm_service/domains/odn/raw")
         assert r.status_code == 200 and r.json()["deleted"] is True
         assert c.delete("/api/v1/system/llm_service/domains/odn/raw").json()["deleted"] is False
         eff2 = c.get("/api/v1/system/llm_service/effective/odn").json()
         assert eff2["provider"]["active_model"] == "g-active"   # 回落全局
+        assert eff2["embedding"]["model"] == "embedding-3"
 
 
 def test_llm_domain_override_effective_without_override_is_global(tmp_path: Path) -> None:
@@ -175,9 +189,7 @@ def test_llm_domain_override_effective_without_override_is_global(tmp_path: Path
 
 def test_llm_domain_override_validation_matrix(tmp_path: Path) -> None:
     cases = {
-        # embedding 任何覆盖 → 400（62号锁全局）
-        "embedding": "embedding:\n  model: other-emb\n",
-        # 未知顶层键 → 400
+        # 未知顶层键 → 400（运行时旋钮服务级共享）
         "worker": "worker:\n  concurrency: 99\n",
         # active_model 在 merge 后 models 里不可解析 → 400
         "active": "provider:\n  active_model: no-such-model\n",
@@ -191,6 +203,15 @@ def test_llm_domain_override_validation_matrix(tmp_path: Path) -> None:
         ),
         # provider 段不允许的键 → 400
         "bad-provider-key": "provider:\n  unknown_key: x\n",
+        # embedding 维度漂移 → 400（62号二期：dimensions 锁全局）
+        "dims-mismatch": "embedding:\n  dimensions: 2048\n",
+        "dims-mismatch-with-model": "embedding:\n  model: emb-odn\n  dimensions: 2048\n",
+        # embedding 段不允许的键 → 400
+        "bad-embedding-key": "embedding:\n  unknown_key: x\n",
+        # embedding 非映射 → 400
+        "embedding-not-map": "embedding:\n  - a\n",
+        # dimensions 非整数（字符串）→ 400
+        "dims-not-int": "embedding:\n  dimensions: '1024'\n",
         # 非映射根 → 400
         "bad-root": "- a\n- b\n",
     }
@@ -214,6 +235,55 @@ def test_llm_domain_override_validation_matrix(tmp_path: Path) -> None:
         assert entry["api_key"] == "odn-key"
         assert entry["base_url"] == "https://global.example/v1"   # 继承全局
 
+        # embedding 同维度覆盖（只换 model，dimensions 继承全局）→ 200（62号二期）
+        r = c.put(
+            "/api/v1/system/llm_service/domains/odn/raw",
+            content="embedding:\n  model: other-emb\n",
+            headers={"Content-Type": "text/yaml"},
+        )
+        assert r.status_code == 200, r.text
+
+
+def test_llm_embedding_override_matrix(tmp_path: Path) -> None:
+    """embedding 覆盖边界：merge 完整性闸在无 embedding 全局时的行为。"""
+    with _llm_client(tmp_path) as c:
+        # 全局无 embedding 段时覆盖 embedding.model → merge 后必填字段缺失 → 400
+        no_embedding_global = (
+            _LLM_YAML[: _LLM_YAML.index("embedding:")]
+            + _LLM_YAML[_LLM_YAML.index("rerank:"):]
+        )
+        (tmp_path / "system" / "llm_service.yaml").write_text(
+            no_embedding_global, encoding="utf-8")
+        r = c.put(
+            "/api/v1/system/llm_service/domains/odn/raw",
+            content="embedding:\n  model: x\n",
+            headers={"Content-Type": "text/yaml"},
+        )
+        assert r.status_code == 400
+        assert "embedding merge 后仍缺必填字段" in r.json()["detail"]
+
+        # 全局无 dimensions、覆盖显式给 dimensions → 与全局 None 不一致 → 400
+        (tmp_path / "system" / "llm_service.yaml").write_text(
+            _LLM_YAML.replace("  dimensions: 1024\n", ""),
+            encoding="utf-8",
+        )
+        r = c.put(
+            "/api/v1/system/llm_service/domains/odn/raw",
+            content="embedding:\n  model: embedding-3\n  dimensions: 1024\n",
+            headers={"Content-Type": "text/yaml"},
+        )
+        assert r.status_code == 400
+        assert "dimensions 锁全局" in r.json()["detail"]
+
+        # 同维度显式写 dimensions（= 全局）→ 200（显式等值不算漂移）
+        (tmp_path / "system" / "llm_service.yaml").write_text(_LLM_YAML, encoding="utf-8")
+        r = c.put(
+            "/api/v1/system/llm_service/domains/odn/raw",
+            content="embedding:\n  model: other-emb\n  dimensions: 1024\n",
+            headers={"Content-Type": "text/yaml"},
+        )
+        assert r.status_code == 200, r.text
+
 
 def test_llm_domain_override_unknown_domain_404(tmp_path: Path) -> None:
     with _llm_client(tmp_path) as c:
@@ -231,9 +301,19 @@ def test_llm_domain_override_disk_edited_file_rejected_at_effective(tmp_path: Pa
     with _llm_client(tmp_path) as c:
         bad_dir = tmp_path / "system" / "llm_service.domains"
         bad_dir.mkdir(parents=True)
-        (bad_dir / "odn.yaml").write_text("embedding:\n  model: hacked\n", encoding="utf-8")
+        # 维度漂移是 62号二期的拒绝条件（同维度 embedding 覆盖已合法）
+        (bad_dir / "odn.yaml").write_text(
+            "embedding:\n  model: hacked\n  dimensions: 2048\n", encoding="utf-8")
         r = c.get("/api/v1/system/llm_service/effective/odn")
         assert r.status_code == 400
+        assert "dimensions 锁全局" in r.json()["detail"]
+
+        # 盘改的同维度 embedding 覆盖是合法配置 → effective 照常返回（闸只拦结构破坏）
+        (bad_dir / "odn.yaml").write_text(
+            "embedding:\n  model: hacked-same-dims\n", encoding="utf-8")
+        r = c.get("/api/v1/system/llm_service/effective/odn")
+        assert r.status_code == 200
+        assert r.json()["embedding"]["model"] == "hacked-same-dims"
 
 
 # ---------------------------------------------------------------------------

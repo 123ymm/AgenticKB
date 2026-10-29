@@ -174,6 +174,19 @@ class EmbeddingFacade:
                 # provider 未实现 describe() 时以首个真实向量长度为准（维度>0 才合法）
                 if meta_dimension <= 0 and idx == 0:
                     meta = {**meta, "dimension": len(vector)}
+            # 62号二期：跑后二次 describe() 刷新溯源。describe() 契约是跑前
+            # 调用（record 在 embed_batch 前冻结），但服务端实际使用的
+            # model/维度只在调用后回传——llm_service 生成器在成功批次里
+            # 捕获真实值，此处覆盖跑前的 unknown/陈旧值。未实现 describe()
+            # 的旧生成器 post_meta=None，走既有首向量维度回填，行为不变。
+            describe = getattr(self._generator, "describe", None)
+            post_meta = describe() if describe else None
+            if post_meta:
+                meta = {
+                    **meta,
+                    **{k: post_meta[k] for k in ("provider", "model", "version", "dimension")
+                       if post_meta.get(k)},
+                }
             # 统一回填 dimension（describe 缺失时）
             effective_dim = int(meta.get("dimension", 0) or 0)
             if effective_dim > 0:
@@ -185,9 +198,9 @@ class EmbeddingFacade:
                         strategy_input=r.strategy_input,
                         input_hash=r.input_hash,
                         policy_version=r.policy_version,
-                        provider=r.provider,
-                        model=r.model,
-                        model_version=r.model_version,
+                        provider=str(meta.get("provider", r.provider)),
+                        model=str(meta.get("model", r.model)),
+                        model_version=str(meta.get("version", r.model_version)),
                         dimension=effective_dim,
                         context_group_hash=r.context_group_hash,
                         fallback_from=r.fallback_from,

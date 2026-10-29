@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 def build_model_provider(cfg: dict) -> BigModelProvider:
     """从（effective）配置构建 embedding+rerank 的 BigModelProvider。
 
-    域 effective 配置的 embedding 段已验证与全局一致（62号锁全局），所以
-    有覆盖域构建出的实例 embedding 半边 = 全局值，rerank 半边 = 域值。
+    embedding 与 rerank 半边都取自传入的（域）effective 配置（62号二期起
+    embedding 模型/端点/密钥可按域覆盖；维度由装载闸保证与全局一致）。
     """
     return BigModelProvider(
         embedding_api_key=dig_optional(cfg, "embedding", "api_key"),
@@ -139,6 +139,17 @@ class ProviderResolver:
         """该域的 rerank 默认模型（effective 配置已含全局兜底）。"""
         cfg = self._dc.for_domain(domain)
         return str(dig_optional(cfg, "rerank", "model", default="") or "")
+
+    def embedding_default_model(self, domain: str | None = None) -> str:
+        """该域的 embedding 默认模型（62号二期；effective 已含全局兜底）。"""
+        cfg = self._dc.for_domain(domain)
+        return str(dig_optional(cfg, "embedding", "model", default="") or "")
+
+    def embedding_default_dimensions(self, domain: str | None = None) -> int | None:
+        """该域的 embedding 维度（锁全局；缺省返回 None）。"""
+        cfg = self._dc.for_domain(domain)
+        dims = dig_optional(cfg, "embedding", "dimensions")
+        return int(dims) if dims is not None else None
 
     # ------------------------------------------------------------------
     # Reload

@@ -29,6 +29,12 @@
               保存
             </el-button>
           </div>
+          <div
+            v-if="store.selectedSystemConfigName === 'llm_service'"
+            class="system-config-tab__llm-hint"
+          >
+            本文件是 LLM 的<strong>全局基底</strong>；某域需要差异化模型/密钥时，请前往「LLM 域覆盖」页配置（留空字段自动继承这里）。
+          </div>
           <div class="system-config-tab__editor-wrap">
             <YamlEditor v-model="store.systemConfigText" />
           </div>
@@ -121,6 +127,17 @@ onMounted(() => store.loadSystemConfigs())
   font-size: 13px;
   font-weight: 500;
   color: var(--kb-text-primary);
+}
+
+.system-config-tab__llm-hint {
+  margin: 8px 16px 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--kb-text-secondary);
+  background: rgba(64, 158, 255, 0.05);
+  border: 1px solid rgba(64, 158, 255, 0.15);
+  border-radius: 6px;
 }
 
 .system-config-tab__editor-wrap {

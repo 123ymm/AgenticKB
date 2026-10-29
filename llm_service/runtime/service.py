@@ -77,7 +77,7 @@ class LLMService:
         return self._domain_configs
 
     def model_provider_for(self, domain: str | None = None) -> ModelProviderProtocol | None:
-        """该域的 embedding+rerank provider（embedding 锁全局，rerank 按域）。"""
+        """该域的 embedding+rerank provider（62号二期起两半边都按域）。"""
         if self._model_provider is None:
             return None
         return self._resolver.model_provider(domain)
@@ -479,12 +479,24 @@ class LLMService:
         max_attempts: int = 2,
         priority: int = 100,
     ) -> str:
-        actual_model = model or getattr(self._model_provider, "embedding_model", None) or dig(self._config, "embedding", "model")
+        # 62号二期：未显式指定 model 且该域有覆盖 → 域 embedding.model 兜底
+        # （提交侧解析后落库，与 submit_rerank 的既有约定一致）。
+        if model is None and self._domain_configs.has_override(knowledge_domain):
+            model = self._resolver.embedding_default_model(knowledge_domain) or None
+            if model:
+                logger.info(
+                    "domain=%s embedding_model=%s source=override (submit default)",
+                    knowledge_domain, model,
+                )
+        # 域 effective 配置（无覆盖域 = 全局）；model/dimensions 的兜底链从它
+        # 读取，保证与执行侧（worker 按任务域选 provider）读到同一份配置。
+        domain_cfg = self._domain_configs.for_domain(knowledge_domain)
+        actual_model = model or getattr(self._model_provider, "embedding_model", None) or dig(domain_cfg, "embedding", "model")
         # dimensions 必须在提交侧解析（与 ModelService 同步端点对齐）：调用方
         # （mining）不传时落配置默认值。None 直通会让 provider 请求不带
         # dimensions 参数——智谱 embedding-3 默认 2048 维，与库列 vector(1024)
         # 不匹配，向量化入库报 expected 1024 dimensions, not 2048。
-        actual_dimensions = dimensions if dimensions is not None else dig(self._config, "embedding", "dimensions")
+        actual_dimensions = dimensions if dimensions is not None else dig(domain_cfg, "embedding", "dimensions")
 
         return await self._submit_with_idempotency(
             idempotency_key=idempotency_key,

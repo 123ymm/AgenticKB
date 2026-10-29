@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class EmbeddingGenerator(Protocol):
-    """Protocol for generating text embeddings."""
+    """Protocol for generating text embeddings.
+
+    可选 ``describe() -> {provider, model, version, dimension}``：最近一次
+    成功调用的行级溯源（62号二期）。EmbeddingFacade 跑前冻结、跑后二次
+    刷新；未实现的旧生成器保持 unknown 溯源，行为不变。
+    """
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
@@ -55,6 +60,18 @@ class LLMServiceEmbeddingGenerator:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._knowledge_domain = knowledge_domain
+        # 行级溯源（62号二期）：成功调用后捕获服务端实际模型/维度。
+        self._last_model: str | None = None
+        self._last_dimension: int | None = None
+
+    def describe(self) -> dict[str, Any]:
+        """最近一次成功调用的溯源；未调用过时以 unknown 兜底。"""
+        return {
+            "provider": "llm_service",
+            "model": self._last_model or "unknown",
+            "version": self._last_model or "unknown",
+            "dimension": self._last_dimension or 0,
+        }
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
@@ -73,7 +90,13 @@ class LLMServiceEmbeddingGenerator:
                 data = resp.json()
             results = data.get("data", [])
             results.sort(key=lambda x: x.get("index", 0))
-            return [item.get("embedding", []) for item in results]
+            vectors = [item.get("embedding", []) for item in results]
+            model = data.get("model")
+            if model:
+                self._last_model = str(model)
+            if vectors and vectors[0]:
+                self._last_dimension = len(vectors[0])
+            return vectors
         except Exception as e:
             logger.warning("LLM service embedding call failed: %s", e)
             # 保留原始异常类型与消息给 document handler / Run 诊断。返回 []
@@ -137,10 +160,23 @@ class LLMServiceAsyncEmbeddingGenerator:
         self._max_attempts = max_attempts
         self._batch_size = batch_size
         self._knowledge_domain = knowledge_domain
+        # 行级溯源（62号二期）：worker 把含 model 的完整 provider 结果落
+        # parsed_output_json，这里从结果捕获实际模型/维度（零协议改动）。
+        self._last_model: str | None = None
+        self._last_dimension: int | None = None
 
     def close(self) -> None:
         """Release the underlying task-channel client (end of run)."""
         self._client.close()
+
+    def describe(self) -> dict[str, Any]:
+        """最近一次成功批次的溯源；未成功过时以 unknown 兜底。"""
+        return {
+            "provider": "llm_service",
+            "model": self._last_model or "unknown",
+            "version": self._last_model or "unknown",
+            "dimension": self._last_dimension or 0,
+        }
 
     @staticmethod
     def _batch_key(batch: list[str]) -> str:
@@ -247,4 +283,9 @@ class LLMServiceAsyncEmbeddingGenerator:
                 f"embedding task {task_id} ({key}) returned {len(vectors)} vectors "
                 f"for {expected} inputs"
             )
+        # 行级溯源（62号二期）：worker 落库的 provider 结果含实际 model。
+        model = data.get("model")
+        if model:
+            self._last_model = str(model)
+        self._last_dimension = len(vectors[0])
         return vectors

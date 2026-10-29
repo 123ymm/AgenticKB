@@ -215,7 +215,10 @@ class Worker:
             dimensions = self._default_embedding_dimensions
         request_id = req["id"]
 
-        task_row = await self._db.fetchone("SELECT attempt_count, max_attempts FROM agent_llm_tasks WHERE id = %s", (task_id,))
+        task_row = await self._db.fetchone(
+            "SELECT knowledge_domain, attempt_count, max_attempts FROM agent_llm_tasks WHERE id = %s",
+            (task_id,),
+        )
         if not task_row:
             return
         attempt_no = task_row["attempt_count"] + 1
@@ -231,7 +234,14 @@ class Worker:
 
         start = time.monotonic()
         try:
-            result = await self._model_provider.embed(texts, model=model, dimensions=dimensions)
+            # 62号二期：按任务域选 embedding provider（无覆盖域 = 全局实例；
+            # model 已在提交侧按域解析落库，这里只换端点/密钥）。
+            domain = task_row.get("knowledge_domain")
+            embed_provider = (
+                self._svc.model_provider_for(domain)
+                if self._svc is not None else None
+            ) or self._model_provider
+            result = await embed_provider.embed(texts, model=model, dimensions=dimensions)
             # Completing a malformed result would poison the idempotency cache:
             # callers key on content, so a succeeded-but-broken task is reused
             # forever and RETRY can never recover. Validate BEFORE completing —

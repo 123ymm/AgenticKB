@@ -280,7 +280,8 @@ class YamlConfigService:
         return sorted(p.stem for p in system_dir.glob("*.yaml"))
 
     # ------------------------------------------------------------------
-    # LLM domain overrides (62号第一期：chat+rerank 按域覆盖，embedding 锁全局)
+    # LLM domain overrides (62号二期：chat/rerank/embedding 按域覆盖，
+    # embedding.dimensions 锁全局——所有域共享同一定长向量列)
     # ------------------------------------------------------------------
 
     def _llm_domains_dir(self) -> Path:
@@ -303,6 +304,7 @@ class YamlConfigService:
                 "domain_id": p.stem,
                 "active_model": (data.get("provider") or {}).get("active_model"),
                 "rerank_model": (data.get("rerank") or {}).get("model"),
+                "embedding_model": (data.get("embedding") or {}).get("model"),
             })
         return items
 
@@ -322,8 +324,10 @@ class YamlConfigService:
             raise HTTPException(status_code=404, detail="domain_not_found")
         override = _parse_llm_override_yaml(yaml_text)
         _validate_llm_domain_override(override)
-        merged = _deep_merge(self._llm_global_cfg(), override)
+        global_cfg = self._llm_global_cfg()
+        merged = _deep_merge(global_cfg, override)
         _validate_llm_effective_models(merged)
+        _validate_llm_embedding_override(global_cfg, merged, override)
         self._save_yaml_text(self._llm_domains_dir() / f"{domain_id}.yaml", yaml_text)
 
     def delete_llm_domain_override(self, domain_id: str) -> bool:
@@ -338,7 +342,8 @@ class YamlConfigService:
         """merge 后的完整 effective 配置（llm_service 经 internal auth 拉取）。
 
         merge 只在此处做（62号裁定一）——绕过保存接口直接改盘上文件时，
-        这里的校验仍是一道闸；破了返回 400，llm_service 侧会作废该域回落全局。
+        这里的校验仍是一道闸；破了返回 400，llm_service 侧会作废该域回落全局
+        （embedding 维度漂移即是作废条件之一，62号二期）。
         """
         override_path = self._llm_domains_dir() / f"{domain_id}.yaml"
         if not override_path.exists():
@@ -346,8 +351,10 @@ class YamlConfigService:
         override = self._load_yaml(override_path)
         if override:
             _validate_llm_domain_override(override)
-        merged = _deep_merge(self._llm_global_cfg(), override)
+        global_cfg = self._llm_global_cfg()
+        merged = _deep_merge(global_cfg, override)
         _validate_llm_effective_models(merged)
+        _validate_llm_embedding_override(global_cfg, merged, override)
         return merged
 
     def llm_service_base_url(self) -> str | None:
@@ -507,11 +514,11 @@ class YamlConfigService:
 
 
 # ---------------------------------------------------------------------------
-# LLM domain override helpers (62号第一期，module-level: 纯函数便于单测)
+# LLM domain override helpers (62号，module-level: 纯函数便于单测)
 # ---------------------------------------------------------------------------
 
-#: 覆盖文件允许的顶层键（embedding 锁全局——出现即 400）。
-_LLM_OVERRIDE_TOP_KEYS = frozenset({"provider", "rerank"})
+#: 覆盖文件允许的顶层键（62号二期起 embedding 可按域覆盖，dimensions 锁全局）。
+_LLM_OVERRIDE_TOP_KEYS = frozenset({"provider", "rerank", "embedding"})
 #: provider 段允许的键。
 _LLM_PROVIDER_KEYS = frozenset({
     "active_model", "models", "provider_type",
@@ -521,6 +528,15 @@ _LLM_PROVIDER_KEYS = frozenset({
 _LLM_RERANK_KEYS = frozenset({
     "base_url", "api_key", "model", "timeout", "bypass_proxy", "headers",
 })
+#: embedding 段允许的键（62号二期：模型/端点/密钥按域，dimensions 锁全局）。
+_LLM_EMBEDDING_KEYS = frozenset({
+    "base_url", "api_key", "model", "dimensions",
+    "timeout", "bypass_proxy", "headers",
+})
+#: embedding merge 后必须非空的字段（dimensions 单独比对）。
+_LLM_EMBEDDING_REQUIRED = (
+    "base_url", "api_key", "model", "timeout", "bypass_proxy", "headers",
+)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -563,7 +579,8 @@ def _validate_llm_domain_override(override: dict[str, Any]) -> None:
             status_code=400,
             detail=(
                 f"不允许的顶层键: {sorted(unknown)}"
-                f"（允许 {sorted(_LLM_OVERRIDE_TOP_KEYS)}；embedding 锁全局，62号第一期禁止按域覆盖）"
+                f"（允许 {sorted(_LLM_OVERRIDE_TOP_KEYS)}"
+                "；worker/task/persist_writer/template 等运行时旋钮服务级共享，不可按域覆盖）"
             ),
         )
     prov = override.get("provider")
@@ -595,6 +612,63 @@ def _validate_llm_domain_override(override: dict[str, Any]) -> None:
                 status_code=400,
                 detail=f"rerank 段不允许的键: {sorted(unknown)}",
             )
+    emb = override.get("embedding")
+    if emb is not None:
+        if not isinstance(emb, dict):
+            raise HTTPException(status_code=400, detail="embedding 段必须是映射")
+        unknown = set(emb) - set(_LLM_EMBEDDING_KEYS)
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"embedding 段不允许的键: {sorted(unknown)}（允许 {sorted(_LLM_EMBEDDING_KEYS)}）",
+            )
+        dims = emb.get("dimensions")
+        if dims is not None and (not isinstance(dims, int) or isinstance(dims, bool)):
+            raise HTTPException(status_code=400, detail="embedding.dimensions 必须是整数")
+
+
+def _validate_llm_embedding_override(
+    global_cfg: dict[str, Any],
+    merged: dict[str, Any],
+    override: dict[str, Any],
+) -> None:
+    """embedding 覆盖的 merge 后校验（62号二期，fail-loud 400）。
+
+    仅当覆盖实际含非空 embedding 段时执行——全局配置本就无 embedding 段的
+    部署（或只覆盖 chat/rerank 的域）不受影响。两条闸：
+    ① merge 后必填字段齐全（部分覆盖继承全局，但结果必须完整）；
+    ② merge 后 dimensions 与全局一致——所有域共享同一定长向量列
+    （vector(N)），维度漂移会在入库/检索两侧同时炸，维度差异化属二期后工程。
+    """
+    if not override.get("embedding"):
+        return
+    merged_emb = merged.get("embedding") or {}
+    # 存在性而非真值：bypass_proxy: false / headers: {} 是合法完整值，
+    # 只有缺键、None、空串才算缺。
+    missing = [
+        f for f in _LLM_EMBEDDING_REQUIRED
+        if merged_emb.get(f) is None
+        or (isinstance(merged_emb.get(f), str) and not str(merged_emb.get(f)).strip())
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"embedding merge 后仍缺必填字段 {missing}"
+                "（同名部分覆盖需保证 merge 完整）"
+            ),
+        )
+    gdim = (global_cfg.get("embedding") or {}).get("dimensions")
+    mdim = merged_emb.get("dimensions")
+    if mdim != gdim:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"embedding.dimensions 锁全局：域覆盖合并后为 {mdim}，全局为 {gdim}"
+                f"——所有域共享同一定长向量列（当前 vector({gdim})），维度不可按域改变；"
+                "更换嵌入模型请保持 dimensions 与全局一致"
+            ),
+        )
 
 
 def _validate_llm_effective_models(effective: dict[str, Any]) -> None:

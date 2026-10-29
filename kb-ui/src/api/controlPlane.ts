@@ -38,7 +38,7 @@ export function useControlPlaneApi() {
       return data
     },
 
-    // ── LLM 域覆盖（62号第一期：chat+rerank 按域覆盖，embedding 锁全局）──
+    // ── LLM 域覆盖（62号：chat/rerank/embedding 按域覆盖，embedding 维度锁全局）──
     async listLlmDomainOverrides(): Promise<LlmDomainOverrideSummary[]> {
       const { data } = await client.get('/api/v1/system/llm_service/domains')
       return data.items ?? []
@@ -160,6 +160,8 @@ export interface LlmDomainOverrideSummary {
   domain_id: string
   active_model: string | null
   rerank_model: string | null
+  /** 62号二期：该域 embedding 模型（未覆盖为 null） */
+  embedding_model: string | null
 }
 
 export interface LlmOverrideSaveResult {

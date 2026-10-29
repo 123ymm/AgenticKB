@@ -1,6 +1,19 @@
 {
-  "current": "1.1.26",
+  "current": "1.1.27",
   "releases": [
+    {
+      "version": "1.1.27",
+      "released_at": "2026-10-29",
+      "title": "LLM 配置按域隔离第二期：embedding 按域覆盖（同维度）+ 行级模型溯源 + 域覆盖表单化 UI（62号二期）",
+      "changes": [
+        "embedding 按域覆盖（同维度锁定）：域覆盖文件放开 embedding 段（model/base_url/api_key 等可按域差异，密钥留空继承全局）；dimensions 锁全局——merge 后必须等于全局值（当前 1024），漂移即 400 并说明原因（所有域共享同一定长向量列 vector(1024)）；零 schema/零迁移/零 Java 改动，检索严格单域故同维不同模型跨域永不互比",
+        "llm_service 按域解析 embedding：同步端点 /models/embeddings、异步 submit_embedding（域默认模型落库）、worker 执行（按任务域选 provider）三链路全部按 knowledge_domain 走域 effective 配置；幂等指纹已含 model+dimensions，切换模型自动不复用旧向量结果；装载侧新增维度比对兜底闸（维度漂移的域作废回落全局，不致命）",
+        "行级模型溯源：挖掘生成的向量行 provider/model/model_version 不再落 unknown——两个生成器实现 describe()（捕获服务端实际回传模型与维度，异步通道零协议改动），EmbeddingFacade 跑后二次 describe 刷新再冻结；无 describe 的旧生成器行为逐字节不变（红线）；真库验证 staging 表 SELECT DISTINCT 见 llm_service/embedding-3/1024",
+        "域覆盖 UI 表单化：「LLM 域覆盖」tab 重写为表单为主 + 高级 YAML 折叠——Chat 下拉（全局模型∪域自有，可清空=继承全局）、Rerank/Embedding 输入框（留空继承全局并在 placeholder 显示全局值）、dimensions 只读锁图标+tooltip（用户一眼知道哪些能改哪些不能）；embedding 段非空常驻混存警告，保存时 embedding 有差异弹确认框（存量向量不自动重嵌、检索可能劣化、重嵌工具下一批）；表单与 YAML 同源（即所存原文）；系统配置 tab 选 llm_service.yaml 时提示前往域覆盖页做差异化",
+        "测试：llm_service 133 passed（域配置矩阵新增 embedding 11 例）；控制面 14 passed（embedding 覆盖矩阵：同维过/2048 拒/缺字段拒/坏键拒/非整数拒/盘改兜底）；mining 单测 31 例新增（生成器 describe 捕获/门面跑后刷新/旧生成器 unknown 红线），全量 1735 passed（18 例既有环境红与本次无关，stash 验证）；前端 587 passed + vue-tsc 通过（新 util 7 例 + tab 12 例）",
+        "部署：Python 三服务 + 前端 dist 增量，无迁移；apply 重启序 control → llm_service → mining；存量 unknown 向量行不动，serving 侧模型 mismatch 硬闸与重嵌工具留待下一批；在途任务窗口：覆盖生效前提交的任务仍按提交侧落库的全局模型名执行（同维度约束下瞬态自愈）"
+      ]
+    },
     {
       "version": "1.1.26",
       "released_at": "2026-10-29",
