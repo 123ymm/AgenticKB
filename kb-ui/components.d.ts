@@ -83,6 +83,7 @@ declare module 'vue' {
     KbSearchWorkspace: typeof import('./src/components/kb/KbSearchWorkspace.vue')['default']
     KbSettingsPanel: typeof import('./src/components/kb/KbSettingsPanel.vue')['default']
     LineChart: typeof import('./src/components/charts/LineChart.vue')['default']
+    LlmDomainOverridesTab: typeof import('./src/components/settings/LlmDomainOverridesTab.vue')['default']
     McpKeyConfigPanel: typeof import('./src/components/mcp/McpKeyConfigPanel.vue')['default']
     MiningOperatorNode: typeof import('./src/components/mining/workflow/MiningOperatorNode.vue')['default']
     MiningOperatorPalette: typeof import('./src/components/mining/workflow/MiningOperatorPalette.vue')['default']

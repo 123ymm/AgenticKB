@@ -350,6 +350,48 @@ class YamlConfigService:
         _validate_llm_effective_models(merged)
         return merged
 
+    def llm_service_base_url(self) -> str | None:
+        """llm_service 管理端点地址：注册表里第一个启用域的 llm_url（单容器同址）。"""
+        for entry in self.list_domains():
+            if not entry.get("enabled", True):
+                continue
+            did = entry.get("domain_id")
+            if not did:
+                continue
+            try:
+                svcs = self.get_domain_services(did)
+            except Exception:  # noqa: BLE001
+                continue
+            url = svcs.get("llm_url")
+            if url:
+                return str(url).rstrip("/")
+        return None
+
+    async def notify_llm_reload(self, internal_secret: str) -> dict[str, Any]:
+        """保存 LLM 配置后通知 llm_service 热加载（62号一期收尾：保存即生效）。
+
+        尽力而为——失败不影响保存本身，只把结果带回响应给 UI 回显
+        （失败时提示重启后台服务生效）。
+        """
+        base = self.llm_service_base_url()
+        if not base:
+            return {"ok": False, "detail": "domain_registry 中未找到 llm_url"}
+        if not internal_secret:
+            return {"ok": False, "detail": "内部密钥未配置"}
+        try:
+            async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
+                resp = await client.post(
+                    f"{base}/api/v1/admin/reload-config",
+                    headers={"X-Internal-Auth": internal_secret, "X-KB-Role": "admin"},
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("notify_llm_reload unreachable: %s", exc.__class__.__name__)
+            return {"ok": False, "detail": f"llm_service 不可达（{exc.__class__.__name__}）"}
+        if resp.status_code != 200:
+            logger.warning("notify_llm_reload status=%s body=%s", resp.status_code, resp.text[:200])
+            return {"ok": False, "detail": f"reload-config 返回 {resp.status_code}"}
+        return {"ok": True, "detail": None}
+
     # ------------------------------------------------------------------
     # Serving config snapshot (consumed by agent_serving over HTTP)
     # ------------------------------------------------------------------

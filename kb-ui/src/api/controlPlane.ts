@@ -28,10 +28,47 @@ export function useControlPlaneApi() {
       return typeof data === 'string' ? data : JSON.stringify(data)
     },
 
-    async updateSystemConfigRaw(name: string, yamlText: string): Promise<void> {
-      await client.put(`/api/v1/system/${name}/raw`, yamlText, {
+    async updateSystemConfigRaw(
+      name: string,
+      yamlText: string,
+    ): Promise<{ ok: boolean; llm_reload?: LlmReloadResult }> {
+      const { data } = await client.put(`/api/v1/system/${name}/raw`, yamlText, {
         headers: { 'Content-Type': 'text/yaml' },
       })
+      return data
+    },
+
+    // ── LLM 域覆盖（62号第一期：chat+rerank 按域覆盖，embedding 锁全局）──
+    async listLlmDomainOverrides(): Promise<LlmDomainOverrideSummary[]> {
+      const { data } = await client.get('/api/v1/system/llm_service/domains')
+      return data.items ?? []
+    },
+
+    async getLlmDomainOverrideRaw(domainId: string): Promise<string> {
+      const { data } = await client.get(
+        `/api/v1/system/llm_service/domains/${domainId}/raw`,
+        { responseType: 'text' },
+      )
+      return typeof data === 'string' ? data : JSON.stringify(data)
+    },
+
+    async saveLlmDomainOverrideRaw(
+      domainId: string,
+      yamlText: string,
+    ): Promise<LlmOverrideSaveResult> {
+      const { data } = await client.put(
+        `/api/v1/system/llm_service/domains/${domainId}/raw`,
+        yamlText,
+        { headers: { 'Content-Type': 'text/yaml' } },
+      )
+      return data
+    },
+
+    async deleteLlmDomainOverride(domainId: string): Promise<LlmOverrideSaveResult> {
+      const { data } = await client.delete(
+        `/api/v1/system/llm_service/domains/${domainId}/raw`,
+      )
+      return data
     },
 
     // ── Domains ──
@@ -111,6 +148,25 @@ export interface ControlPlaneDomainSummary {
   scenario_pack_ref: string
   domain_role?: import('@/types/auth').DomainRole | null
   capabilities?: import('@/types/auth').DomainCapability[]
+}
+
+/** llm_service 热加载结果（控制面保存后尽力通知，失败回显提示重启生效） */
+export interface LlmReloadResult {
+  ok: boolean
+  detail: string | null
+}
+
+export interface LlmDomainOverrideSummary {
+  domain_id: string
+  active_model: string | null
+  rerank_model: string | null
+}
+
+export interface LlmOverrideSaveResult {
+  ok: boolean
+  /** 仅删除接口：是否真的删除了文件（幂等空删为 false 且不通知热加载） */
+  deleted?: boolean
+  llm_reload?: LlmReloadResult
 }
 
 export interface ReleaseInfo {

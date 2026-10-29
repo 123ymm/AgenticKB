@@ -48,8 +48,18 @@ const store = useControlPlaneStore()
 
 async function handleSave() {
   try {
-    await store.saveSystemConfig()
-    ElMessage.success('已保存')
+    const result = await store.saveSystemConfig()
+    const reload = result?.llm_reload
+    if (reload) {
+      // llm_service.yaml 保存即生效：控制面已尽力通知热加载
+      if (reload.ok) {
+        ElMessage.success('已保存，LLM 配置已热加载')
+      } else {
+        ElMessage.warning(`已保存，但热加载失败（${reload.detail ?? '未知原因'}）——重启后台服务后生效`)
+      }
+    } else {
+      ElMessage.success('已保存')
+    }
   } catch {
     ElMessage.error('保存失败')
   }

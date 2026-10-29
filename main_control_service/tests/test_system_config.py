@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from main_control_service.main import create_app
@@ -233,3 +234,125 @@ def test_llm_domain_override_disk_edited_file_rejected_at_effective(tmp_path: Pa
         (bad_dir / "odn.yaml").write_text("embedding:\n  model: hacked\n", encoding="utf-8")
         r = c.get("/api/v1/system/llm_service/effective/odn")
         assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 保存即生效：LLM 配置保存后自动通知 llm_service 热加载
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def reload_notifier(monkeypatch):
+    """拦截 YamlConfigService.notify_llm_reload，记录调用并默认返回成功。"""
+    from unittest.mock import AsyncMock
+    from main_control_service.service import YamlConfigService
+
+    mock = AsyncMock(return_value={"ok": True, "detail": None})
+    monkeypatch.setattr(YamlConfigService, "notify_llm_reload", mock)
+    return mock
+
+
+def test_llm_service_raw_put_notifies_reload(tmp_path: Path, reload_notifier) -> None:
+    with _llm_client(tmp_path) as c:
+        r = c.put(
+            "/api/v1/system/llm_service/raw",
+            content=_LLM_YAML, headers={"Content-Type": "text/yaml"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["llm_reload"] == {"ok": True, "detail": None}
+        reload_notifier.assert_awaited_once_with("test-internal")  # auth.yaml 的 secret
+
+
+def test_other_system_config_put_does_not_notify(tmp_path: Path, reload_notifier) -> None:
+    with _llm_client(tmp_path) as c:
+        r = c.put(
+            "/api/v1/system/ui/raw",
+            content="site:\n  title: t\n", headers={"Content-Type": "text/yaml"},
+        )
+        assert r.status_code == 200
+        assert "llm_reload" not in r.json()
+        reload_notifier.assert_not_awaited()
+
+
+def test_override_put_and_delete_notify_reload(tmp_path: Path, reload_notifier) -> None:
+    override = "rerank:\n  model: rerank-odn\n"
+    with _llm_client(tmp_path) as c:
+        r = c.put("/api/v1/system/llm_service/domains/odn/raw",
+                  content=override, headers={"Content-Type": "text/yaml"})
+        assert r.status_code == 200
+        assert r.json()["llm_reload"]["ok"] is True
+
+        r = c.delete("/api/v1/system/llm_service/domains/odn/raw")
+        assert r.json()["llm_reload"]["ok"] is True      # 真删了 → 通知
+
+        r = c.delete("/api/v1/system/llm_service/domains/odn/raw")
+        assert "llm_reload" not in r.json()              # 幂等空删 → 配置没变不通知
+    assert reload_notifier.await_count == 2
+
+
+def _registry_with_llm_url(tmp_path: Path) -> None:
+    (tmp_path / "domain_registry.yaml").write_text(
+        "domains:\n"
+        "  odn:\n"
+        "    display_name: ODN\n"
+        "    services:\n"
+        "      llm_url: http://localhost:8900\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_notify_llm_reload_matrix(tmp_path: Path, monkeypatch) -> None:
+    """notify_llm_reload 单元矩阵：无地址/密钥缺失/网络错/非200/成功。"""
+    import httpx
+
+    from main_control_service.service import YamlConfigService
+
+    svc = YamlConfigService(config_dir=tmp_path)
+
+    # 注册表没有 services 段 → 没有地址
+    assert await svc.notify_llm_reload("s") == {
+        "ok": False, "detail": "domain_registry 中未找到 llm_url"}
+
+    _registry_with_llm_url(tmp_path)
+    # 内部密钥缺失 → 拒发
+    assert (await svc.notify_llm_reload(""))["ok"] is False
+
+    calls: dict[str, tuple] = {}
+
+    class _FakeResp:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            self.text = ""
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers=None):
+            calls["last"] = (url, headers or {})
+            if calls.get("status") == "unreachable":
+                raise httpx.ConnectError("boom")
+            return _FakeResp(calls.get("status", 200))
+
+    monkeypatch.setattr("main_control_service.service.httpx.AsyncClient", _FakeClient)
+
+    # 成功：打到注册表 llm_url 的 reload-config，带双头
+    out = await svc.notify_llm_reload("sec-1")
+    assert out == {"ok": True, "detail": None}
+    url, headers = calls["last"]
+    assert url == "http://localhost:8900/api/v1/admin/reload-config"
+    assert headers == {"X-Internal-Auth": "sec-1", "X-KB-Role": "admin"}
+
+    # 非 200
+    calls["status"] = 502
+    assert (await svc.notify_llm_reload("sec-1"))["detail"] == "reload-config 返回 502"
+
+    # 网络不可达
+    calls["status"] = "unreachable"
+    assert (await svc.notify_llm_reload("sec-1"))["ok"] is False

@@ -252,7 +252,12 @@ def create_app(
         body = await request.body()
         text = body.decode("utf-8")
         service.update_system_config_yaml(service_name, text)
-        return {"ok": True}
+        out: dict = {"ok": True}
+        if service_name == "llm_service":
+            # 保存即生效：通知 llm_service 热加载（失败不影响保存，结果回显 UI）。
+            out["llm_reload"] = await service.notify_llm_reload(
+                getattr(request.app.state, "internal_verify_secret", ""))
+        return out
 
     # ------------------------------------------------------------------
     # LLM domain overrides — 62号第一期：chat+rerank 按域覆盖。
@@ -275,12 +280,18 @@ def create_app(
     async def update_llm_domain_override_raw(domain_id: str, request: Request) -> dict:
         body = await request.body()
         service.update_llm_domain_override_yaml(domain_id, body.decode("utf-8"))
-        return {"ok": True}
+        return {"ok": True, "llm_reload": await service.notify_llm_reload(
+            getattr(request.app.state, "internal_verify_secret", ""))}
 
     @app.delete("/api/v1/system/llm_service/domains/{domain_id}/raw")
-    def delete_llm_domain_override(domain_id: str) -> dict:
+    async def delete_llm_domain_override(domain_id: str, request: Request) -> dict:
         removed = service.delete_llm_domain_override(domain_id)
-        return {"ok": True, "deleted": removed}
+        out: dict = {"ok": True, "deleted": removed}
+        if removed:
+            # 只有真的删了文件才需要通知（幂等空删时配置没变）。
+            out["llm_reload"] = await service.notify_llm_reload(
+                getattr(request.app.state, "internal_verify_secret", ""))
+        return out
 
     @app.get("/api/v1/system/llm_service/effective/{domain_id}")
     def get_llm_effective_config(domain_id: str) -> dict:
