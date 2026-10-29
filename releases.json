@@ -1,6 +1,21 @@
 {
-  "current": "1.1.24",
+  "current": "1.1.25",
   "releases": [
+    {
+      "version": "1.1.25",
+      "released_at": "2026-10-29",
+      "title": "LLM 配置按域隔离第一期（62号）：chat+rerank 按域覆盖、embedding 锁全局、收窄版热加载",
+      "changes": [
+        "控制面（main_control_service）：新增 system/llm_service.domains/{domain_id}.yaml 域覆盖存储与五条路由（覆盖列表 / raw GET·PUT·DELETE / effective 成品）；deep-merge 只在控制面做，llm_service 拉取合并后的 effective 配置（设计裁定①）；删除域时级联删除该域覆盖文件",
+        "保存校验（A2）：覆盖文件只许 provider/rerank 两段——embedding 段出现即 400（锁全局，VECTOR(1024) schema 硬约束，维度差异化留二期）、未知键 400 且报文说明、merge 后模型条目需三要素齐整（同名条目部分覆盖可继承全局）、active_model 可解析；绕过 PUT 的盘改坏文件在 effective 端点二次校验兜底 400",
+        "llm_service：DomainConfigs 全局基底+域覆盖持有者，启动期拉取 overrides——坏覆盖作废回落全局并留痕，绝不致命（裁定②）；ProviderResolver 按 (domain, model) 解析 provider 共享缓存，启动 provider 播种为全局项——无覆盖域零构建，行为与单配置时代字节等价（兼容性铁律）",
+        "按域解析：submit/execute/worker 按任务自带 knowledge_domain 解析域默认 chat 模型（显式 model 参数仍优先并校验，裁定③）；rerank 同步端点与异步 worker 均按域选 provider 与默认模型；embedding 链路零改动",
+        "热加载（B3，收窄版）：GET /admin/config-status（内部密钥）——全局/各覆盖域 effective active_model、被作废覆盖及原因；POST /admin/reload-config（内部密钥+admin 双闸）——原子换 DomainConfigs+清 provider 缓存，拉取失败保留旧配置；与 aaaad19 删除的全运行时热切换的区别（worker/任务旋钮仍需重启）已写入端点文档",
+        "安全：auth 中间件 _is_admin_only 补 DELETE 闸（域覆盖删除=站点管理员写操作，原规则只认 GET/PUT）；.gitignore 新增 llm_service.domains/ 规则（覆盖文件含真实密钥，属服务器侧运维动作）并修复 c063f73 起字面换行损坏导致 onenet.yaml 排除规则从未生效的问题（onenet.yaml 已 git rm --cached 移出索引）",
+        "测试：llm_service 新增 test_domain_config.py 解析矩阵 20 例（回落语义/缓存不串域/域默认落库/rerank 双链路/闸门矩阵），全套 123 passed；main_control_service 新增覆盖 CRUD 回路+校验矩阵+鉴权闸门 8 例，全套 86 passed（4 例 TestClient client= 参数失败为 starlette 升级既有环境问题，stash 验证与本次无关）",
+        "部署：纯 Python --code-only，apply 重启 control + llm_service（重启顺序 control 先于 llm_service，新路由先就位）；无迁移无配置变更；服务器暂无任何覆盖文件=行为与 1.1.24 一致，首个域覆盖是后续运维动作（放置 yaml 后调 reload-config 或重启 llm_service，config-status 验收）"
+      ]
+    },
     {
       "version": "1.1.24",
       "released_at": "2026-10-28",
