@@ -1,6 +1,17 @@
 {
-  "current": "1.1.27",
+  "current": "1.1.28",
   "releases": [
+    {
+      "version": "1.1.28",
+      "released_at": "2026-10-29",
+      "title": "LLM 域覆盖 rerank 表单补齐：端点/密钥两输入（对齐 embedding 三输入）",
+      "changes": [
+        "「LLM 域覆盖」tab 的 Rerank 段从仅「模型」补齐为 模型 / Base URL / API Key 三输入（对齐 embedding 段样式）：密钥框 show-password、留空继承全局、placeholder 提示；后端一期白名单本就允许 rerank 按域覆盖端点/密钥，此前仅表单未暴露——本次零后端改动，表单与高级 YAML 两条路能力一致",
+        "表单与 YAML 同源保持：表单只精准改写单键，同段其余键（如 YAML 先写的 base_url/api_key）原样保留；新建覆盖模板注释同步补可选 rerank 端点/密钥示例",
+        "测试：组件 spec 14 例（三键写回 / 只清模型时端点密钥保留 / 三键全清才整段消失 / YAML 先写键经表单改模型不丢），前端全量 588 passed + vue-tsc 通过",
+        "部署：纯前端 dist 增量，无迁移无配置；nginx 静态文件替换即时生效（apply 因 releases.json 变更按惯例重启 control）"
+      ]
+    },
     {
       "version": "1.1.27",
       "released_at": "2026-10-29",
