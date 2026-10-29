@@ -1,6 +1,20 @@
 {
-  "current": "1.1.28",
+  "current": "1.1.29",
   "releases": [
+    {
+      "version": "1.1.29",
+      "released_at": "2026-10-29",
+      "title": "onenet.yaml 域覆盖（62号镜像）：一张网凭据按域 + mining 每请求 TTL 拉取 + 域覆盖管理 UI",
+      "changes": [
+        "控制面：system/onenet.domains/{domain_id}.yaml 域覆盖存储与五条路由（覆盖列表摘要 app_id / raw GET·PUT·DELETE / effective 成品）；全部 10 键可按域覆盖（凭据×2/端点×2/调优×6），保存校验键白名单+类型+范围（chunk_width/page_size ∈[1,10000]）+ merge 后凭据完整性闸；删域级联清理覆盖；绕过 PUT 的盘改坏文件由 effective 端点二次校验兜底 400",
+        "顺手修两处暗病：全局 onenet.yaml 的 PUT 从盲写改为结构校验（此前写坏后 mining 静默吞错全端点 503）；补上 docstring 声称却从未存在的 onenet.example.yaml 占位",
+        "mining：新增 effective_config.py——每请求向控制面拉该域 merge 后的 effective 配置，进程内 ~10s TTL 缓存 + 失败沿用上次成功值（控制面短暂重启无感）+ 冷启动不可达回退旧通道（env→盘上文件）；客户端工厂改为调用时带域（await factory(domain)——后台导入任务执行时域才可知）；/search /probe 支持可选 domain 参数（UI 查询/摸底自动带当前域，可实测域凭据）；toc/导入/重同步各自按业务域解析",
+        "⚠ 语义变化：环境变量 ONENET_APP_ID/ONENET_STATIC_TOKEN 从「压过盘上文件」降级为「仅控制面不可达且无缓存时的回退通道」——控制面配置成为唯一权威；保存后 ≤10 秒生效（mining 短 TTL 拉取，无热加载通知机制）",
+        "kb-ui：设置页新 tab「一张网域覆盖」——凭据/端点表单（app_id / static_token 密码框不回显 / token_url / search_url，placeholder 显示全局基底继承值，留空=继承）+ 高级 YAML 折叠（调优 6 键在此编辑）+ 保存提示「约 10 秒内生效」；系统配置选 onenet.yaml 时提示前往域覆盖页；后端 400 结构化报文透传；删除确认+幂等；llmOverrideYaml 通用化为域覆盖工具（新增平铺读写）",
+        "测试：控制面 8 例（CRUD 回路/校验矩阵/凭据闸/盘改兜底/未知域/删域级联/全局 PUT 校验）；mining effective 回落链 9 例 + 按域路由 5 例 + 导入域契约 1 例；前端 11 例新 spec + 平铺读写补测；全套绿：控制面 99、mining onenet 188、前端 601 + vue-tsc",
+        "部署：Python（控制面+mining）+ 前端 dist 全量包，无迁移；apply 重启 control→mining；服务器无覆盖文件=行为与 1.1.28 一致（mining 走全局基底），首个域覆盖是后续运维动作（设置页「一张网域覆盖」直接操作，~10s 生效）"
+      ]
+    },
     {
       "version": "1.1.28",
       "released_at": "2026-10-29",
