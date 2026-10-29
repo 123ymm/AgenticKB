@@ -3,7 +3,9 @@ import {
   embeddingSection,
   ownModelKeys,
   parseOverrideYaml,
+  patchFlat,
   patchForm,
+  readFlat,
   readForm,
 } from '../llmOverrideYaml'
 
@@ -64,5 +66,34 @@ describe('llmOverrideYaml', () => {
       '',
     ].join('\n')
     expect(ownModelKeys(text)).toEqual(['odn-chat'])
+  })
+
+  it('readFlat 读平铺键（onenet），缺省空串', () => {
+    const text = 'app_id: odn-app\nchunk_width: 500\n'
+    expect(readFlat(text, 'app_id')).toBe('odn-app')
+    expect(readFlat(text, 'chunk_width')).toBe('500')
+    expect(readFlat(text, 'static_token')).toBe('')
+    expect(readFlat('# 全注释模板\n', 'app_id')).toBe('')
+  })
+
+  it('patchFlat 平铺写回：空值删键、其余键保留、全清成空映射', () => {
+    let text = patchFlat('', 'app_id', 'odn-app')
+    text = patchFlat(text, 'static_token', 'tok-odn')
+    text = patchFlat(text, 'token_url', 'http://odn.example/token')
+    expect(readFlat(text, 'app_id')).toBe('odn-app')
+    expect(readFlat(text, 'token_url')).toBe('http://odn.example/token')
+    // 清空一键不影响兄弟键
+    text = patchFlat(text, 'static_token', '')
+    expect(readFlat(text, 'static_token')).toBe('')
+    expect(readFlat(text, 'app_id')).toBe('odn-app')
+    // YAML 先写的调优键，表单改凭据时保留
+    text = 'app_id: a-1\nchunk_width: 500\n'
+    text = patchFlat(text, 'app_id', 'a-2')
+    expect(readFlat(text, 'chunk_width')).toBe('500')
+    expect(readFlat(text, 'app_id')).toBe('a-2')
+    // 全清 → 空映射（合法 YAML，parse 回 {}）
+    text = patchFlat(text, 'app_id', '')
+    text = patchFlat(text, 'chunk_width', '')
+    expect(parseOverrideYaml(text)).toEqual({})
   })
 })

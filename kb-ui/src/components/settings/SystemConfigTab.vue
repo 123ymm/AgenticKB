@@ -35,6 +35,12 @@
           >
             本文件是 LLM 的<strong>全局基底</strong>；某域需要差异化模型/密钥时，请前往「LLM 域覆盖」页配置（留空字段自动继承这里）。
           </div>
+          <div
+            v-if="store.selectedSystemConfigName === 'onenet'"
+            class="system-config-tab__llm-hint"
+          >
+            本文件是知识一张网接入的<strong>全局基底</strong>；某域需要独立凭据/端点时，请前往「一张网域覆盖」页配置（留空字段自动继承这里，保存后约 10 秒内生效）。
+          </div>
           <div class="system-config-tab__editor-wrap">
             <YamlEditor v-model="store.systemConfigText" />
           </div>

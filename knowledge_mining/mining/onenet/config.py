@@ -110,6 +110,25 @@ class OnenetConfig:
             return None
         return cls(app_id=app_id, static_token=static_token)
 
+    @classmethod
+    def from_effective(cls, data: dict[str, Any]) -> "OnenetConfig":
+        """从控制面 merge 后的 effective 映射构造（域覆盖通道，62号镜像）.
+
+        与 from_file 的差别：不走 env 变量（控制面配置是唯一权威，
+        env 仅剩 effective_config 回退通道里的旧语义）；且补齐 verify_tls
+        ——from_file 漏挑该键是历史缺口，本通道 10 键全收。
+        """
+        if not isinstance(data, dict):
+            raise ValueError(f"onenet effective config must be a mapping: {data!r}")
+        fields: dict[str, Any] = {
+            k: data[k] for k in (
+                "app_id", "static_token", "token_url", "search_url",
+                "source_type", "timeout", "verify_tls", "chunk_width",
+                "page_size", "throttle_seconds",
+            ) if data.get(k) is not None
+        }
+        return cls(**fields)
+
 
 def resolve_config() -> OnenetConfig | None:
     """解析顺序：env → 默认 yaml 路径；都不可用返回 None（功能未配置）."""

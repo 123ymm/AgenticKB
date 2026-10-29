@@ -1,10 +1,11 @@
 import { load as yamlLoad, dump as yamlDump } from 'js-yaml'
 
 /**
- * LLM 域覆盖 YAML 的表单双向读写（62号二期表单化）。
+ * 域覆盖 YAML 的表单双向读写（通用工具：llm_service 分段 / onenet 平铺）。
  *
  * 单一真相源是 YAML 字符串（即所存原文）；表单字段经 readForm/patchForm
- * 读写该字符串，高级 YAML 模式直接编辑同一字符串——零双状态同步。
+ * （分段）或 readFlat/patchFlat（平铺）读写该字符串，高级 YAML 模式直接
+ * 编辑同一字符串——零双状态同步。
  */
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -42,6 +43,21 @@ export function patchForm(text: string, section: string, field: string, value: s
   else sec[field] = value
   if (Object.keys(sec).length === 0) delete doc[section]
   else doc[section] = sec
+  return yamlDump(doc, { lineWidth: -1 })
+}
+
+/** 平铺覆盖（onenet 10 键无段结构）：读某键为字符串（缺省 '' = 继承全局）。 */
+export function readFlat(text: string, field: string): string {
+  const v = parseOverrideYaml(text)[field]
+  if (v == null) return ''
+  return typeof v === 'string' ? v : String(v)
+}
+
+/** 平铺覆盖键写回：空值 = 删键；其余键原样保留（全清后 dump 为 `{}` 空映射）。 */
+export function patchFlat(text: string, field: string, value: string): string {
+  const doc = parseOverrideYaml(text)
+  if (value === '') delete doc[field]
+  else doc[field] = value
   return yamlDump(doc, { lineWidth: -1 })
 }
 

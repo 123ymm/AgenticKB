@@ -251,6 +251,9 @@ def create_app(
     async def update_system_config_raw(service_name: str, request: Request) -> dict:
         body = await request.body()
         text = body.decode("utf-8")
+        if service_name == "onenet":
+            # 结构校验（键白名单+类型）——修复此前盲写、写坏后 mining 静默 503 的暗病。
+            service.validate_onenet_global_yaml(text)
         service.update_system_config_yaml(service_name, text)
         out: dict = {"ok": True}
         if service_name == "llm_service":
@@ -296,6 +299,37 @@ def create_app(
     @app.get("/api/v1/system/llm_service/effective/{domain_id}")
     def get_llm_effective_config(domain_id: str) -> dict:
         return service.llm_effective_config(domain_id)
+
+    # ------------------------------------------------------------------
+    # Onenet domain overrides —— 一张网凭据按域差异（镜像 62号 LLM 域覆盖）。
+    # 鉴权同前缀既有档位；无 notify（mining 每请求拉 effective + TTL 缓存，
+    # 保存后约 10 秒内自然生效）。
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/system/onenet/domains")
+    def list_onenet_domain_overrides() -> dict:
+        return {"items": service.list_onenet_domain_overrides()}
+
+    @app.get("/api/v1/system/onenet/domains/{domain_id}/raw")
+    def get_onenet_domain_override_raw(domain_id: str) -> Response:
+        return Response(
+            content=service.get_onenet_domain_override_yaml(domain_id),
+            media_type="text/yaml",
+        )
+
+    @app.put("/api/v1/system/onenet/domains/{domain_id}/raw")
+    async def update_onenet_domain_override_raw(domain_id: str, request: Request) -> dict:
+        body = await request.body()
+        service.update_onenet_domain_override_yaml(domain_id, body.decode("utf-8"))
+        return {"ok": True}
+
+    @app.delete("/api/v1/system/onenet/domains/{domain_id}/raw")
+    def delete_onenet_domain_override(domain_id: str) -> dict:
+        return {"ok": True, "deleted": service.delete_onenet_domain_override(domain_id)}
+
+    @app.get("/api/v1/system/onenet/effective/{domain_id}")
+    def get_onenet_effective_config(domain_id: str) -> dict:
+        return service.onenet_effective_config(domain_id)
 
     # ------------------------------------------------------------------
     # Domains — JSON list + YAML text CRUD
@@ -404,6 +438,8 @@ def create_app(
         service.delete_domain(domain_id)
         # 62号：连带的域 LLM 覆盖一并清理（幂等；无覆盖时无操作）。
         service.delete_llm_domain_override(domain_id)
+        # onenet 域覆盖同规则级联清理（幂等）。
+        service.delete_onenet_domain_override(domain_id)
         return {"ok": True}
 
     # ------------------------------------------------------------------

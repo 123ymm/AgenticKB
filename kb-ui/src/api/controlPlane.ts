@@ -71,6 +71,40 @@ export function useControlPlaneApi() {
       return data
     },
 
+    // ── onenet 域覆盖（62号镜像：一张网凭据按域覆盖，10 键平铺，~10s TTL 生效）──
+    async listOnenetDomainOverrides(): Promise<OnenetDomainOverrideSummary[]> {
+      const { data } = await client.get('/api/v1/system/onenet/domains')
+      return data.items ?? []
+    },
+
+    async getOnenetDomainOverrideRaw(domainId: string): Promise<string> {
+      const { data } = await client.get(
+        `/api/v1/system/onenet/domains/${domainId}/raw`,
+        { responseType: 'text' },
+      )
+      return typeof data === 'string' ? data : JSON.stringify(data)
+    },
+
+    /** 保存域覆盖；无热加载字段（mining ~10s TTL 自然拉新值）。 */
+    async saveOnenetDomainOverrideRaw(
+      domainId: string,
+      yamlText: string,
+    ): Promise<{ ok: boolean }> {
+      const { data } = await client.put(
+        `/api/v1/system/onenet/domains/${domainId}/raw`,
+        yamlText,
+        { headers: { 'Content-Type': 'text/yaml' } },
+      )
+      return data
+    },
+
+    async deleteOnenetDomainOverride(domainId: string): Promise<{ ok: boolean; deleted?: boolean }> {
+      const { data } = await client.delete(
+        `/api/v1/system/onenet/domains/${domainId}/raw`,
+      )
+      return data
+    },
+
     // ── Domains ──
     async getDomains(): Promise<ControlPlaneDomainSummary[]> {
       const { data } = await client.get('/api/v1/domains')
@@ -169,6 +203,12 @@ export interface LlmOverrideSaveResult {
   /** 仅删除接口：是否真的删除了文件（幂等空删为 false 且不通知热加载） */
   deleted?: boolean
   llm_reload?: LlmReloadResult
+}
+
+/** onenet 域覆盖摘要（app_id 可示人；static_token 永不出控制面） */
+export interface OnenetDomainOverrideSummary {
+  domain_id: string
+  app_id: string | null
 }
 
 export interface ReleaseInfo {

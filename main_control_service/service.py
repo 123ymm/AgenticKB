@@ -400,6 +400,83 @@ class YamlConfigService:
         return {"ok": True, "detail": None}
 
     # ------------------------------------------------------------------
+    # Onenet domain overrides（镜像 62号 LLM 域覆盖：一张网凭据按域差异。
+    # 平铺 10 键全可覆盖；merge 只在控制面；mining 每请求拉 effective + TTL 缓存）
+    # ------------------------------------------------------------------
+
+    def _onenet_domains_dir(self) -> Path:
+        return self.config_dir / "system" / "onenet.domains"
+
+    def _onenet_global_cfg(self) -> dict[str, Any]:
+        cfg = self._load_yaml(self.config_dir / "system" / "onenet.yaml")
+        if not cfg:
+            raise HTTPException(
+                status_code=500, detail="onenet.yaml missing in control plane config",
+            )
+        return cfg
+
+    def list_onenet_domain_overrides(self) -> list[dict[str, Any]]:
+        """有覆盖文件的域清单 + 摘要（app_id 可示人，static_token 不出）。"""
+        items: list[dict[str, Any]] = []
+        for p in sorted(self._onenet_domains_dir().glob("*.yaml")):
+            data = self._load_yaml(p)
+            items.append({"domain_id": p.stem, "app_id": data.get("app_id")})
+        return items
+
+    def get_onenet_domain_override_yaml(self, domain_id: str) -> str:
+        path = self._onenet_domains_dir() / f"{domain_id}.yaml"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="config_not_found")
+        return path.read_text(encoding="utf-8")
+
+    def update_onenet_domain_override_yaml(self, domain_id: str, yaml_text: str) -> None:
+        """保存域覆盖：解析 → 结构校验 → merge 后凭据完整性 → 落盘。
+
+        域必须在 domain_registry 中（同 LLM 覆盖，防手误）。
+        """
+        registry = self._load_domain_registry()
+        if domain_id not in registry:
+            raise HTTPException(status_code=404, detail="domain_not_found")
+        override = _parse_onenet_override_yaml(yaml_text)
+        _validate_onenet_override(override)
+        merged = _deep_merge(self._onenet_global_cfg(), override)
+        _validate_onenet_effective(merged, override)
+        self._save_yaml_text(self._onenet_domains_dir() / f"{domain_id}.yaml", yaml_text)
+
+    def delete_onenet_domain_override(self, domain_id: str) -> bool:
+        """删除域覆盖文件；不存在返回 False（幂等）。"""
+        path = self._onenet_domains_dir() / f"{domain_id}.yaml"
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def onenet_effective_config(self, domain_id: str) -> dict[str, Any]:
+        """merge 后的 effective 配置（mining 经 internal auth 每请求拉取）。
+
+        merge 只在此处做；盘改坏文件在这里二次校验兜底 400——
+        mining 侧拿到 400 会作废该域回落全局（与 llm_service 同语义）。
+        """
+        override_path = self._onenet_domains_dir() / f"{domain_id}.yaml"
+        if not override_path.exists():
+            return self._onenet_global_cfg()
+        override = self._load_yaml(override_path)
+        if override:
+            _validate_onenet_override(override)
+        merged = _deep_merge(self._onenet_global_cfg(), override)
+        _validate_onenet_effective(merged, override)
+        return merged
+
+    def validate_onenet_global_yaml(self, yaml_text: str) -> None:
+        """全局 onenet.yaml 保存前结构校验（键白名单 + 类型；不强制凭据非空）。
+
+        修复既有暗病：此前 PUT 盲写，写坏后 mining 侧静默吞错全端点 503。
+        未配置凭据是合法中间态（resolve → 503 onenet_not_configured 的宽容语义保留）。
+        """
+        data = _parse_onenet_override_yaml(yaml_text)
+        _validate_onenet_override(data)
+
+    # ------------------------------------------------------------------
     # Serving config snapshot (consumed by agent_serving over HTTP)
     # ------------------------------------------------------------------
 
@@ -699,3 +776,92 @@ def _validate_llm_effective_models(effective: dict[str, Any]) -> None:
                 status_code=400,
                 detail=f"active_model '{active}' 在 merge 后的 provider.models 中不可解析",
             )
+
+
+# ---------------------------------------------------------------------------
+# Onenet domain override helpers（平铺结构，纯函数便于单测）
+# ---------------------------------------------------------------------------
+
+#: onenet 覆盖/全局文件允许的键（与 mining OnenetConfig 字段一一对应，全可按域覆盖）。
+_ONENET_KEYS = frozenset({
+    "app_id", "static_token", "token_url", "search_url",
+    "source_type", "timeout", "verify_tls", "chunk_width",
+    "page_size", "throttle_seconds",
+})
+#: 字符串键 / 整数键（bool 不是 int，isinstance(True, int) 为真需排除）。
+_ONENET_STR_KEYS = ("app_id", "static_token", "token_url", "search_url")
+_ONENET_INT_KEYS = ("source_type", "timeout", "chunk_width", "page_size")
+#: 接口硬上限（镜像 OnenetConfig：单查询 from+size ≤ 10000）。
+_ONENET_RANGE_MAX = 10000
+
+
+def _parse_onenet_override_yaml(yaml_text: str) -> dict[str, Any]:
+    """解析 onenet 覆盖 YAML（全局文件保存校验同用此函数）。
+
+    解析失败/根非映射 → 400；空文件视为空覆盖。
+    """
+    if not yaml_text.strip():
+        return {}
+    try:
+        parsed = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="YAML root must be a mapping")
+    return parsed
+
+
+def _validate_onenet_override(override: dict[str, Any]) -> None:
+    """覆盖文件结构校验（fail-loud 400）：键白名单 + 类型 + 范围。
+
+    范围与 mining OnenetConfig.__post_init__ 一致（chunk_width/page_size ∈
+    [1, 10000]）；不在此处要求凭据非空——merge 后的完整性由
+    _validate_onenet_effective 把关（全局基底可能补齐）。
+    """
+    unknown = set(override) - set(_ONENET_KEYS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不允许的键: {sorted(unknown)}（允许 {sorted(_ONENET_KEYS)}）",
+        )
+    for key in _ONENET_STR_KEYS:
+        val = override.get(key)
+        if val is not None and not isinstance(val, str):
+            raise HTTPException(status_code=400, detail=f"{key} 必须是字符串")
+    for key in _ONENET_INT_KEYS:
+        val = override.get(key)
+        if val is not None and (not isinstance(val, int) or isinstance(val, bool)):
+            raise HTTPException(status_code=400, detail=f"{key} 必须是整数")
+    if override.get("verify_tls") is not None and not isinstance(override["verify_tls"], bool):
+        raise HTTPException(status_code=400, detail="verify_tls 必须是布尔值")
+    ts = override.get("throttle_seconds")
+    if ts is not None and (isinstance(ts, bool) or not isinstance(ts, (int, float))):
+        raise HTTPException(status_code=400, detail="throttle_seconds 必须是数值")
+    for key in ("chunk_width", "page_size"):
+        val = override.get(key)
+        if isinstance(val, int) and not isinstance(val, bool) and not 1 <= val <= _ONENET_RANGE_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key} 必须在 [1, {_ONENET_RANGE_MAX}] 内（接口硬上限）",
+            )
+
+
+def _validate_onenet_effective(
+    merged: dict[str, Any], override: dict[str, Any],
+) -> None:
+    """merge 后凭据完整性闸（fail-loud 400，镜像 embedding merge 完整性样式）。
+
+    仅当覆盖非空时执行：部分覆盖（如只改 timeout）继承全局凭据，
+    但 merge 结果必须有可用凭据——否则该域配置形同虚设，保存时就该拦下。
+    """
+    if not override:
+        return
+    missing = [
+        f for f in ("app_id", "static_token")
+        if not str(merged.get(f) or "").strip()
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"onenet merge 后仍缺必填凭据 {missing}（部分覆盖需保证 merge 完整）",
+        )

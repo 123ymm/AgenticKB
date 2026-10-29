@@ -131,3 +131,5 @@ main_control_service/config/system/onenet.yaml
 
 # 62号：LLM 域覆盖文件为运维侧动作（含真实密钥，deploy-sync 从不携带 config/）
 main_control_service/config/system/llm_service.domains/
+# 一张网域覆盖文件同规则（按域真实凭据，运维侧放置）
+main_control_service/config/system/onenet.domains/

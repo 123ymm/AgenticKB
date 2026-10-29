@@ -15,6 +15,9 @@
         <el-tab-pane label="LLM 域覆盖" name="llm-overrides">
           <LlmDomainOverridesTab />
         </el-tab-pane>
+        <el-tab-pane label="一张网域覆盖" name="onenet-overrides">
+          <OnenetDomainOverridesTab />
+        </el-tab-pane>
         <el-tab-pane label="品牌外观" name="brand">
           <BrandAppearanceTab />
         </el-tab-pane>
@@ -41,6 +44,7 @@ import { useRoute } from 'vue-router'
 import { useControlPlaneStore } from '@/stores/controlPlane'
 import SystemConfigTab from '@/components/settings/SystemConfigTab.vue'
 import LlmDomainOverridesTab from '@/components/settings/LlmDomainOverridesTab.vue'
+import OnenetDomainOverridesTab from '@/components/settings/OnenetDomainOverridesTab.vue'
 import SystemStatusTab from '@/components/settings/SystemStatusTab.vue'
 import BrandAppearanceTab from '@/components/settings/BrandAppearanceTab.vue'
 import DomainManageTab from '@/components/settings/DomainManageTab.vue'
@@ -52,7 +56,7 @@ import ServiceLogsTab from '@/components/settings/ServiceLogsTab.vue'
  * 一个面板都不渲染，页面看起来像坏了。概览页的「详情 →」就是靠 ?tab=status 进来的。
  */
 const TAB_NAMES = [
-  'system', 'llm-overrides', 'brand', 'domain', 'scenario', 'status', 'logs',
+  'system', 'llm-overrides', 'onenet-overrides', 'brand', 'domain', 'scenario', 'status', 'logs',
 ] as const
 
 const route = useRoute()

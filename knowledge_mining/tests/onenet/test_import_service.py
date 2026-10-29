@@ -236,15 +236,22 @@ async def _wait_terminal(repo, import_id, timeout=5.0):
     return repo.imports.get(import_id) or {}
 
 
-def _service(tmp_path, *, auto_miner=None, client=None):
+def _service(tmp_path, *, auto_miner=None, client=None, factory_sink=None):
     if client is None:
         client = _fake_client()
     repo, kbsvc, kbdb, docsvc, folders = (
         FakeRepo(), None, FakeKbDb(), FakeDocService(), FakeFolders())
     kbsvc = FakeKbService(repo)
+
+    # 域覆盖（62号镜像）后工厂契约：await factory(domain) —— 调用时带域。
+    async def client_factory(domain=None):
+        if factory_sink is not None:
+            factory_sink.append(domain)
+        return client
+
     svc = OnenetImportService(
         repo=repo, kbdb=kbdb, kb_service=kbsvc, doc_service=docsvc,
-        folder_service=folders, client_factory=lambda: client,
+        folder_service=folders, client_factory=client_factory,
         workspace_root=tmp_path / "ws", auto_miner=auto_miner,
     )
     return svc, repo, kbsvc, kbdb, docsvc, folders
@@ -319,6 +326,18 @@ async def test_start_import_runs_to_done(tmp_path):
     assert len(docsvc.stored) == len(kbdb.docs) >= 1
     assert final["doc_name"] == "UDG 手册"
     assert final["parsed_version_seen"] == "hwics_v1.0"
+
+
+async def test_run_import_resolves_client_with_record_domain(tmp_path):
+    """域覆盖契约（62号镜像）：后台任务执行时按导入记录的域取 client。"""
+    calls: list[str | None] = []
+    svc, repo, *_ = _service(tmp_path, factory_sink=calls)
+    rec = await svc.start_import(
+        domain="cloud_core_network", source_id="DOC1", selection=Selection(),
+        actor_id="admin1", username="管理员")
+    final = await _wait_terminal(repo, rec["id"])
+    assert final["status"] == "done"
+    assert calls == ["cloud_core_network"]
 
 
 async def test_subtree_import_uses_path_hint_after_parent_slice_is_filtered(tmp_path):

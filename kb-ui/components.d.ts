@@ -88,6 +88,7 @@ declare module 'vue' {
     MiningOperatorNode: typeof import('./src/components/mining/workflow/MiningOperatorNode.vue')['default']
     MiningOperatorPalette: typeof import('./src/components/mining/workflow/MiningOperatorPalette.vue')['default']
     MiningWorkflowTrace: typeof import('./src/components/mining/workflow/MiningWorkflowTrace.vue')['default']
+    OnenetDomainOverridesTab: typeof import('./src/components/settings/OnenetDomainOverridesTab.vue')['default']
     OnenetRefPanel: typeof import('./src/components/kb/OnenetRefPanel.vue')['default']
     OperatorNode: typeof import('./src/components/paradigm/OperatorNode.vue')['default']
     OperatorPalette: typeof import('./src/components/paradigm/OperatorPalette.vue')['default']
