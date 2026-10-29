@@ -13,8 +13,8 @@ if sys.platform == "win32":
 import uvicorn  # noqa: E402
 from uvicorn.config import LOGGING_CONFIG  # noqa: E402
 
-from llm_service.config import load_llm_config, dig  # noqa: E402
-from llm_service.main import set_startup_config  # noqa: E402
+from llm_service.config import load_domain_configs, dig  # noqa: E402
+from llm_service.main import set_startup_config, set_startup_domain_configs  # noqa: E402
 
 _DATEFMT = "%Y-%m-%d %H:%M:%S"
 _LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -46,8 +46,12 @@ def _timestamped_log_config() -> dict:
     return cfg
 
 
-cfg = load_llm_config()
+# 62号：全局 + 各域 effective 配置一次拉齐（全局失败致命；单个域覆盖
+# 作废回落全局，见 config.fetch_llm_domain_overrides）。
+_domain_configs = load_domain_configs()
+cfg = _domain_configs.global_config
 set_startup_config(cfg)
+set_startup_domain_configs(_domain_configs)
 
 uvicorn.run(
     "llm_service.main:create_app_from_startup_config",

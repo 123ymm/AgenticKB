@@ -255,6 +255,38 @@ def create_app(
         return {"ok": True}
 
     # ------------------------------------------------------------------
+    # LLM domain overrides — 62号第一期：chat+rerank 按域覆盖。
+    # raw 读写 = 站点管理员（/api/v1/system 前缀的既有权限档）；
+    # effective = llm_service 经 internal auth 拉取 merge 后成品。
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/system/llm_service/domains")
+    def list_llm_domain_overrides() -> dict:
+        return {"items": service.list_llm_domain_overrides()}
+
+    @app.get("/api/v1/system/llm_service/domains/{domain_id}/raw")
+    def get_llm_domain_override_raw(domain_id: str) -> Response:
+        return Response(
+            content=service.get_llm_domain_override_yaml(domain_id),
+            media_type="text/yaml",
+        )
+
+    @app.put("/api/v1/system/llm_service/domains/{domain_id}/raw")
+    async def update_llm_domain_override_raw(domain_id: str, request: Request) -> dict:
+        body = await request.body()
+        service.update_llm_domain_override_yaml(domain_id, body.decode("utf-8"))
+        return {"ok": True}
+
+    @app.delete("/api/v1/system/llm_service/domains/{domain_id}/raw")
+    def delete_llm_domain_override(domain_id: str) -> dict:
+        removed = service.delete_llm_domain_override(domain_id)
+        return {"ok": True, "deleted": removed}
+
+    @app.get("/api/v1/system/llm_service/effective/{domain_id}")
+    def get_llm_effective_config(domain_id: str) -> dict:
+        return service.llm_effective_config(domain_id)
+
+    # ------------------------------------------------------------------
     # Domains — JSON list + YAML text CRUD
     # ------------------------------------------------------------------
 
@@ -359,6 +391,8 @@ def create_app(
         if count > 0:
             raise HTTPException(status_code=409, detail=f"domain_has_kbs:{count}")
         service.delete_domain(domain_id)
+        # 62号：连带的域 LLM 覆盖一并清理（幂等；无覆盖时无操作）。
+        service.delete_llm_domain_override(domain_id)
         return {"ok": True}
 
     # ------------------------------------------------------------------

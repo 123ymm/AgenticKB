@@ -241,3 +241,162 @@ def fetch_config_from_control_plane(
 def load_llm_config() -> dict[str, Any]:
     """Load config from control plane. Raises on any failure."""
     return fetch_config_from_control_plane()
+
+
+# ---------------------------------------------------------------------------
+# Per-domain configs (62号第一期：chat+rerank 按域覆盖，embedding 锁全局)
+# ---------------------------------------------------------------------------
+
+#: 全局配置在 DomainConfigs 中的键（无覆盖域与 None 域共用全局配置）。
+GLOBAL_DOMAIN_KEY = "__global__"
+
+
+class DomainConfigs:
+    """全局基底 + 各域 effective 配置的持有者。
+
+    merge 在控制面完成（``GET /api/v1/system/llm_service/effective/{domain}``），
+    这里只持有成品。``reload``/``replace_with`` 原子换内部引用——LLMService、
+    ModelService、Worker 都经 ``for_domain`` 每次取当前生效配置，热加载无需
+    重建组件。坏覆盖在装载时即作废（``invalid``），域回落全局，服务不崩。
+    """
+
+    def __init__(
+        self,
+        global_cfg: dict[str, Any],
+        domain_cfgs: dict[str, dict[str, Any]] | None = None,
+        invalid: dict[str, str] | None = None,
+    ) -> None:
+        self._global = global_cfg
+        self._domains: dict[str, dict[str, Any]] = dict(domain_cfgs or {})
+        self._invalid: dict[str, str] = dict(invalid or {})
+
+    @classmethod
+    def single(cls, global_cfg: dict[str, Any]) -> "DomainConfigs":
+        """无任何域覆盖的退化形态（等价于现状单配置）。"""
+        return cls(global_cfg)
+
+    @property
+    def global_config(self) -> dict[str, Any]:
+        return self._global
+
+    def for_domain(self, domain: str | None) -> dict[str, Any]:
+        """该域的 effective 配置；无覆盖/未知域/None → 全局配置。"""
+        if domain and domain in self._domains:
+            return self._domains[domain]
+        return self._global
+
+    def has_override(self, domain: str | None) -> bool:
+        return bool(domain) and domain in self._domains
+
+    def domain_key(self, domain: str | None) -> str:
+        """provider 缓存键的域段：有覆盖用域 id，否则全局键。"""
+        return domain if self.has_override(domain) else GLOBAL_DOMAIN_KEY
+
+    def reload(
+        self,
+        global_cfg: dict[str, Any],
+        domain_cfgs: dict[str, dict[str, Any]] | None = None,
+        invalid: dict[str, str] | None = None,
+    ) -> None:
+        self._global = global_cfg
+        self._domains = dict(domain_cfgs or {})
+        self._invalid = dict(invalid or {})
+
+    def replace_with(self, other: "DomainConfigs") -> None:
+        """以另一实例的内容原子替换自身（保住所有持有者的引用）。"""
+        self.reload(other._global, other._domains, other._invalid)
+
+    def status(self) -> dict[str, Any]:
+        """运维可见摘要（不含密钥）——/admin/config-status 消费。"""
+        def _active(cfg: dict[str, Any]) -> Any:
+            return (cfg.get("provider") or {}).get("active_model") or (cfg.get("provider") or {}).get("model")
+
+        return {
+            "global": {"active_model": _active(self._global)},
+            "domains": {
+                did: {
+                    "active_model": _active(cfg),
+                    "rerank_model": (cfg.get("rerank") or {}).get("model"),
+                }
+                for did, cfg in self._domains.items()
+            },
+            "invalid_domains": dict(self._invalid),
+        }
+
+
+def fetch_llm_domain_overrides(
+    base_url: str | None = None,
+    timeout: float = 5.0,
+    global_cfg: dict[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """拉取各域 effective 配置。单个域失败只作废该域（回落全局），绝不致命。
+
+    返回 ``(domain_cfgs, invalid)``。清单接口不可达时返回两个空 dict——
+    兼容控制面未升级到 62号 的部署（llm_service 先到、控制面后到）。
+    ``global_cfg`` 提供时复验各域 embedding 段与全局逐字节一致（62号 B2：
+    embedding 锁全局，控制面校验之外的兜底闸）。
+    """
+    url = (base_url or CONTROL_PLANE_BASE_URL).rstrip("/")
+    try:
+        resp = httpx.get(
+            f"{url}/api/v1/system/llm_service/domains",
+            headers=control_plane_internal_headers(),
+            timeout=timeout,
+            proxy=None,
+            trust_env=False,
+        )
+        resp.raise_for_status()
+        items = (resp.json() or {}).get("items") or []
+    except Exception as exc:
+        logger.error(
+            "Cannot list llm domain overrides from control plane (%s): %s — "
+            "falling back to global-only config", url, exc,
+        )
+        return {}, {}
+
+    domain_cfgs: dict[str, dict[str, Any]] = {}
+    invalid: dict[str, str] = {}
+    for entry in items:
+        did = str((entry or {}).get("domain_id") or "")
+        if not did:
+            continue
+        try:
+            r = httpx.get(
+                f"{url}/api/v1/system/llm_service/effective/{did}",
+                headers=control_plane_internal_headers(),
+                timeout=timeout,
+                proxy=None,
+                trust_env=False,
+            )
+            r.raise_for_status()
+            data = yaml.safe_load(r.text)
+            if not isinstance(data, dict):
+                raise ValueError(f"non-dict YAML for domain {did!r}")
+            data = _resolve_env_vars(data)
+            _validate_required(data)
+            if global_cfg is not None and data.get("embedding") != global_cfg.get("embedding"):
+                raise ValueError(
+                    "embedding section differs from global — per-domain embedding "
+                    "is locked to global in phase 1 (62号)"
+                )
+            domain_cfgs[did] = data
+        except Exception as exc:
+            invalid[did] = str(exc)
+            logger.error(
+                "llm domain override for %s discarded (domain falls back to global): %s",
+                did, exc,
+            )
+    return domain_cfgs, invalid
+
+
+def load_domain_configs(base_url: str | None = None) -> DomainConfigs:
+    """全局配置 + 各域覆盖一次拉齐。全局失败仍然致命（与现状一致）。"""
+    global_cfg = fetch_config_from_control_plane(base_url)
+    domain_cfgs, invalid = fetch_llm_domain_overrides(base_url, global_cfg=global_cfg)
+    dc = DomainConfigs(global_cfg, domain_cfgs, invalid)
+    logger.info(
+        "Loaded config from control plane: global + %d domain override(s)%s",
+        len(domain_cfgs),
+        f", {len(invalid)} discarded" if invalid else "",
+    )
+    return dc

@@ -45,7 +45,8 @@ def _is_admin_only(method: str, path: str) -> bool:
     """admin-only 写路径（member 命中 → 403）。spec §8.1。"""
     if path.startswith("/api/v1/admin/"):
         return True
-    if method in {"GET", "PUT"} and path.startswith("/api/v1/system"):
+    if method in {"GET", "PUT", "DELETE"} and path.startswith("/api/v1/system"):
+        # DELETE：62号域 LLM 覆盖的删除路由（写操作，站点管理员专属）。
         if method == "GET" and path in {"/api/v1/system/ui", "/api/v1/system/ui/raw"}:
             return False
         return True

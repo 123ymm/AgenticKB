@@ -493,3 +493,40 @@ def test_site_admin_validator_error_503_after_ttl_expiry(tmp_path, monkeypatch):
         headers = {"Authorization": f"Bearer {_token('admin')}"}
         assert c.get("/api/v1/me", headers=headers).status_code == 200
         assert c.get("/api/v1/me", headers=headers).status_code == 503
+
+
+# ----------------------------------------------------------------------
+# 62号第一期：LLM 域覆盖路由的鉴权闸门
+# ----------------------------------------------------------------------
+
+def _llm_domain_routes(app: FastAPI) -> FastAPI:
+    """62号新增路由形状的探测端点（鉴权行为由中间件统一决定）。"""
+
+    @app.delete("/api/v1/system/llm_service/domains/{domain_id}/raw")
+    def delete_override(domain_id: str):
+        return {"ok": True}
+
+    @app.get("/api/v1/system/llm_service/effective/{domain_id}")
+    def effective(domain_id: str):
+        return {"provider": {}}
+
+    return app
+
+
+def test_llm_domain_override_delete_requires_site_admin(tmp_path):
+    """DELETE 域覆盖是写操作：member 403、站点管理员放行（62号 §六 A4）。"""
+    path = "/api/v1/system/llm_service/domains/odn/raw"
+    with TestClient(_llm_domain_routes(_mw_app(tmp_path))) as c:
+        member = c.delete(path, headers={"Authorization": f"Bearer {_token('member')}"})
+        admin = c.delete(path, headers={"Authorization": f"Bearer {_token('admin')}"})
+    assert member.status_code == 403
+    assert admin.status_code == 200
+
+
+def test_llm_effective_endpoint_reachable_via_internal_secret(tmp_path):
+    """effective 端点在 _is_internal_config_read 范围内：llm_service 启动
+    期凭 X-Internal-Auth 拉取成品配置；匿名仍 401。"""
+    path = "/api/v1/system/llm_service/effective/odn"
+    with TestClient(_llm_domain_routes(_mw_app(tmp_path))) as c:
+        assert c.get(path).status_code == 401
+        assert c.get(path, headers={"X-Internal-Auth": "test-ivs"}).status_code == 200

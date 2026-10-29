@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from string import Template
 
-from llm_service.config import dig
+from llm_service.config import DomainConfigs, dig
 from llm_service.db import LlmRuntimeDB
 from llm_service.providers.base import ProviderProtocol
 from llm_service.providers.model_base import ModelProviderProtocol
@@ -19,6 +19,7 @@ from llm_service.runtime.idempotency import (
 )
 from llm_service.runtime.parser import ParseResult, parse_output
 from llm_service.runtime.persist_writer import PersistWriter, SyncChatRecord
+from llm_service.runtime.provider_resolver import ProviderResolver
 from llm_service.runtime.task_manager import TaskManager
 from llm_service.runtime.template_registry import TemplateRegistry
 
@@ -37,6 +38,8 @@ class LLMService:
         model_provider: ModelProviderProtocol | None = None,
         templates: TemplateRegistry | None = None,
         persist_writer: PersistWriter | None = None,
+        domain_configs: DomainConfigs | None = None,
+        provider_resolver: ProviderResolver | None = None,
     ):
         self._db = db
         self._config = config
@@ -56,8 +59,28 @@ class LLMService:
         self._provider_name = getattr(provider, 'provider_name', 'unknown')
         # For multi-model: use provider.default_model (resolved at construction)
         self._default_model = getattr(provider, 'default_model', config.get("provider", {}).get("model", ""))
-        # Cache of alternate chat providers keyed by provider.models entry name.
-        self._chat_providers: dict[str, ProviderProtocol] = {}
+        # 按域配置持有者 + (domain, model) provider 解析缓存（62号第一期）。
+        # 不传 domain_configs 时退化为单全局配置——与旧版行为逐字节一致。
+        self._domain_configs = domain_configs or DomainConfigs.single(config)
+        self._resolver = provider_resolver or ProviderResolver(self._domain_configs)
+        self._resolver.seed_chat(provider)
+        if model_provider is not None:
+            self._resolver.seed_model_provider(model_provider)
+
+    @property
+    def resolver(self) -> ProviderResolver:
+        """共享的 provider 解析器（ModelService/Worker/热加载复用同一实例）。"""
+        return self._resolver
+
+    @property
+    def domain_configs(self) -> DomainConfigs:
+        return self._domain_configs
+
+    def model_provider_for(self, domain: str | None = None) -> ModelProviderProtocol | None:
+        """该域的 embedding+rerank provider（embedding 锁全局，rerank 按域）。"""
+        if self._model_provider is None:
+            return None
+        return self._resolver.model_provider(domain)
 
     # ------------------------------------------------------------------
     # Template resolution
@@ -155,37 +178,24 @@ class LLMService:
             new_msgs.insert(0, {"role": "system", "content": schema_instruction.strip()})
         result["messages"] = new_msgs
 
-    def _get_chat_provider(self, model: str | None = None) -> ProviderProtocol:
-        """Return the default provider, or a cached alternate from provider.models."""
-        if not model:
-            return self._provider
-        # Exact match on default model id / active key
-        active_key = self._config.get("provider", {}).get("active_model")
-        if model in (self._default_model, active_key):
-            return self._provider
+    def _get_chat_provider(
+        self, model: str | None = None, domain: str | None = None,
+    ) -> ProviderProtocol:
+        """(domain, model) → chat provider；解析与缓存在 ProviderResolver。"""
+        return self._resolver.chat_provider(model, domain)
 
-        from llm_service.config import resolve_model_config
-        from llm_service.providers.factory import build_chat_provider
+    def _domain_default_model(self, domain: str | None) -> str | None:
+        """有覆盖域的 active_model（无覆盖域返回 None——走全局 active）。"""
+        if not domain or not self._domain_configs.has_override(domain):
+            return None
+        cfg = self._domain_configs.for_domain(domain)
+        return (cfg.get("provider") or {}).get("active_model")
 
-        models = (self._config.get("provider") or {}).get("models") or {}
-        cache_key = model
-        if cache_key not in models:
-            for key, entry in models.items():
-                if isinstance(entry, dict) and entry.get("model") == model:
-                    cache_key = key
-                    break
-
-        if cache_key in self._chat_providers:
-            return self._chat_providers[cache_key]
-
-        resolved = resolve_model_config(self._config, model_key=model)
-        provider, _ = build_chat_provider(resolved)
-        self._chat_providers[cache_key] = provider
-        return provider
-
-    def _resolve_request_model(self, model: str | None) -> tuple[str, str]:
+    def _resolve_request_model(
+        self, model: str | None, domain: str | None = None,
+    ) -> tuple[str, str]:
         """Return (provider_name, model_id) for persistence / routing."""
-        provider = self._get_chat_provider(model)
+        provider = self._get_chat_provider(model, domain)
         return (
             getattr(provider, "provider_name", self._provider_name),
             getattr(provider, "default_model", model or self._default_model),
@@ -205,6 +215,7 @@ class LLMService:
         schema: dict | None,
         *,
         model: str | None = None,
+        domain: str | None = None,
     ) -> ParseResult:
         """Execute a single chat attempt: call provider -> parse -> write result.
 
@@ -237,7 +248,7 @@ class LLMService:
                     response_format["schema"] = schema
             else:
                 response_format = None
-            provider = self._get_chat_provider(model)
+            provider = self._get_chat_provider(model, domain)
             resp = await provider.complete(
                 messages=messages, params=params,
                 response_format=response_format,
@@ -419,7 +430,16 @@ class LLMService:
         actual_messages = resolved["messages"] or [{"role": "user", "content": json.dumps(input or {})}]
         actual_expected_type = resolved["expected_output_type"] or "json_object"
         actual_schema = resolved["output_schema"]
-        provider_name, model_id = self._resolve_request_model(model)
+        # 62号：未显式指定 model 且该域有覆盖 → 域 active_model 兜底
+        # （无覆盖域保持全局 active，行为与单配置时代一致）。
+        if model is None:
+            model = self._domain_default_model(knowledge_domain)
+            if model:
+                logger.info(
+                    "domain=%s model=%s source=override (submit default)",
+                    knowledge_domain, model,
+                )
+        provider_name, model_id = self._resolve_request_model(model, knowledge_domain)
 
         return await self._submit_with_idempotency(
             idempotency_key=idempotency_key,
@@ -499,6 +519,15 @@ class LLMService:
         max_attempts: int = 2,
         priority: int = 100,
     ) -> str:
+        # 62号：未显式指定 model 且该域有覆盖 → 域 rerank.model 兜底（提交侧
+        # 解析后落库，与 submit_embedding 的既有约定一致）。
+        if model is None and self._domain_configs.has_override(knowledge_domain):
+            model = self._resolver.rerank_default_model(knowledge_domain) or None
+            if model:
+                logger.info(
+                    "domain=%s rerank_model=%s source=override (submit default)",
+                    knowledge_domain, model,
+                )
         actual_model = model or getattr(self._model_provider, "_rerank_model", None) or dig(self._config, "rerank", "model")
 
         return await self._submit_with_idempotency(
@@ -571,7 +600,15 @@ class LLMService:
             response_format = None
 
         try:
-            provider = self._get_chat_provider(model)
+            # 62号：未显式指定 model 且该域有覆盖 → 域 active_model 兜底。
+            if model is None:
+                model = self._domain_default_model(knowledge_domain)
+                if model:
+                    logger.info(
+                        "domain=%s model=%s source=override (execute default)",
+                        knowledge_domain, model,
+                    )
+            provider = self._get_chat_provider(model, knowledge_domain)
             provider_name = getattr(provider, "provider_name", self._provider_name)
             model_id = getattr(provider, "default_model", model or self._default_model)
             resp = await provider.complete(

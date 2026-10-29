@@ -157,7 +157,15 @@ class Worker:
 
     async def _execute_chat(self, task_id: str) -> None:
         """Execute a chat task: read request -> delegate to shared execution."""
-        req = await self._db.fetchone("SELECT * FROM agent_llm_requests WHERE task_id = %s", (task_id,))
+        # 62号：knowledge_domain 与请求行一次取回——执行侧按域解析 provider
+        # （model 已在提交侧落库；域解析保证用该域 effective 的密钥/端点）。
+        req = await self._db.fetchone(
+            "SELECT r.*, t.knowledge_domain AS knowledge_domain "
+            "FROM agent_llm_requests r "
+            "JOIN agent_llm_tasks t ON t.id = r.task_id "
+            "WHERE r.task_id = %s",
+            (task_id,),
+        )
         if not req:
             await self._mgr.fail(task_id, "missing_request", "no request row found")
             return
@@ -173,6 +181,7 @@ class Worker:
                 task_id, request_id, messages, params,
                 expected_type, schema,
                 model=req.get("model"),
+                domain=req.get("knowledge_domain"),
             )
         except Exception as e:
             # execute_chat_attempt no longer re-raises — it handles _mgr.fail() internally.
@@ -297,7 +306,10 @@ class Worker:
         top_n = input_data.get("top_n")
         request_id = req["id"]
 
-        task_row = await self._db.fetchone("SELECT attempt_count, max_attempts FROM agent_llm_tasks WHERE id = %s", (task_id,))
+        task_row = await self._db.fetchone(
+            "SELECT knowledge_domain, attempt_count, max_attempts FROM agent_llm_tasks WHERE id = %s",
+            (task_id,),
+        )
         if not task_row:
             return
         attempt_no = task_row["attempt_count"] + 1
@@ -313,7 +325,13 @@ class Worker:
 
         start = time.monotonic()
         try:
-            result = await self._model_provider.rerank(query, documents, model=model, top_n=top_n)
+            # 62号：按任务域选 rerank provider（无覆盖域 = 全局实例）。
+            domain = task_row.get("knowledge_domain")
+            rerank_provider = (
+                self._svc.model_provider_for(domain)
+                if self._svc is not None else None
+            ) or self._model_provider
+            result = await rerank_provider.rerank(query, documents, model=model, top_n=top_n)
             latency = int((time.monotonic() - start) * 1000)
             finished = datetime.now(timezone.utc).isoformat()
 

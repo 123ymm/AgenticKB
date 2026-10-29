@@ -280,6 +280,77 @@ class YamlConfigService:
         return sorted(p.stem for p in system_dir.glob("*.yaml"))
 
     # ------------------------------------------------------------------
+    # LLM domain overrides (62号第一期：chat+rerank 按域覆盖，embedding 锁全局)
+    # ------------------------------------------------------------------
+
+    def _llm_domains_dir(self) -> Path:
+        return self.config_dir / "system" / "llm_service.domains"
+
+    def _llm_global_cfg(self) -> dict[str, Any]:
+        cfg = self._load_yaml(self.config_dir / "system" / "llm_service.yaml")
+        if not cfg:
+            raise HTTPException(
+                status_code=500, detail="llm_service.yaml missing in control plane config",
+            )
+        return cfg
+
+    def list_llm_domain_overrides(self) -> list[dict[str, Any]]:
+        """有覆盖文件的域清单 + 摘要（不含密钥）。"""
+        items: list[dict[str, Any]] = []
+        for p in sorted(self._llm_domains_dir().glob("*.yaml")):
+            data = self._load_yaml(p)
+            items.append({
+                "domain_id": p.stem,
+                "active_model": (data.get("provider") or {}).get("active_model"),
+                "rerank_model": (data.get("rerank") or {}).get("model"),
+            })
+        return items
+
+    def get_llm_domain_override_yaml(self, domain_id: str) -> str:
+        path = self._llm_domains_dir() / f"{domain_id}.yaml"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="config_not_found")
+        return path.read_text(encoding="utf-8")
+
+    def update_llm_domain_override_yaml(self, domain_id: str, yaml_text: str) -> None:
+        """保存域覆盖：YAML 解析 → 结构校验 → merge 后可解析性校验 → 落盘。
+
+        域必须在 domain_registry 中（防手误给不存在的域配覆盖）。
+        """
+        registry = self._load_domain_registry()
+        if domain_id not in registry:
+            raise HTTPException(status_code=404, detail="domain_not_found")
+        override = _parse_llm_override_yaml(yaml_text)
+        _validate_llm_domain_override(override)
+        merged = _deep_merge(self._llm_global_cfg(), override)
+        _validate_llm_effective_models(merged)
+        self._save_yaml_text(self._llm_domains_dir() / f"{domain_id}.yaml", yaml_text)
+
+    def delete_llm_domain_override(self, domain_id: str) -> bool:
+        """删除域覆盖文件；不存在返回 False（幂等）。"""
+        path = self._llm_domains_dir() / f"{domain_id}.yaml"
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def llm_effective_config(self, domain_id: str) -> dict[str, Any]:
+        """merge 后的完整 effective 配置（llm_service 经 internal auth 拉取）。
+
+        merge 只在此处做（62号裁定一）——绕过保存接口直接改盘上文件时，
+        这里的校验仍是一道闸；破了返回 400，llm_service 侧会作废该域回落全局。
+        """
+        override_path = self._llm_domains_dir() / f"{domain_id}.yaml"
+        if not override_path.exists():
+            return self._llm_global_cfg()
+        override = self._load_yaml(override_path)
+        if override:
+            _validate_llm_domain_override(override)
+        merged = _deep_merge(self._llm_global_cfg(), override)
+        _validate_llm_effective_models(merged)
+        return merged
+
+    # ------------------------------------------------------------------
     # Serving config snapshot (consumed by agent_serving over HTTP)
     # ------------------------------------------------------------------
 
@@ -391,3 +462,124 @@ class YamlConfigService:
             return int(resp.json().get("kb_count", 0))
         except Exception:  # noqa: BLE001
             return None
+
+
+# ---------------------------------------------------------------------------
+# LLM domain override helpers (62号第一期，module-level: 纯函数便于单测)
+# ---------------------------------------------------------------------------
+
+#: 覆盖文件允许的顶层键（embedding 锁全局——出现即 400）。
+_LLM_OVERRIDE_TOP_KEYS = frozenset({"provider", "rerank"})
+#: provider 段允许的键。
+_LLM_PROVIDER_KEYS = frozenset({
+    "active_model", "models", "provider_type",
+    "timeout", "headers", "bypass_proxy",
+})
+#: rerank 段允许的键。
+_LLM_RERANK_KEYS = frozenset({
+    "base_url", "api_key", "model", "timeout", "bypass_proxy", "headers",
+})
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge *override* into *base* — nested dicts merged, not replaced.
+
+    与 llm_service/config.py 的同名函数语义一致（62号裁定一：merge 只在
+    控制面做，故此处持有一份实现，不跨服务 import）。
+    """
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def _parse_llm_override_yaml(yaml_text: str) -> dict[str, Any]:
+    """解析覆盖 YAML；解析失败/根非映射 → 400。空文件视为空覆盖。"""
+    if not yaml_text.strip():
+        return {}
+    try:
+        parsed = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="YAML root must be a mapping")
+    return parsed
+
+
+def _validate_llm_domain_override(override: dict[str, Any]) -> None:
+    """覆盖文件结构校验（fail-loud 400）。
+
+    只看覆盖自身的结构；merge 后的完整性（模型条目三要素、active_model
+    可解析）由 _validate_llm_effective_models 在 merge 结果上校验。
+    """
+    unknown = set(override) - set(_LLM_OVERRIDE_TOP_KEYS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"不允许的顶层键: {sorted(unknown)}"
+                f"（允许 {sorted(_LLM_OVERRIDE_TOP_KEYS)}；embedding 锁全局，62号第一期禁止按域覆盖）"
+            ),
+        )
+    prov = override.get("provider")
+    if prov is not None:
+        if not isinstance(prov, dict):
+            raise HTTPException(status_code=400, detail="provider 段必须是映射")
+        unknown = set(prov) - set(_LLM_PROVIDER_KEYS)
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"provider 段不允许的键: {sorted(unknown)}",
+            )
+        models = prov.get("models")
+        if models is not None and not isinstance(models, dict):
+            raise HTTPException(status_code=400, detail="provider.models 必须是映射")
+        if isinstance(models, dict):
+            for key, entry in models.items():
+                if not isinstance(entry, dict):
+                    raise HTTPException(
+                        status_code=400, detail=f"provider.models.{key} 必须是映射",
+                    )
+    rer = override.get("rerank")
+    if rer is not None:
+        if not isinstance(rer, dict):
+            raise HTTPException(status_code=400, detail="rerank 段必须是映射")
+        unknown = set(rer) - set(_LLM_RERANK_KEYS)
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"rerank 段不允许的键: {sorted(unknown)}",
+            )
+
+
+def _validate_llm_effective_models(effective: dict[str, Any]) -> None:
+    """merge 后的可解析性校验（fail-loud 400）。
+
+    ① provider.models 每个条目三要素齐全（base_url/api_key/model）——
+    覆盖可部分覆盖同名条目，但 merge 结果必须完整；
+    ② active_model 在 merge 后的 models 里可解析（键名或 API model id）。
+    """
+    prov = effective.get("provider") or {}
+    models = prov.get("models") or {}
+    for key, entry in models.items():
+        if not isinstance(entry, dict):
+            continue
+        missing = [f for f in ("base_url", "api_key", "model") if not entry.get(f)]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"provider.models.{key} merge 后仍缺必填字段 {missing}（同名部分覆盖需保证 merge 完整）",
+            )
+    active = prov.get("active_model")
+    if models and active:
+        resolvable = active in models or any(
+            isinstance(e, dict) and e.get("model") == active for e in models.values()
+        )
+        if not resolvable:
+            raise HTTPException(
+                status_code=400,
+                detail=f"active_model '{active}' 在 merge 后的 provider.models 中不可解析",
+            )

@@ -19,6 +19,7 @@ from llm_service.runtime.persist_writer import PersistWriter, SyncModelRecord
 
 if TYPE_CHECKING:
     from llm_service.db import LlmRuntimeDB
+    from llm_service.runtime.provider_resolver import ProviderResolver
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +31,33 @@ class ModelService:
                  persist_writer: PersistWriter | None = None,
                  default_embedding_model: str = "",
                  default_rerank_model: str = "",
-                 default_embedding_dimensions: int | None = None):
+                 default_embedding_dimensions: int | None = None,
+                 provider_resolver: "ProviderResolver | None" = None):
         self._provider = provider
         self._db = db
         self._persist_writer = persist_writer
         self._default_embedding_model = default_embedding_model
         self._default_rerank_model = default_rerank_model
         self._default_embedding_dimensions = default_embedding_dimensions
+        # 62号：rerank 按域解析（embedding 锁全局仍走 self._provider）。
+        # 不传 resolver 时保持旧版单 provider 行为。
+        self._resolver = provider_resolver
+
+    def _rerank_provider(self, knowledge_domain: str | None) -> ModelProviderProtocol:
+        """该域的 rerank provider（无覆盖域 = 全局实例）。"""
+        if self._resolver is None:
+            return self._provider
+        return self._resolver.model_provider(knowledge_domain)
+
+    def _rerank_model_for(self, knowledge_domain: str | None, explicit: str | None) -> str:
+        """rerank 默认模型：显式 > 域 effective（含全局兜底）> 构造期默认。"""
+        if explicit:
+            return explicit
+        if self._resolver is not None:
+            resolved = self._resolver.rerank_default_model(knowledge_domain)
+            if resolved:
+                return resolved
+        return self._default_rerank_model
 
     def _enqueue_record(self, record: SyncModelRecord) -> None:
         """Push record to PersistWriter queue (non-blocking, fire-and-forget)."""
@@ -103,7 +124,7 @@ class ModelService:
 
     async def rerank(self, body: RerankRequest) -> RerankResponse:
         t0 = datetime.now(timezone.utc)
-        model = body.model or self._default_rerank_model
+        model = self._rerank_model_for(body.knowledge_domain, body.model)
         input_json = {
             "query": body.query,
             "documents": body.documents,
@@ -111,7 +132,7 @@ class ModelService:
             "top_n": body.top_n,
         }
         try:
-            raw = await self._provider.rerank(
+            raw = await self._rerank_provider(body.knowledge_domain).rerank(
                 body.query,
                 body.documents,
                 model=model,
