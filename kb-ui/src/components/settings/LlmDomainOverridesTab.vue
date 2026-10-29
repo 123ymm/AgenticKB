@@ -97,7 +97,27 @@
                   :placeholder="inheritPlaceholder(globalCfg?.rerankModel)"
                   class="llm-overrides-tab__control"
                 />
-                <div class="llm-overrides-tab__field-hint">留空继承全局模型与密钥</div>
+              </el-form-item>
+              <el-form-item label="Base URL">
+                <el-input
+                  v-model="rerankBaseUrl"
+                  clearable
+                  placeholder="继承全局"
+                  class="llm-overrides-tab__control"
+                />
+              </el-form-item>
+              <el-form-item label="API Key">
+                <el-input
+                  v-model="rerankApiKey"
+                  clearable
+                  show-password
+                  type="password"
+                  placeholder="继承全局（不回显）"
+                  class="llm-overrides-tab__control"
+                />
+                <div class="llm-overrides-tab__field-hint">
+                  留空继承全局；填写后该域用独立端点/密钥调用 rerank
+                </div>
               </el-form-item>
 
               <div class="llm-overrides-tab__section-title">
@@ -236,6 +256,8 @@ const TEMPLATE = `# 域覆盖：只写与全局 llm_service.yaml 的差异（未
 #       api_key: <该域自己的 key>
 # rerank:
 #   model: rerank-pro                  # 该域默认 rerank 模型
+#   base_url: https://open.bigmodel.cn/api/paas/v4/   # 可选：该域独立 rerank 端点/密钥
+#   api_key: <该域自己的 key>
 # embedding:                           # 同维度才能保存（dimensions 继承全局，勿写）
 #   model: embedding-3
 #   base_url: https://open.bigmodel.cn/api/paas/v4/
@@ -251,6 +273,14 @@ const chatModel = computed({
 const rerankModel = computed({
   get: () => readForm(text.value, 'rerank', 'model'),
   set: (v: string) => { text.value = patchForm(text.value, 'rerank', 'model', v ?? '') },
+})
+const rerankBaseUrl = computed({
+  get: () => readForm(text.value, 'rerank', 'base_url'),
+  set: (v: string) => { text.value = patchForm(text.value, 'rerank', 'base_url', v ?? '') },
+})
+const rerankApiKey = computed({
+  get: () => readForm(text.value, 'rerank', 'api_key'),
+  set: (v: string) => { text.value = patchForm(text.value, 'rerank', 'api_key', v ?? '') },
 })
 const embeddingModel = computed({
   get: () => readForm(text.value, 'embedding', 'model'),

@@ -5,6 +5,7 @@
  * 后端 400 的结构化报文透传、删除确认/幂等空删。
  * 62号二期新增：全局基底继承 placeholder、表单字段写回 YAML 单一真相源、
  * dimensions 只读锁全局、embedding 变更确认框两条路径、高级 YAML 即所存原文。
+ * 补齐：rerank 段表单同样暴露 模型/端点/密钥 三输入，且表单改一键保留同段其余键。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
@@ -63,6 +64,8 @@ type TabVm = {
   candidates: { domain_id: string }[]
   chatModel: string
   rerankModel: string
+  rerankBaseUrl: string
+  rerankApiKey: string
   embeddingModel: string
   embeddingApiKey: string
   chatModelOptions: string[]
@@ -106,9 +109,10 @@ describe('LLM 域覆盖 tab', () => {
     vm.handleCreate()
     await flushPromises()
     expect(w.text()).toContain('cloud_core_network.yaml')
-    // 模板含用法说明与三段示例（全注释形态）
+    // 模板含用法说明与三段示例（全注释形态，rerank 示例含可选端点/密钥）
     expect(vm.text).toContain('只写与全局')
     expect(vm.text).toContain('embedding.dimensions 锁全局')
+    expect(vm.text).toContain('独立 rerank 端点/密钥')
     expect(vm.text).toContain('embedding:')
   })
 
@@ -147,18 +151,39 @@ describe('LLM 域覆盖 tab', () => {
     // chat：改选写回 provider.active_model
     vm.chatModel = 'glm-4.5v'
     expect(vm.text).toContain('active_model: glm-4.5v')
-    // rerank：新键新段
+    // rerank：新键新段（模型/端点/密钥三键，端点密钥同段共存）
     vm.rerankModel = 'rerank-odn'
     expect(vm.text).toContain('model: rerank-odn')
+    vm.rerankBaseUrl = 'https://rerank-odn.example/'
+    vm.rerankApiKey = 'rk-odn'
+    expect(vm.text).toContain('base_url: https://rerank-odn.example/')
+    expect(vm.text).toContain('api_key: rk-odn')
     // embedding：模型 + 密钥
     vm.embeddingModel = 'emb-odn'
     vm.embeddingApiKey = 'ek-odn'
     expect(vm.text).toContain('model: emb-odn')
     expect(vm.text).toContain('api_key: ek-odn')
     expect(vm.embeddingTouched).toBe(true)
-    // 清空 = 删键：rerank 段清空即整段消失
+    // 清空 = 删键：rerank 段三键全清即整段消失（只清模型时端点/密钥保留）
     vm.rerankModel = ''
+    expect(vm.text).toContain('base_url: https://rerank-odn.example/')
+    vm.rerankBaseUrl = ''
+    vm.rerankApiKey = ''
     expect(vm.text).not.toContain('rerank')
+  })
+
+  it('rerank 段 YAML 先写的端点/密钥，表单改模型时保留', async () => {
+    const w = mountTab()
+    await flushPromises()
+    const vm = w.vm as unknown as TabVm
+    await vm.select('odn')
+    vm.text = 'rerank:\n  model: rerank-pro\n  base_url: https://rk.example/\n  api_key: rk-1\n'
+    expect(vm.rerankBaseUrl).toBe('https://rk.example/')
+    expect(vm.rerankApiKey).toBe('rk-1')
+    vm.rerankModel = 'rerank-odn'
+    expect(vm.text).toContain('model: rerank-odn')
+    expect(vm.rerankBaseUrl).toBe('https://rk.example/')
+    expect(vm.rerankApiKey).toBe('rk-1')
   })
 
   it('embedding 段无差异的保存不弹确认框，直接走 PUT raw 并按热加载成功回显', async () => {
