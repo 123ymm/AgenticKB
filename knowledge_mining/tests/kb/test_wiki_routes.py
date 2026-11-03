@@ -3,6 +3,9 @@
 hex path 中文往返 / 422 定位断言 / 409 锁令牌 / links 明文 query / status。
 批次4 Task 4 追加：search 检索转发（FakeForward 桩——viewer 透传/非成员
 404 即拦/空白 422/serving 故障族 502/404 透传）。
+66号批次1 Task 1.4 追加：GET/PUT /wiki/toc（runtime 快照读+rev0 反探测 /
+draft 行读权限矩阵 / revision 历史读+null 回落 / PUT 行级乐观锁 M-1 铁律+
+页键存在性 M-4 / 发布 toc warnings 端到端 M-6）。
 """
 from __future__ import annotations
 
@@ -477,3 +480,234 @@ async def test_search_serving_404_passthrough(env):
     r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
                              params={"q": "核心网"})
     assert r.status_code == 404
+
+
+# ------------------------------------------------------------ 目录（66号批次1 Task 1.4）
+# GET /wiki/toc 缺省（runtime）读 current 快照；?draft=true 读 toc 行本身
+# （设计态编辑对象）；?revision=N 读历史快照（editor+）；PUT 整体替换草稿行。
+# 乐观锁对象是 **toc 行自身** updated_at（页 PUT 比对 kb_artifacts.updated_at
+# 的行级变体）：行已存在时 expected_updated_at 必传（缺 → 409 stale_artifact，
+# M-1 审查铁律——不静默 last-write-wins），首写免令牌（编译钩子/首次编辑）。
+
+async def test_toc_runtime_read_and_rev0_anti_probe(env):
+    """组1：runtime（viewer 可读）返回发布冻结的快照 sections；rev0 未发布
+    → 404 反探测（口径同单页读——运行态查不到即 404）。"""
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('页A')}",
+        json={"title": "页A", "body_md": "v1"})
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc")
+    assert r.status_code == 404   # 未发布：运行态无目录 → 404
+    assert "toc_not_found" in r.text
+
+    env.holder["user"] = _user("u-bob")
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "基础", "page_keys": ["页A"]}]})
+    assert r.status_code == 200, r.text
+    env.holder["user"] = _user("u-alice")
+    await _publish(env)
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["sections"] == [
+        {"section_title": "基础", "page_keys": ["页A"]}]
+    assert body["flat"] is False and body["revision"] == 1
+
+
+async def test_toc_draft_view_permissions_and_empty_fallback(env):
+    """组2：draft 视图 viewer 403（rev0 对 runtime 不可见）；editor 无 toc 行
+    → {"sections":[],"flat":true,+pages_total}；行存在 → 读行本身（返回
+    updated_at=下次 PUT 的乐观锁令牌）。"""
+    for title in ("页A", "页B"):
+        await env.client.put(
+            f"/api/artifacts/{WID}/wiki/page/{_hex(title)}",
+            json={"title": title})
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
+                             params={"draft": "true"})
+    assert r.status_code == 403
+
+    env.holder["user"] = _user("u-bob")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
+                             params={"draft": "true"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"sections": [], "flat": True, "pages_total": 2}
+
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S1", "page_keys": ["页A"]}]})
+    assert r.status_code == 200, r.text
+    row = r.json()
+    assert row["toc"] == {"sections": [
+        {"section_title": "S1", "page_keys": ["页A"]}]}
+    assert row["updated_by"] == "u-bob" and row["updated_at"]
+
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
+                             params={"draft": "true"})
+    body = r.json()
+    assert body["sections"] == [{"section_title": "S1", "page_keys": ["页A"]}]
+    assert body["flat"] is False and body["pages_total"] == 2
+    assert body["updated_at"] == row["updated_at"]
+
+
+async def test_toc_revision_history_and_null_fallback(env):
+    """组3：revision=N 历史快照读 editor+（viewer 403）；revision 不存在 →
+    404 revision_not_found；旧版快照（目录定版前发布）schema_json.toc=null →
+    flat 回落（200，不伪装成有结构）。"""
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('页A')}",
+        json={"title": "页A", "body_md": "v1"})
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S1", "page_keys": ["页A"]}]})
+    await _publish(env)   # rev1：快照冻结 toc
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
+                             params={"revision": 1})
+    assert r.status_code == 403   # 显式 revision 一律 design 角色
+
+    env.holder["user"] = _user("u-bob")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
+                             params={"revision": 1})
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "sections": [{"section_title": "S1", "page_keys": ["页A"]}],
+        "flat": False, "revision": 1}
+
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
+                             params={"revision": 99})
+    assert r.status_code == 404
+    assert "revision_not_found" in r.text
+
+    # 旧版快照回落：目录定版前发布的版本行无 toc → sections=[] flat=true
+    env.wdb.revisions[WID][1]["schema_json"]["toc"] = None
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
+                             params={"revision": 1})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"sections": [], "flat": True, "revision": 1}
+
+
+async def test_toc_put_lock_and_validation(env):
+    """组4：PUT——首写免令牌 200（返回行含 updated_at 新令牌）；行已存在缺
+    令牌 → 409 stale_artifact（M-1 铁律，信封同页 PUT 令牌失配）；stale 令牌
+    → 409；畸形 sections → 422（浅层 loc=body.sections / 深层
+    invalid_toc_shape 带路径）；页键不存在 → 422 toc_unknown_page_keys:键名
+    清单（M-4 消解）；viewer 403 / 非成员 404。"""
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('页A')}",
+        json={"title": "页A", "body_md": "v1"})
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.put(f"/api/artifacts/{WID}/wiki/toc",
+                             json={"sections": []})
+    assert r.status_code == 403
+    env.holder["user"] = _user("u-stranger")
+    r = await env.client.put(f"/api/artifacts/{WID}/wiki/toc",
+                             json={"sections": []})
+    assert r.status_code == 404   # 反探测
+
+    env.holder["user"] = _user("u-bob")
+    # 浅层畸形：sections 非列表 → pydantic loc 定位（先例：title 缺失）
+    r = await env.client.put(f"/api/artifacts/{WID}/wiki/toc",
+                             json={"sections": "不是列表"})
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == ["body", "sections"]
+    # 深层畸形：page_keys 非列表 → 422 invalid_toc_shape 带 json path 细节
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S1", "page_keys": "页A"}]})
+    assert r.status_code == 422
+    assert "invalid_toc_shape" in r.text
+
+    # 页键不存在 → 422 带具体键名（校验面即拒，发布 dropped 警示不复现）
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S1",
+                            "page_keys": ["页A", "幽灵页"]}]})
+    assert r.status_code == 422
+    assert "toc_unknown_page_keys:幽灵页" in r.text
+
+    # 首写免令牌 → 200；返回的 updated_at 即下次编辑令牌
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S1", "page_keys": ["页A"]}]})
+    assert r.status_code == 200, r.text
+    token = r.json()["updated_at"]
+
+    # 行已存在 + 缺令牌 → 409（不静默覆盖另一 editor 的目录）
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S2", "page_keys": ["页A"]}]})
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "stale_artifact"
+
+    # stale 令牌 → 409 同信封
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S2", "page_keys": ["页A"]}],
+              "expected_updated_at": "2000-01-01T00:00:00Z"})
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "stale_artifact"
+
+    # 当前令牌 → 200 且新令牌可继续链式编辑（令牌随写前进）
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S2", "page_keys": ["页A"]}],
+              "expected_updated_at": token})
+    assert r.status_code == 200, r.text
+    assert r.json()["toc"]["sections"][0]["section_title"] == "S2"
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S3", "page_keys": ["页A"]}],
+              "expected_updated_at": r.json()["updated_at"]})
+    assert r.status_code == 200, r.text
+
+
+async def test_publish_toc_warnings_end_to_end(env):
+    """Step 4（M-6 遗留端到端）：目录只收录页A（页B 未收录）→ 发布响应
+    warnings 真带 toc_appended_page_keys:页B；检出后目录补录页B、删页A（目录
+    仍引用页A）→ 再发布 → toc_dropped_page_keys:页A。发布走 art_svc.publish
+    → WikiLifecycle 真拼接路径（fake 只镜像 wdb 层 resolve 产物——最贴近
+    真实：警告从 db 解析浮到 HTTP 响应面的链路是产品代码）。"""
+    for title, body in (("页A", "a"), ("页B", "b")):
+        await env.client.put(
+            f"/api/artifacts/{WID}/wiki/page/{_hex(title)}",
+            json={"title": title, "body_md": body})
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S1", "page_keys": ["页A"]}]})
+
+    result = await _publish(env)
+    assert any(w.startswith("toc_appended_page_keys:页B")
+               for w in result["warnings"]), result["warnings"]
+
+    # runtime 读到解析后的完整目录（未收录页进尾部「其他」节）
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc")
+    assert r.status_code == 200, r.text
+    assert r.json()["sections"] == [
+        {"section_title": "S1", "page_keys": ["页A"]},
+        {"section_title": "其他", "page_keys": ["页B"]}]
+
+    # 二幕：干净态检出（PUT toc 前置 ensure_draft）→ 补录页B → 删页A → 发布
+    env.holder["user"] = _user("u-bob")
+    row = env.wdb.draft_tocs[WID]
+    r = await env.client.put(
+        f"/api/artifacts/{WID}/wiki/toc",
+        json={"sections": [{"section_title": "S1",
+                            "page_keys": ["页A", "页B"]}],
+              "expected_updated_at": row["updated_at"].isoformat()})
+    assert r.status_code == 200, r.text
+    r = await env.client.request(
+        "DELETE", f"/api/artifacts/{WID}/wiki/page/{_hex('页A')}",
+        json={"expected_updated_at": await _token(env)})
+    assert r.status_code == 200, r.text
+    env.holder["user"] = _user("u-alice")
+    result = await _publish(env)
+    assert any(w.startswith("toc_dropped_page_keys:页A")
+               for w in result["warnings"]), result["warnings"]

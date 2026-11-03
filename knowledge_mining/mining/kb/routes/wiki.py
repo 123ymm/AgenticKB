@@ -1,11 +1,13 @@
 """Wiki 制品 REST 路由 —— /api/artifacts/{artifact_id}/wiki/*（63号 §5.5）。
 
-十四端点：pages 清单 / page 单页读·改·删 / links 出入边 / status units 进度 /
-search 三通道检索转发（批次4 Task 4：ROLE_RUNTIME_READ 前置 → httpx 转发
-serving internal /artifact-wiki-search，响应原样透传）/
-sources 来源绑定三端点（批次3：GET/PUT/DELETE——绑定 kb 目录 + 脏标记观测）/
-compile 编译四端点（批次3 Task 3：启动/进度/目录确认/取消——业务在
-CompileService，见 services/wiki_compile_service.py）。
+十六端点：toc 目录读·写（66号批次1 Task 1.4：runtime/revision 快照读 +
+draft 行读 + PUT 整体替换，行级乐观锁）/ pages 清单 / page 单页读·改·删 /
+links 出入边 / status units 进度 / search 三通道检索转发（批次4 Task 4：
+ROLE_RUNTIME_READ 前置 → httpx 转发 serving internal
+/artifact-wiki-search，响应原样透传）/ sources 来源绑定三端点（批次3：
+GET/PUT/DELETE——绑定 kb 目录 + 脏标记观测）/ compile 编译四端点（批次3
+Task 3：启动/进度/目录确认/取消——业务在 CompileService，见
+services/wiki_compile_service.py）。
 业务与权限全部在服务层。
 
 网关铁律：page_key 走 URL path 一律 UTF-8 hex 传输（raw path 含 % 即 400）——
@@ -14,7 +16,8 @@ page_key 是明文 query 参数（query 不经网关 path 校验）。
 
 权限铁律：rev0（设计态）对 runtime 角色不可见——draft=true 或显式 revision
 一律 design 角色（viewer → 403，对齐表格 diff/列定义模式）；DELETE 锁令牌随
-body（对齐表格 RowDeleteReq 模式）。
+body（对齐表格 RowDeleteReq 模式）。toc PUT 的锁令牌是 **toc 行** 的
+updated_at（行已存在时必传——铁律见 wiki_service.save_toc）。
 """
 from __future__ import annotations
 
@@ -118,6 +121,18 @@ class WikiCompileCancelReq(BaseModel):
     expected_updated_at: str | None = None
 
 
+class WikiTocPut(BaseModel):
+    """PUT 目录草稿（66号批次1 Task 1.4）：page_key 级目录整体替换。
+    sections 浅形态 pydantic 拦（非列表 → 422 loc=body.sections，先例=页
+    PUT 的 title 缺失）；深层畸形（节/键形态）与页键存在性在 service
+    （invalid_toc_shape / toc_unknown_page_keys 带具体细节，先例=
+    invalid_frontmatter 的裸 code:detail 透传）。expected_updated_at 是
+    **toc 行**的乐观锁令牌（行已存在时必传，缺 → 409 stale_artifact；
+    首写免令牌——铁律见 wiki_service.save_toc）。"""
+    sections: list[Any]
+    expected_updated_at: str | None = None
+
+
 # ---------------------------------------------------------------- helpers
 
 #: WikiError.code → HTTP 状态（"invalid_frontmatter:字段" 按前缀归并）。
@@ -129,6 +144,13 @@ _WIKI_HTTP_STATUS: dict[str, int] = {
     "artifact_not_found": 404,
     "source_not_found": 404,
     "compile_not_found": 404,
+    # 66号批次1 Task 1.4：目录三码——rev0 未发布反探测 / 快照版本不存在 /
+    # 目录形态或页键校验（后两者带细节后缀，裸 detail 透传，先例=
+    # invalid_frontmatter）。
+    "toc_not_found": 404,
+    "revision_not_found": 404,
+    "invalid_toc_shape": 422,
+    "toc_unknown_page_keys": 422,
     "stale_artifact": 409,
     "page_key_conflict": 409,
     "compile_in_progress": 409,
@@ -161,6 +183,7 @@ _WIKI_MESSAGES: dict[str, str] = {
     "invalid_compile_state": "编译状态不允许该操作（如确认目录仅限 "
                              "awaiting_toc 态）",
     "compile_not_found": "该制品尚无编译批次（先启动编译）",
+    "toc_not_found": "该制品尚无已发布目录（先发布或切草稿视图编辑）",
     "no_sources": "未绑定任何知识库来源，请先在来源面板绑定",
     # 上限数从服务常量派生（审查 Minor：文案与 MAX_UNITS 不双源漂移）。
     "too_many_units": f"绑定范围内检索单元超上限（{MAX_UNITS}），"
@@ -204,6 +227,44 @@ def _decode_hex(page_key_hex: str) -> str:
 
 
 # --------------------------------------------------------------- endpoints
+
+@router.get("/{artifact_id}/wiki/toc")
+async def get_toc(
+    artifact_id: str,
+    draft: bool = Query(default=False),
+    revision: int | None = Query(default=None, ge=1),
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_wiki_service),
+):
+    """目录读（66号批次1 Task 1.4，draft/revision 路由对齐 pages）：缺省
+    runtime 读 current 快照 sections；?draft=true 读 toc 行本身（附
+    pages_total/updated_at）；?revision=N 读历史快照。"""
+    try:
+        return await svc.toc(
+            user=user, artifact_id=artifact_id,
+            draft=draft, revision=revision)
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+@router.put("/{artifact_id}/wiki/toc")
+async def put_toc(
+    artifact_id: str,
+    body: WikiTocPut,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_wiki_service),
+):
+    """PUT 目录草稿（整体替换）。返回完整 toc 行（updated_at=下次编辑的
+    乐观锁令牌）。"""
+    try:
+        return await svc.save_toc(
+            user=user, artifact_id=artifact_id,
+            toc={"sections": body.sections},
+            expected_updated_at=body.expected_updated_at,
+        )
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
 
 @router.get("/{artifact_id}/wiki/pages")
 async def list_pages(

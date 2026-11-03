@@ -30,6 +30,9 @@ from knowledge_mining.mining.kb.db_wiki import (
     compute_page_edges,
     normalize_page_key,
 )
+# 66号批次1 Task 1.4：目录形态校验纯函数（权威定义处，同 wiki_compile_pages
+# 直连先例——单向下依赖：db_wiki_toc → db_wiki，与本模块无环）。
+from knowledge_mining.mining.kb.db_wiki_toc import validate_toc
 # 批次3决策7：发布前确定性校验。直连 wiki_compile_pages（校验函数权威定义
 # 处——经 wiki_compile_service 转出多一层间接，审查 Minor；单向下依赖无环）。
 from knowledge_mining.mining.kb.services.wiki_compile_pages import (
@@ -567,6 +570,101 @@ class WikiService:
         return await self._wdb.list_links(
             artifact_id, revision=rev, page_key=page_key,
             direction=direction)
+
+    # ------------------------------------------------------ 目录读写（66号批次1 Task 1.4）
+
+    async def _snapshot_toc(self, artifact_id: str, revision: int) -> dict[str, Any]:
+        """版本快照目录读（runtime/revision 共用）：kb_artifact_revisions.
+        schema_json 的 toc 字段。行不存在 → revision_not_found 404；toc 字段
+        null/畸形（目录定版前发布的旧版快照）→ sections=[] flat=true 回落
+        （不伪装成有结构）。"""
+        snap = await self._wdb.get_revision_snapshot(artifact_id, revision)
+        if snap is None:
+            raise WikiError("revision_not_found")
+        toc = snap.get("toc") if isinstance(snap, dict) else None
+        sections = toc.get("sections") if isinstance(toc, dict) else None
+        if not isinstance(sections, list):
+            sections = []
+        return {"sections": sections, "flat": not sections,
+                "revision": revision}
+
+    async def toc(
+        self, user: dict[str, Any], artifact_id: str, *, draft: bool = False,
+        revision: int | None = None,
+    ) -> dict[str, Any]:
+        """目录读三口径（对齐 pages 端点的 draft/revision 路由）：
+
+        - draft=true（ROLE_DESIGN）：读 **toc 行本身**（设计态编辑对象）+ 附
+          pages_total（当前设计态视图页数，供前端显示未收录数）。无行 →
+          {"sections":[],"flat":true}（空目录=平铺）。pages_total 的 revision
+          照 _design_revision 口径：draft_open 时 rev0，干净态投影 current。
+        - revision=N（ROLE_DESIGN，历史读）：读该版快照；不存在 → 404。
+        - 缺省（ROLE_RUNTIME_READ）：读 current_revision 快照；未发布（rev0）
+          → toc_not_found 404（反探测，口径同单页读——运行态查不到即 404）。
+        """
+        if draft or revision is not None:
+            if draft:
+                rev = await self._design_revision(user, artifact_id, None)
+                row = await self._wdb.get_draft_toc(artifact_id)
+                pages_total = await self._wdb.count_pages(artifact_id, rev)
+                if row is None:
+                    return {"sections": [], "flat": True,
+                            "pages_total": pages_total}
+                sections = ((row.get("toc") or {}).get("sections")) or []
+                return {
+                    "sections": sections,
+                    "flat": not sections,
+                    "pages_total": pages_total,
+                    "updated_at": row.get("updated_at"),
+                    "updated_by": row.get("updated_by"),
+                }
+            await self._design_revision(user, artifact_id, revision)
+            return await self._snapshot_toc(artifact_id, int(revision or 0))
+        rev = await self._runtime_revision(user, artifact_id)
+        if rev <= 0:
+            raise WikiError("toc_not_found")
+        return await self._snapshot_toc(artifact_id, rev)
+
+    async def save_toc(
+        self, user: dict[str, Any], artifact_id: str, toc: Any, *,
+        expected_updated_at: Any = None,
+    ) -> dict[str, Any]:
+        """PUT 目录草稿行（整体替换）。
+
+        乐观锁对象是 **toc 行自身** updated_at（页 PUT 比对 kb_artifacts.
+        updated_at 的行级变体）：行已存在时 expected_updated_at 必传——缺令牌
+        → WikiError("stale_artifact") 409（Task 1.2 审查 M-1 铁律：两 editor
+        并发改目录不静默 last-write-wins；信封同页 PUT 令牌失配先例）；行不
+        存在（首次创建）免令牌（编译钩子/首次编辑场景）。
+
+        校验次序（畸形优先于 stale——对齐 db 层审查 I-2：校验失败不占行锁；
+        且全部失败零副作用在 ensure_draft 之前）：①validate_toc 形态（422
+        invalid_toc_shape:路径）②行存在缺令牌 409 ③ensure_draft 检出（页键
+        校验对象是 rev0 草稿页）④页键存在性——body 全部 page_keys 必须存在
+        于 rev0，缺 → 422 toc_unknown_page_keys:键名清单（审查 M-4 消解：写
+        入面即拒，发布 dropped 警示不再承担逗号歧义）⑤wdb.upsert_draft_toc
+        （内部重复形态校验无害 + 权威 FOR UPDATE 比对）。返回完整 toc 行
+        （updated_at=下次编辑的新令牌）。
+        """
+        await self._artifacts._assert_role(user, artifact_id, *ROLE_DESIGN)
+        try:
+            normalized = validate_toc(toc)
+        except ValueError as exc:
+            raise WikiError(f"invalid_toc_shape:{exc}") from None
+        if await self._wdb.get_draft_toc(artifact_id) is not None \
+                and expected_updated_at is None:
+            raise WikiError("stale_artifact")
+        await self._wdb.ensure_draft(artifact_id)
+        listing = await self._wdb.list_pages(artifact_id, revision=0)
+        known = {str(meta["page_key"]) for meta in listing}
+        wanted = {key for sec in normalized["sections"]
+                  for key in sec["page_keys"]}
+        missing = sorted(wanted - known)
+        if missing:
+            raise WikiError("toc_unknown_page_keys:" + ",".join(missing))
+        return await self._wdb.upsert_draft_toc(
+            artifact_id, toc, updated_by=str(user["id"]),
+            expected_updated_at=_expected_dt(expected_updated_at))
 
     async def status(self, user: dict[str, Any], artifact_id: str) -> dict[str, Any]:
         """units 进度（运行态信息）：{revision, units 四计数}。重启自愈——

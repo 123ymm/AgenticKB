@@ -1557,7 +1557,12 @@ async def test_publish_validation_dangling_blocks_and_manual_warns(env):
     assert any("人工裸页" in w and "密度" in w for w in warnings)
     result = await env.art_svc.publish(
         user=_user("u-alice"), artifact_id=WID, change_summary="rev1")
-    assert result["revision"] == 1 and len(result["warnings"]) == 2
+    # 66号批次1 Task 1.4 后 fake publish 对齐真实现（解析冻结+warnings）：
+    # 编译 completed 落的 toc 行只收录编译页，人工新增的悬空机页/人工裸页
+    # 未收录 → 追加 1 条 appended 警示（真库路径同数）。
+    assert result["revision"] == 1 and len(result["warnings"]) == 3
+    assert any(w.startswith("toc_appended_page_keys:")
+               for w in result["warnings"])
 
 
 async def test_publish_validation_exempt_derived_types(env):

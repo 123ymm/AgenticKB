@@ -647,6 +647,29 @@ class WikiDB:
 
     # ------------------------------------------------------------ 生命周期
 
+    async def get_draft_toc(self, artifact_id: str) -> dict[str, Any] | None:
+        """目录草稿行读（66号批次1 Task 1.4）：无行（从未编辑过目录）→ None。
+        连接编排在此、查询逻辑在 db_wiki_toc（与 upsert_draft_toc 同款分层）。"""
+        from .db_wiki_toc import get_draft_toc as _get_toc
+        async with self._pool.connection() as conn:
+            return await _get_toc(conn, artifact_id)
+
+    async def get_revision_snapshot(
+        self, artifact_id: str, revision: int,
+    ) -> dict[str, Any] | None:
+        """版本快照 schema_json 读（66号批次1 Task 1.4——runtime/revision 目录
+        读取口径：kb_artifact_revisions.schema_json 的 toc 字段）。行不存在 →
+        None（service 翻 revision_not_found 404）；toc 字段缺失/null 由 service
+        回落 flat（旧版快照——目录定版前发布的版本行无 toc，不伪装）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """SELECT schema_json FROM kb_artifact_revisions
+                   WHERE artifact_id = %s AND revision = %s""",
+                (artifact_id, int(revision)),
+            )
+            row = await cur.fetchone()
+            return dict(row)["schema_json"] if row else None
+
     async def upsert_draft_toc(
         self, artifact_id: str, toc: Any, updated_by: str = "",
         expected_updated_at: Any = None,

@@ -132,6 +132,18 @@ class FakeWikiDB:
     # validate_toc 纯函数，锁语义同构：行存在且令牌失配 → stale_artifact，
     # 行不存在首写跳锁）----------------------------------------------------
 
+    async def get_draft_toc(self, artifact_id: str) -> dict | None:
+        row = self.draft_tocs.get(artifact_id)
+        return dict(row) if row else None
+
+    async def get_revision_snapshot(
+        self, artifact_id: str, revision: int,
+    ) -> dict | None:
+        """镜像 WikiDB.get_revision_snapshot：返回 schema_json 或 None（行
+        不存在）——toc 字段缺失/null 的回落判定在 service（单点逻辑）。"""
+        row = self.revisions.get(artifact_id, {}).get(int(revision))
+        return dict(row)["schema_json"] if row else None
+
     async def upsert_draft_toc(
         self, artifact_id: str, toc, updated_by: str = "",
         expected_updated_at=None,
@@ -299,8 +311,15 @@ class FakeWikiDB:
             for p in sorted(rev0.values(),
                             key=lambda r: (r["ordinal"], r["page_key"]))
         ]
+        # 66号批次1 Task 1.4：镜像真 publish 的目录定版——草稿行同事务解析
+        # 冻结进快照 + warnings 随返回值（解析口径复用真纯函数，无双实现）。
+        from knowledge_mining.mining.kb.db_wiki_toc import resolve_toc_payload
+        resolved_toc, toc_warnings = resolve_toc_payload(
+            (self.draft_tocs.get(artifact_id) or {}).get("toc"), manifest)
         self.revisions.setdefault(artifact_id, {})[new_rev] = {
-            "revision": new_rev, "schema_json": {"pages": manifest},
+            "revision": new_rev,
+            "schema_json": {"pages": manifest, "toc": resolved_toc,
+                            "glossary": []},
             "row_count": len(rev0), "change_summary": change_summary,
             "published_by": published_by,
         }
@@ -310,7 +329,8 @@ class FakeWikiDB:
         art["status"] = "published"
         art["draft_open"] = False
         self._touch(artifact_id)
-        return {"revision": new_rev, "page_count": len(rev0)}
+        return {"revision": new_rev, "page_count": len(rev0),
+                "warnings": toc_warnings}
 
     async def rollback_to(
         self, artifact_id: str, revision: int, *, expected_updated_at=None,

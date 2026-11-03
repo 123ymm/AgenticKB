@@ -184,16 +184,12 @@ def derive_compile_toc(
     return _derive_toc_from_manifest(page_manifest, section_titles=titles)
 
 
-async def resolve_toc(
-    conn: Any, artifact_id: str, page_manifest: list[dict[str, Any]],
+def resolve_toc_payload(
+    draft_toc: Any, page_manifest: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], list[str]]:
-    """发布目录解析（publish 同事务调用）→ (toc, warnings)。
-
-    有 toc 行：死键剔除（warnings 记 toc_dropped_page_keys:键1,键2）+
-    未收录现存页追加尾部「其他」节（warnings 记 toc_appended_page_keys）；
-    空节保留（用户显式组织的节结构不因页删除静默消失）。无 toc 行：按
-    ordinal 派生（见 _derive_toc_from_manifest），无警示。两种路径都保证
-    返回完整 page_key 级目录（所有现存页都出现在某节中）。
+    """发布目录解析的纯函数体（无 IO）——真 resolve_toc 与测试 fake 的
+    publish 共用同一实现（66号批次1 Task 1.4：fake 只剩存储镜像，解析口径
+    不再双源）。draft_toc=None（无 toc 行）→ 按 ordinal 派生，无警示。
 
     窄防御（审查 M-3）：toc 列是 JSONB 无库级形态约束，绕过写路径校验的
     直插脏数据（sections 非 list / 节非 dict / page_keys 非 list）统一
@@ -201,11 +197,10 @@ async def resolve_toc(
     优于炸发布；写路径（upsert_draft_toc）已有 validate_toc 拦截。"""
     existing_keys = [str(p["page_key"]) for p in page_manifest]
     existing = set(existing_keys)
-    row = await get_draft_toc(conn, artifact_id)
-    if row is None:
+    if draft_toc is None:
         return _derive_toc_from_manifest(page_manifest), []
 
-    draft = row["toc"] if isinstance(row["toc"], dict) else {}
+    draft = draft_toc if isinstance(draft_toc, dict) else {}
     sections_in = draft.get("sections")
     if not isinstance(sections_in, list):
         sections_in = []
@@ -235,3 +230,18 @@ async def resolve_toc(
     if appended:
         warnings.append("toc_appended_page_keys:" + ",".join(appended))
     return {"sections": sections_out}, warnings
+
+
+async def resolve_toc(
+    conn: Any, artifact_id: str, page_manifest: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[str]]:
+    """发布目录解析（publish 同事务调用）→ (toc, warnings)。
+
+    有 toc 行：死键剔除（warnings 记 toc_dropped_page_keys:键1,键2）+
+    未收录现存页追加尾部「其他」节（warnings 记 toc_appended_page_keys）；
+    空节保留（用户显式组织的节结构不因页删除静默消失）。无 toc 行：按
+    ordinal 派生（见 _derive_toc_from_manifest），无警示。两种路径都保证
+    返回完整 page_key 级目录（所有现存页都出现在某节中）。"""
+    row = await get_draft_toc(conn, artifact_id)
+    return resolve_toc_payload(
+        None if row is None else row["toc"], page_manifest)
