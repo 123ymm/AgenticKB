@@ -159,6 +159,16 @@ _KB_ARTIFACTS_DDL = (
     / "schemas"
     / "017_kb_artifacts.sql"
 )
+# 63号批次1：wiki 制品底座——来源绑定 + wiki 三表 + 检索单元 HNSW（自包含、
+# 身份列无 FK；batches 通道通用化折在 017；存量库同文版本化迁移
+# =core/20261021_010_wiki_artifacts；vector 扩展由链首 002_asset_core 保证）。
+_WIKI_ARTIFACTS_DDL = (
+    _REPO_ROOT
+    / "databases"
+    / "kb"
+    / "schemas"
+    / "018_wiki_artifacts.sql"
+)
 # KB 硬删任务化（013）：status 加 deleting + kb_purge_tasks 进度表。
 _KB_PURGE_TASKS_DDL = (
     _REPO_ROOT / "databases" / "kb" / "schemas" / "013_kb_purge_tasks.sql"
@@ -272,6 +282,9 @@ def domain_schema_paths() -> tuple[Path, ...]:
         _KNOWLEDGE_ACCESS_RECORD_PAYLOADS_DDL,
         # 61号表格知识制品：六张自包含表，紧跟 016（链尾）。
         _KB_ARTIFACTS_DDL,
+        # 63号批次1：wiki 制品底座四表（自包含，挂链尾；HNSW 依赖 vector 扩展，
+        # 链首 002_asset_core 已 CREATE EXTENSION IF NOT EXISTS vector）。
+        _WIKI_ARTIFACTS_DDL,
     )
 
 

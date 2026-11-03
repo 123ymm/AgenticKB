@@ -30,6 +30,7 @@ from knowledge_mining.mining.api.routes.retrieval_records import (
 )
 from knowledge_mining.mining.kb.routes.kbs import router as kb_router
 from knowledge_mining.mining.kb.routes.artifacts import router as artifacts_router
+from knowledge_mining.mining.kb.routes.wiki import router as wiki_router
 from knowledge_mining.mining.kb.routes.documents import router as kb_documents_router
 from knowledge_mining.mining.kb.routes.mining import router as kb_mining_router
 from knowledge_mining.mining.kb.routes.folders import router as kb_folders_router
@@ -284,6 +285,9 @@ def create_app() -> FastAPI:
     # 61号：表格知识制品 REST。静态前缀 /api/artifacts（先于 kb_router 的动态
     # /api/kb/{kb_id} 注册，二者前缀不同无冲突，遵循静态先于动态惯例）。
     app.include_router(artifacts_router)
+    # 63号批次2：wiki 制品页面/链接/状态端点（同 /api/artifacts 静态前缀，
+    # 紧随 artifacts 注册——与 kb_router 动态段无交集）。
+    app.include_router(wiki_router)
     app.include_router(kb_router)
     app.include_router(kb_documents_router)
     app.include_router(kb_mining_router)

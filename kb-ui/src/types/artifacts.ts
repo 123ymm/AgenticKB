@@ -172,3 +172,160 @@ export interface ImportReport {
   missing_columns?: Array<{ column_id: string; column_name: string }>
   [key: string]: unknown
 }
+
+// ── Wiki 制品（63号 §2 对象层 / §4.3 页型）──
+
+/** 页面类型全集（63号 §4.3，与后端 PAGE_TYPES 对齐）。 */
+export type WikiPageType = 'topic' | 'glossary' | 'contradiction' | 'open_question'
+/** 页面来源（63号 §3.2）：machine=编译管线产物；manual=人工编辑。 */
+export type WikiPageOrigin = 'machine' | 'manual'
+
+/** 页面轻量清单行（GET /wiki/pages 信封 {pages}；不含 body_md/frontmatter，
+ * aliases 自 frontmatter.aliases 派生为 list[str]——阅读器链接解析兜底用）。 */
+export interface WikiPageMeta {
+  page_key: string
+  title: string
+  page_type: WikiPageType
+  origin: WikiPageOrigin
+  ordinal: number
+  flags: Record<string, unknown> | null
+  aliases: string[]
+  updated_at: string
+  updated_by: string
+}
+
+/** 单页全字段（GET/PUT /wiki/page/{hex} 同形——PUT 返回 get_page 结果，
+ * page_key 为后端归一定稿键）。 */
+export interface WikiPage extends WikiPageMeta {
+  frontmatter: Record<string, unknown>
+  body_md: string
+  provenance?: unknown[] | null
+}
+
+/** 页面边（GET /wiki/links 信封 {links}；to_page 已按 page_key ∪ aliases
+ * 归一到 canonical 键——反向链接与阅读器跳转的正确性前提）。 */
+export interface WikiLink {
+  from_page: string
+  to_page: string
+  anchor_text: string
+  status: 'valid' | 'broken'
+}
+
+/** units embedding 进度四计数（GET /wiki/status 的 units 面）。 */
+export interface WikiUnitsStatus {
+  total: number
+  done: number
+  failed: number
+  pending: number
+}
+
+/** GET /wiki/status 返回体：{revision, units 四计数}。 */
+export interface WikiStatus {
+  revision: number
+  units: WikiUnitsStatus
+}
+
+// ── Wiki 检索（63号批次4：web 搜索框 → mining 转发 serving 三通道）──
+
+/** 三通道检索单条命中（serving wiki_search 视图 results 项，snake_case 透传）。 */
+export interface WikiSearchHit {
+  page_key: string
+  title: string
+  unit_key: string
+  snippet: string
+  /** 融合/单通道得分（排序依据，前端不展示）。 */
+  score: number
+  channels: string[]
+}
+
+/** GET /wiki/search 返回体：serving wiki_search 视图原样透传。 */
+export interface WikiSearchResult {
+  view?: string
+  artifact_ref?: string
+  revision: number
+  /** 向量通道降级留痕（dense 无可用向量该通道空，关键词/融合照常返回）。 */
+  degraded_dense: boolean
+  results: WikiSearchHit[]
+}
+
+// ── Wiki 编译管线（63号批次3：sources 三端点 + compile 四端点）──
+
+/**
+ * 绑定源行（GET /wiki/sources 信封 {sources}）。dirty 三态（63号批次3
+ * 裁定）：true=绑定范围内语料已变化（建议重编译）；false=与指纹一致；
+ * null=库已不可读，无法判定（前端显示「未知」，行仍可见只隐库元数据）。
+ * dirty/kb_title/unreadable 为列表端点计算字段——PUT 响应不带（可选）。
+ */
+export interface WikiSource {
+  kb_id: string
+  /** 决策6 契约：{"directories": ["a/b", ...]}（空数组=全库）。 */
+  scope: { directories?: string[] } & Record<string, unknown>
+  status: string | null
+  fingerprint: Record<string, unknown> | null
+  created_by?: string | null
+  created_at: string
+  dirty?: boolean | null
+  kb_title?: string | null
+  unreadable?: boolean
+}
+
+/** 目录页提示（toc 树叶子；POST /wiki/compile/toc 请求体同构）。 */
+export interface WikiTocPageHint {
+  title: string
+  cluster_ids: string[]
+  page_type: string
+}
+
+/** 目录节（awaiting_toc 时 status.toc 数组元素 / 确认请求体元素）。 */
+export interface WikiTocSection {
+  section_title: string
+  page_hints: WikiTocPageHint[]
+}
+
+/** 编译状态机全集（批次3 决策1；无批时后端 404 compile_not_found）。 */
+export type WikiCompileState =
+  | 'preparing' | 'awaiting_toc' | 'writing'
+  | 'completed' | 'failed' | 'cancelled'
+
+/** 编译报告计数（prepare 与 writing 两段合并；缺项由端点补 0/省略）。 */
+export interface WikiCompileStats {
+  /** prepare 段：取材单元数 / 聚类数 / 向量覆盖率。 */
+  unit_count?: number
+  cluster_count?: number
+  embedded_ratio?: number
+  /** writing 段。 */
+  pages_written?: number
+  failed_pages?: number
+  dropped_pages?: number
+  broken_links?: number
+  dangling_pages?: number
+  /** 专页计数（质量调用 + 术语表派生）。 */
+  contradiction_pages?: number
+  open_question_pages?: number
+  glossary_pages?: number
+  /** 机器页与人工页同键冲突数（conflicts 明细的长度口径）。 */
+  conflicts_n?: number
+  [key: string]: unknown
+}
+
+/** origin 冲突明细行（机器页撞 manual 键被跳过——人工裁决后重编译）。 */
+export interface WikiCompileConflict {
+  page_key?: string
+  manual_title?: string
+  machine_title?: string
+  [key: string]: unknown
+}
+
+/**
+ * GET /wiki/compile/status 返回体（design-only；无批 → 404
+ * compile_not_found，前端映射 idle）。toc 仅 awaiting_toc 时附带。
+ */
+export interface WikiCompileStatus {
+  batch_id: string
+  state: WikiCompileState | string
+  progress?: { batch?: string; pages_done?: number }
+  stats?: WikiCompileStats
+  conflicts?: WikiCompileConflict[]
+  toc?: WikiTocSection[]
+  error?: string | null
+}

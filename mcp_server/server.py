@@ -162,7 +162,11 @@ source 里同时有 document_id 和 document_ref。之后一切深入都走 get_
   footnotes/references）；
 - ref 是 art_（知识制品引用——顶层浏览 artifacts 段的 artifact_ref）：只传 ref
   给说明卡（元信息+列能力+行数），要查表格传 query（DSL 同 st_，字段名以说明卡
-  columns 为准，limit/cursor 写在 query 里）。
+  columns 为准，limit/cursor 写在 query 里）。wiki 制品（说明卡 kind=wiki）query
+  四种形态：不传=说明卡（页数+embedding 进度）；{"q": 文本} 搜页，可带
+  "mode"（dense|keyword|fusion）与 "top_k"；{"page": 页 key} 整读一页；
+  {"links": 页 key} 看单跳邻页，可带 "direction"（out|in）。query 只收 dict 或
+  不传——没有字符串形态（get_knowledge 入口即拒）。
 工具返回的错误带稳定 code（如 unknown_field / out_of_scope / expired_ref），
 按提示修正参数重试即可。
 
@@ -473,19 +477,24 @@ def get_knowledge(
     | ref=st_ + query                   | 表格精确查询（DSL）      | table_rows/     |
     |                                   |                          | aggregate       |
     | ref=st_ + relation                | 结构关系导航             | navigation      |
-    | ref=art_（只传它）                | 制品说明卡（元信息/      | artifact_card   |
-    |                                   | 列能力/行数/revision）   |                 |
-    | ref=art_ + query                  | 表格制品 DSL 查询        | artifact_rows/  |
-    |                                   |                          | artifact_aggregate |
+    | ref=art_（只传它）                | 制品说明卡（表格：元信息/| artifact_card / |
+    |                                   | 列能力/行数；wiki：页数+ | wiki_artifact_ |
+    |                                   | embedding 进度）         | card            |
+    | ref=art_ + query                  | 表格 DSL 查询（同 st_）；| artifact_rows/  |
+    |                                   | wiki={"q"}搜页/{"page"}  | artifact_aggregate；|
+    |                                   | 整读/{"links"}邻页       | wiki_search/    |
+    |                                   | （详见 query 参数）      | wiki_page/wiki_links |
 
     ev_/doc_ 是内容引用——只传 ref 就直接给内容（默认粒度/首页）；st_ 是结构
     引用——只传 ref 给能力报告，告诉你 relation/query 能传什么。ev_ 来自 search
     结果 evidence[].ref（truncated=true 时加 mode 取全）；doc_ 来自
     source.document_ref；st_ 来自 structure_ref 或导航结果。art_ 是知识制品引用
-    （域内发布的表格数据集）——来自顶层浏览的 artifacts 段，只传 ref 给说明卡
-    （columns[].name/operations 就是 query 的字段白名单），要查数据传 query
-    （DSL 与 st_ 表格同款；limit/cursor 写在 query 里，不吃顶层分页参数；
-    kb_names 不影响制品——按域开放）。
+    （域内发布：表格数据集或 wiki 知识页）——来自顶层浏览的 artifacts 段，只传
+    ref 给说明卡（表格 columns[].name/operations 就是 query 的字段白名单；wiki
+    给页数与 embedding 进度），要查数据传 query：表格=DSL 与 st_ 同款（limit/
+    cursor 写在 query 里，不吃顶层分页参数）；wiki={"q": 文本}[+"mode"/"top_k"]
+    搜页、{"page": 页 key} 整读一页、{"links": 页 key}[+"direction"] 看单跳邻页
+    （query 只收 dict 或不传，无字符串形态）。kb_names 不影响制品——按域开放。
 
     browse_directory 与 directory_prefix 的分工（都用 / 分隔的目录路径，如
     "产品文档/手册"）：browse_directory=**打开文件夹看一眼**（只列本层直属
@@ -515,13 +524,18 @@ def get_knowledge(
         relation: 仅 ref=st_ 有效：parent/children/previous/next/ancestors/
             descendants/container/caption/footnotes/references 之一（能力报告的
             relations 列出目标支持哪些）。
-        query: 仅 ref=st_（表格资产）有效：DSL {"select": ["列名"],
-            "where": [{"field":"列名","op":"lte","value":100}],
+        query: 结构化查询，ref=st_ / ref=art_ 有效——只收 dict（无字符串形态，
+            字符串入口即被拒）。表格资产（st_ 与表格制品）用 DSL {"select":
+            ["列名"], "where": [{"field":"列名","op":"lte","value":100}],
             "order_by": [{"field":"列名","direction":"asc"}], "limit": 20}；
-            聚合 {"aggregate": {"op":"avg","field":"列名"}, "where":[…]}。
-            字段名以能力报告 assets[].columns[].name 为准——不是模糊搜索。
-            行数超 limit 时响应带 cursor/has_more——翻页把工具顶层 cursor 参数
-            原样传回（不要自己往 query 里塞 cursor，工具会代劳合并）。
+            聚合 {"aggregate": {"op":"avg","field":"列名"}, "where":[…]}——
+            字段名以能力报告 assets[].columns[].name / 制品说明卡 columns 为准，
+            不是模糊搜索。st_ 行数超 limit 时响应带 cursor/has_more——翻页把
+            工具顶层 cursor 参数原样传回（不要自己往 query 里塞 cursor，工具会
+            代劳合并）；art_ 表格的 limit/cursor 直接写在 query 里（不吃顶层
+            分页参数）。wiki 制品三种 dict 形态：{"q": 文本} 搜页（可带
+            "mode": dense|keyword|fusion 与 "top_k"）；{"page": 页 key} 整读
+            一页；{"links": 页 key} 看单跳邻页（可带 "direction": out|in）。
         browse_directory: 目录逐层浏览（须配 kb_name）：" "=库根目录，
             "产品文档/手册"=该目录直属内容（child_directories+documents，
             空目录可见，不递归）。与 ref/file_query/directory_prefix/status 互斥。

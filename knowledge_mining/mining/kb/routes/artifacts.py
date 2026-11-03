@@ -15,7 +15,7 @@ import（plan 支持两种形态：build_mapping 产物，或
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from fastapi import (
@@ -71,6 +71,7 @@ class ArtifactCreate(BaseModel):
     description: str | None = None
     domain_id: str | None = Field(default=None, max_length=128)
     visibility: str = Field(default="private", pattern="^(private|public)$")
+    kind: Literal["table", "wiki"] = "table"
 
 
 class ArtifactMetaPatch(BaseModel):
@@ -183,6 +184,23 @@ def _map_error(exc: ArtifactError) -> HTTPException:
                 "code": "artifact_not_deprecated",
                 "message": "必须先停用（deprecate）制品才能删除——删除是级联硬删且不可恢复",
             })
+        if str(exc).startswith("publish_validation_failed"):
+            # 63号批次3决策7：wiki 发布校验阻断（rev0 页 provenance 缺失/
+            # 悬空引用）——同 wiki_no_pages 状态冲突族 409；详情（页键+原因）
+            # 在 message 中携带（结构化账在页 flags/status 端点）。仅 kind=wiki
+            # 走 WikiLifecycle，表格路径永不产生该码。
+            detail = str(exc).split(":", 1)[1] if ":" in str(exc) else ""
+            return HTTPException(409, {
+                "code": "publish_validation_failed",
+                "message": "发布校验未通过（机器页来源账/引用悬空）：" + detail,
+            })
+        if str(exc) == "wiki_no_pages":
+            # 63号批次2 wiki 发布门禁（rev0 零页）：状态冲突族，与
+            # no_pending_changes 同为发布门禁 409；表格路径永不产生该码。
+            return HTTPException(409, {
+                "code": "wiki_no_pages",
+                "message": "wiki 无页面可发布（rev0 至少一页）",
+            })
         return HTTPException(400, str(exc))
     return HTTPException(500, str(exc))
 
@@ -237,7 +255,7 @@ async def create_artifact(
         raise HTTPException(403, f"domain_not_bound:{domain_id}")
     try:
         return await svc.create_artifact(
-            user=user, domain_id=domain_id, kind="table",
+            user=user, domain_id=domain_id, kind=body.kind,
             title=body.title, description=body.description,
             visibility=body.visibility,
         )

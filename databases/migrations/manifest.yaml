@@ -44,3 +44,7 @@ migrations:
     path: core/20261019_009_retrieval_v2_hnsw_index.sql
     mode: online_expand
     checksum: e7626ba48a330ed609d1a7fb86e0dcb7dfaee6f415a299ae4c74d2db60ee564b
+  - id: core/20261021_010_wiki_artifacts
+    path: core/20261021_010_wiki_artifacts.sql
+    mode: online_expand
+    checksum: 2ce45cdc8dbc14a3ca550a5dca60d8b40fe6fd525ee0997535fc35426c7ec220

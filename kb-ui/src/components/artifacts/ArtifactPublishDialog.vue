@@ -23,7 +23,7 @@
       <el-collapse v-else-if="diffResult" v-model="activeSections">
         <el-collapse-item name="added">
           <template #title>
-            新增 <b class="publish-diff__count">{{ diffResult.added_count }}</b> 行
+            新增 <b class="publish-diff__count">{{ diffResult.added_count }}</b> {{ unitLabel }}
           </template>
           <div class="publish-diff__keys">
             <el-tag v-for="key in diffResult.added" :key="key" size="small" type="success" effect="plain">
@@ -50,7 +50,7 @@
         </el-collapse-item>
         <el-collapse-item name="removed">
           <template #title>
-            删除 <b class="publish-diff__count">{{ diffResult.removed_count }}</b> 行
+            删除 <b class="publish-diff__count">{{ diffResult.removed_count }}</b> {{ unitLabel }}
           </template>
           <div class="publish-diff__keys">
             <el-tag v-for="key in diffResult.removed" :key="key" size="small" type="danger" effect="plain">
@@ -104,7 +104,7 @@ import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import type { DiffResult, PublishResult } from '@/types/artifacts'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   artifactId: string
   modelValue: boolean
   /** 乐观锁令牌（artifact.updated_at）。 */
@@ -114,7 +114,9 @@ const props = defineProps<{
   /** 干净态判定底料：draft_open=false 且 current_revision>0 → 无待发布变更（409 门禁前端镜像）。 */
   draftOpen?: boolean
   currentRevision?: number
-}>()
+  /** 差异/结果计数单位（表格=行；wiki=页——DetailView 按 kind 传入；缺省行=表格旧文案不变）。 */
+  unitLabel?: string
+}>(), { unitLabel: '行' })
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
@@ -190,7 +192,7 @@ async function confirmPublish(): Promise<void> {
       change_summary: changeSummary.value.trim(),
       expected_updated_at: token,
     })
-    ElMessage.success(`已发布 r${result.revision}（${result.row_count} 行）`)
+    ElMessage.success(`已发布 r${result.revision}（${result.row_count} ${props.unitLabel}）`)
     emit('published', result)
     emit('update:modelValue', false)
   } catch (error) {

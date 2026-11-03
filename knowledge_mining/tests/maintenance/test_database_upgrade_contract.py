@@ -61,8 +61,8 @@ def _database(dbname: str) -> dict[str, object]:
 def test_convergence_contract_has_exact_retired_table_set() -> None:
     assert set(RETIRED_TABLES) == EXPECTED_RETIRED_TABLES
     assert len(RETIRED_TABLES) == 22
-    assert EXPECTED_FORMAL_TABLES == 60
-    assert EXPECTED_PHYSICAL_TABLES == 61
+    assert EXPECTED_FORMAL_TABLES == 64
+    assert EXPECTED_PHYSICAL_TABLES == 65
     assert CURRENT_SCHEMA_VERSION
 
 

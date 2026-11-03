@@ -15,11 +15,14 @@ user 对象形态 = auth.current_user 返回的 kb_users 行（id / site_role）
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
 from knowledge_mining.mining.kb.db_artifacts import ArtifactError as ArtifactRepoError
 from knowledge_mining.mining.kb.db_artifacts import _row_key_value
+
+logger = logging.getLogger(__name__)
 
 #: 运行态读（元信息/已发布行）：成员任一角色。
 ROLE_RUNTIME_READ = ("owner", "editor", "viewer")
@@ -218,8 +221,20 @@ def _cast_cell(value: Any, column_type: str) -> tuple[bool, Any]:
 # ----------------------------------------------------------------- service
 
 class ArtifactService:
-    def __init__(self, db: Any) -> None:
+    def __init__(self, db: Any, wiki: Any = None) -> None:
         self._db = db
+        # wiki 生命周期协作者（63号批次2，Task 3 的 WikiLifecycle 由 deps 装配
+        # 注入）：kind=wiki 的 publish/rollback/discard/diff 四分支整参委托。
+        # None=未装配（表格-only 部署），kind=wiki 请求快速失败——静默走表格
+        # SQL 会推空版本行，损坏 wiki 制品的生命周期状态。
+        self._wiki = wiki
+
+    def _require_wiki(self) -> Any:
+        """kind=wiki 分支的协作者取用：未注入时快速失败（400 invalid_operation
+        口径），替代协作者缺失时的 AttributeError 裸抛（路由 500）。"""
+        if self._wiki is None:
+            raise InvalidOperation("wiki_lifecycle_missing")
+        return self._wiki
 
     # ------------------------------------------------------------ 权限核心
 
@@ -350,6 +365,19 @@ class ArtifactService:
             # 制品；停用是可恢复的缓冲动作，删除不可恢复。
             raise InvalidOperation("artifact_not_deprecated")
         await self._db.delete_artifact(artifact_id)
+        # 63号批次3（审查 I-2②）：尽力清理编译进程内存缓存（制品已删，
+        # awaiting_toc 期的 _PREPARE_CACHE 条目成孤儿）。延迟 import——
+        # wiki_compile_service 依赖本模块，模块级 import 成环；调用期两模块
+        # 均已加载，函数内 import 无环。尽力而为：清理失败只记日志，不影响
+        # 删除主流程。
+        try:
+            from knowledge_mining.mining.kb.services.wiki_compile_service import (
+                drop_prepare_cache,
+            )
+            drop_prepare_cache(artifact_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "编译缓存清理失败（不影响删除）artifact=%s", artifact_id)
 
     # -------------------------------------------------------------- 成员
 
@@ -421,6 +449,14 @@ class ArtifactService:
         _check_freshness(artifact, expected_updated_at)
         if not (artifact.get("usage_note") or "").strip():
             raise UsageNoteRequired(artifact_id)
+        # 63号批次2：kind=wiki 委托 wiki 协作者（自带门禁与事务；角色/新鲜度/
+        # usage_note 三道 kind 无关门禁已在上方完成）。协作者返回值与表格
+        # publish 同形 {revision, row_count, diff}（page_count 由 Task 3 归一）。
+        if artifact.get("kind") == "wiki":
+            return await self._require_wiki().publish(
+                user, artifact, change_summary=change_summary,
+                expected_updated_at=_expected_dt(expected_updated_at),
+            )
         diff = await self._db.diff_draft_vs_current(artifact_id)
         try:
             result = await self._db.publish(
@@ -445,6 +481,17 @@ class ArtifactService:
     ) -> dict[str, Any]:
         artifact, _ = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
         _check_freshness(artifact, expected_updated_at)
+        # 63号批次2：kind=wiki 分支——revision 归一 int（与表格路径同语义：
+        # 非法 revision 400 invalid_revision）后整参委托协作者。
+        if artifact.get("kind") == "wiki":
+            try:
+                rev = int(revision)
+            except (TypeError, ValueError) as exc:
+                raise InvalidOperation("invalid_revision") from exc
+            return await self._require_wiki().rollback_to(
+                user, artifact, rev,
+                expected_updated_at=_expected_dt(expected_updated_at),
+            )
         try:
             return await self._db.rollback_to(
                 artifact_id, int(revision),
@@ -488,6 +535,12 @@ class ArtifactService:
         """丢弃 draft（逃生门）：幂等——无 draft 时同样回到干净态。"""
         artifact, _ = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
         _check_freshness(artifact, expected_updated_at)
+        # 63号批次2：kind=wiki 分支（协作者方法名 discard——清 rev0 pages+links）
+        if artifact.get("kind") == "wiki":
+            return await self._require_wiki().discard(
+                user, artifact,
+                expected_updated_at=_expected_dt(expected_updated_at),
+            )
         try:
             return await self._db.discard_draft(
                 artifact_id, expected_updated_at=_expected_dt(expected_updated_at),
@@ -499,7 +552,11 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str,
     ) -> dict[str, Any]:
         """发布预览差异：editor+（viewer 不见设计态）。"""
-        await self._assert_role(user, artifact_id, *ROLE_DESIGN)
+        # 63号批次2：kind=wiki 分支（六平键同形返回，changed 元素为页面形态）。
+        # _assert_role 内部已取制品行——接住返回值取 kind，零额外查询。
+        artifact, _ = await self._assert_role(user, artifact_id, *ROLE_DESIGN)
+        if artifact.get("kind") == "wiki":
+            return await self._require_wiki().diff(artifact_id)
         return await self._db.diff_draft_vs_current(artifact_id)
 
     async def ensure_draft(

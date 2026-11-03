@@ -51,6 +51,12 @@
 
     <el-dialog v-model="createVisible" title="新建知识制品" width="520px">
       <el-form label-width="70px">
+        <el-form-item label="类型">
+          <el-radio-group v-model="form.kind" data-test="create-artifact-kind">
+            <el-radio value="table">表格制品</el-radio>
+            <el-radio value="wiki">Wiki 制品</el-radio>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="标题">
           <el-input v-model="form.title" placeholder="如：MOP 责任域表" maxlength="200" />
         </el-form-item>
@@ -73,7 +79,7 @@
           </el-select>
           <div class="artifact-list__domain-hint">制品将创建到该知识域（默认当前域：{{ domainStore.currentDomain || '未知' }}）</div>
         </el-form-item>
-        <p class="artifact-list__hint">创建后进入设计态：上传 Excel → 列映射 → 导入 → 填使用说明 → 发布。</p>
+        <p class="artifact-list__hint">{{ KIND_CREATE_HINTS[form.kind] }}</p>
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
@@ -91,7 +97,7 @@ import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import { useDomainStore } from '@/stores/domain'
 import EmptyState from '@/components/common/EmptyState.vue'
-import type { Artifact } from '@/types/artifacts'
+import type { Artifact, ArtifactKind } from '@/types/artifacts'
 
 const api = useArtifactsApi()
 const router = useRouter()
@@ -101,7 +107,18 @@ const artifacts = ref<Artifact[]>([])
 const loading = ref(false)
 const createVisible = ref(false)
 const creating = ref(false)
-const form = ref({ title: '', description: '', domainId: '' })
+const form = ref({
+  title: '', description: '', domainId: '',
+  /** 60号四形态：创建时选类型（默认 table；wiki 详情页暂为占位守卫）。 */
+  kind: 'table' as ArtifactKind,
+})
+
+/** 创建对话框底部流程提示（Record 键钉死 ArtifactKind 全集——四形态路线
+ *  下新增 kind 时 TS 强制补齐文案）。 */
+const KIND_CREATE_HINTS: Record<ArtifactKind, string> = {
+  table: '创建后进入设计态：上传 Excel → 列映射 → 导入 → 填使用说明 → 发布。',
+  wiki: '创建后进入设计态：绑定知识库目录 → 编译生成页面 → 人工修订 → 填使用说明 → 发布。',
+}
 
 async function load() {
   loading.value = true
@@ -118,7 +135,7 @@ function openCreate() {
   // codex二审功能项③：显式带当前域创建——不再依赖后端 first_domain_for_user
   // 兜底（多域用户在 B 域页面会落到 A 域）。域选择对齐 Header/McpAccessView
   // 的 domain store 机制（enabledDomains），不新造状态源。
-  form.value = { title: '', description: '', domainId: domainStore.currentDomain }
+  form.value = { title: '', description: '', domainId: domainStore.currentDomain, kind: 'table' }
   createVisible.value = true
 }
 
@@ -138,6 +155,7 @@ async function createArtifact() {
       title,
       description: form.value.description.trim() || undefined,
       domain_id: form.value.domainId,
+      kind: form.value.kind,
     })
     createVisible.value = false
     await router.push({ name: 'artifact-detail', params: { artifactId: artifact.artifact_id } })

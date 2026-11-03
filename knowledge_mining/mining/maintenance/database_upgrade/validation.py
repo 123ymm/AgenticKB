@@ -65,6 +65,12 @@ REQUIRED_INDEXES: dict[str, tuple[bool, tuple[str, ...]]] = {
         False,
         ("asset_retrieval_embeddings_v2", "using hnsw", "embedding_vector_vec", "vector_cosine_ops"),
     ),
+    # 010（63号批次1 wiki 底座）：wiki 页面单元向量近邻索引。守卫口径同 009，
+    # indisvalid/indisready 复查与 staging 反向断言由 validate_schema 尾部统一覆盖。
+    "idx_wiki_units_hnsw": (
+        False,
+        ("kb_wiki_page_units", "using hnsw", "embedding", "vector_cosine_ops"),
+    ),
 }
 
 

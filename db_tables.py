@@ -81,6 +81,12 @@ EXPORT_TABLES = [
     "kb_table_rows",
     # 008：钥匙级制品开放子集（1.1.15 权限模型，017 启动链同建）
     "mcp_key_open_artifacts",
+    # wiki 制品通用底座（63号批次1，迁移 010，017/018 启动链同文）：
+    # 来源绑定通用表 + wiki 专有三表（均无外键，物理位置不影响导入顺序）
+    "kb_artifact_sources",
+    "kb_wiki_pages",
+    "kb_wiki_page_links",
+    "kb_wiki_page_units",
 ]
 
 # 兼容尚未完成 52 号 bootstrap 的测试/旧库；生产收敛库验证要求这些表存在。
