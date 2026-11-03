@@ -29,6 +29,7 @@ from httpx import ASGITransport, AsyncClient
 
 from knowledge_mining.mining.kb.auth import current_user
 from knowledge_mining.mining.kb.db_wiki import WikiError
+from knowledge_mining.mining.kb.db_wiki_toc import derive_compile_toc
 from knowledge_mining.mining.kb.deps import (
     get_artifact_service,
     get_compile_service,
@@ -1405,6 +1406,70 @@ async def test_recompile_replaces_toc(env):
     # 整体替换：旧节「第一版」消失；旧页 页A 保留归入新节序 0 的「第二版」
     assert env.wdb.draft_tocs[WID]["toc"] == {"sections": [
         {"section_title": "第二版", "page_keys": ["页A", "页B"]}]}
+
+
+async def test_completed_toc_seed_failure_keeps_completed(env):
+    """审查 I-1：toc 首落 best-effort 契约锁定——upsert_draft_toc 抛异常
+    （真实场景=存储故障）时批次仍 completed 落地：state=completed、无
+    error、row_count 不回退；toc 行不落（发布按 ordinal 派生兜底）。"""
+    all_units = _seed_corpus(env)
+    await _bind_all(env)
+    cid = _cluster_id(all_units)
+    env.gen.queue = [
+        _toc_json(["页A"], cid), _page_body("页A"), _quality("页A", "页A")]
+    await _start(env)
+    await _wait_state(env, "awaiting_toc")
+    toc = _details(await env.inputs.latest_compile_batch(WID))["toc"]
+
+    calls = {"n": 0}
+
+    async def _boom(*args, **kwargs):
+        calls["n"] += 1
+        raise RuntimeError("toc storage down")
+
+    env.wdb.upsert_draft_toc = _boom        # 实例级打桩（fixture 函数级无污染）
+    await _confirm(env, toc)
+    batch = await _wait_state(env, "completed")
+    det = _details(batch)
+    # error 用 get（completed 路径从不写该键——status 端点同口径）
+    assert det["state"] == "completed" and det.get("error") is None
+    assert batch["row_count"] == 1          # complete_batch 已落且不回退
+    assert calls["n"] == 1                  # 钩子确实尝试过首落
+    assert WID not in env.wdb.draft_tocs    # toc 行未落（派生兜底场景）
+
+
+def test_derive_compile_toc_section_title_fallback():
+    """审查 M-2：机器节名映射的回落——确认 toc 节名空白（strip 后空）与
+    节序越界（manifest 出现确认 toc 之外的节位）都回落「第N节」。"""
+    manifest = [
+        {"page_key": "机1", "ordinal": 1001, "origin": "machine"},
+        {"page_key": "机2", "ordinal": 2001, "origin": "machine"},
+        {"page_key": "机3", "ordinal": 3001, "origin": "machine"},
+    ]
+    confirmed = [
+        {"section_title": "对齐节", "page_hints": []},
+        {"section_title": "   ", "page_hints": []},    # 空白 → 回落
+    ]                                                   # idx=2 越界 → 回落
+    assert derive_compile_toc(manifest, confirmed) == {"sections": [
+        {"section_title": "对齐节", "page_keys": ["机1"]},
+        {"section_title": "第2节", "page_keys": ["机2"]},
+        {"section_title": "第3节", "page_keys": ["机3"]},
+    ]}
+
+
+def test_derive_compile_toc_manual_pages_section():
+    """审查 M-2：origin=manual 且不在专页段 → 「手工页」节（输出序在
+    机器节之后；页序=manifest 传参序）。"""
+    manifest = [
+        {"page_key": "机1", "ordinal": 1001, "origin": "machine"},
+        {"page_key": "手1", "ordinal": 0, "origin": "manual"},
+        {"page_key": "手2", "ordinal": 1002, "origin": "manual"},
+    ]
+    confirmed = [{"section_title": "节一", "page_hints": []}]
+    assert derive_compile_toc(manifest, confirmed) == {"sections": [
+        {"section_title": "节一", "page_keys": ["机1"]},
+        {"section_title": "手工页", "page_keys": ["手1", "手2"]},
+    ]}
 
 
 # ------------------------------------------------------------ 发布校验（决策7）

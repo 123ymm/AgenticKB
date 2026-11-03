@@ -137,11 +137,13 @@ class FakeWikiDB:
         expected_updated_at=None,
     ) -> dict:
         from knowledge_mining.mining.kb.db_wiki_toc import validate_toc
+        # 先形态校验再 stale 比对——对齐真实现次序（审查 I-2：畸形 422
+        # 优先于 stale 409，校验失败不占行锁）
+        normalized = validate_toc(toc)
         row = self.draft_tocs.get(artifact_id)
         if row is not None and expected_updated_at is not None \
                 and row["updated_at"] != expected_updated_at:
             raise WikiError("stale_artifact")
-        normalized = validate_toc(toc)
         self.draft_tocs[artifact_id] = {
             "artifact_id": artifact_id, "toc": normalized,
             "updated_at": datetime.now(timezone.utc),
