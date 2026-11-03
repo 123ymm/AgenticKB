@@ -389,6 +389,13 @@ class TestSixtyOneAcceptanceCases:
         assert await env.db.get_artifact(aid) is not None
 
         env.holder["user"] = OWNER
+        # 「删除先停用」门禁（fc608e8/008 迁移批次，1.1.15 已发）：未停用直接
+        # 删 → 409。61号用例6原断言（直接删 200）未随门禁更新——本断言为过时
+        # 断言修正，产品语义以 66号 §5「先停用、再明确确认删除」为准。
+        r = await env.client.delete(f"/api/artifacts/{aid}")
+        assert r.status_code == 409
+        r = await env.client.post(f"/api/artifacts/{aid}/deprecate")
+        assert r.status_code == 200
         r = await env.client.delete(f"/api/artifacts/{aid}")
         assert r.status_code == 200
         # fake 记账断言六表清理（kb_artifacts / members / revisions / batches /
