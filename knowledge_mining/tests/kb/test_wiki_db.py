@@ -33,6 +33,10 @@ from knowledge_mining.mining.kb.db_wiki import (  # noqa: E402
     WikiError,
     compute_page_edges,
 )
+from knowledge_mining.mining.kb.db_wiki_toc import (  # noqa: E402
+    get_draft_toc,
+    upsert_draft_toc,
+)
 
 _EMPTY_DIFF = {
     "added": [], "removed": [], "changed": [],
@@ -174,14 +178,20 @@ async def test_publish_full_transaction(async_pool) -> None:
         aid, expected_updated_at=art["updated_at"],
         change_summary="首发", published_by="editor-1",
     )
-    assert result == {"revision": 1, "page_count": 2}
+    # 返回契约（66号批次1扩展）：warnings=toc 解析警示（本例无草稿行、
+    # 派生无警示 → 空）
+    assert result == {"revision": 1, "page_count": 2, "warnings": []}
 
     rev = await adb.get_revision(aid, 1)
     assert rev is not None and rev["row_count"] == 2
     schema = rev["schema_json"]
     assert [p["page_key"] for p in schema["pages"]] == ["概述", "细节"]
     assert schema["pages"][0]["origin"] == "manual"
-    assert schema["toc"] is None and schema["glossary"] == []  # 批次3填充
+    # 无 toc 草稿行 → 按 ordinal 派生：两页均 manual → 「手工页」节
+    assert schema["toc"] == {"sections": [
+        {"section_title": "手工页", "page_keys": ["概述", "细节"]},
+    ]}
+    assert schema["glossary"] == []  # 批次3填充
     assert rev["change_summary"] == "首发" and rev["published_by"] == "editor-1"
 
     # rev0 已清（页+链接），快照页/边齐全
@@ -838,3 +848,170 @@ async def test_collect_units_shared_snapshot_dedup(async_pool) -> None:
     fp = await inputs.current_fingerprint(kb_id, [])
     assert fp["snapshots"] == [{"snapshot_id": snap, "unit_count": 3}]
     assert await inputs.kb_snapshot_unit_count(kb_id) == 3
+
+
+# ------------------------------------------------- 目录定版（66号批次1 Task 1.2）
+
+async def test_draft_toc_roundtrip(async_pool) -> None:
+    """toc 草稿行 CRUD 往返：无行（未知 artifact）→ None；首次写入跳锁
+    （行不存在——编译钩子/用户首次编辑场景）→ get 幂等；行存在时
+    expected_updated_at 比对**本行** updated_at——stale → WikiError
+    ("stale_artifact")（服务层 _WIKI_CODE_TO_ERROR 映射 StaleArtifact/409，
+    复用既有口径不新造第二套）且整体回滚不被覆盖；畸形 toc（sections 非
+    列表/节字段类型错/嵌套畸形/跨节重复键）→ ValueError（路由 422）。"""
+    _, wdb, aid = await _make_wiki(async_pool)
+    await wdb.ensure_draft(aid)
+
+    toc = {"sections": [
+        {"section_title": "概述", "page_keys": ["页A", "页B"]},
+        {"section_title": "细节", "page_keys": ["页C"]},
+    ]}
+    async with async_pool.connection() as conn:
+        assert await get_draft_toc(conn, aid) is None  # 未知 artifact 无行
+
+        row = await upsert_draft_toc(conn, aid, toc, updated_by="editor-1")
+        assert row["artifact_id"] == aid
+        assert row["toc"] == toc and row["updated_by"] == "editor-1"
+
+        got = await get_draft_toc(conn, aid)
+        assert got is not None and got["toc"] == toc
+
+        # 行已存在：带令牌合法再写（updated_at 推进后返回新令牌）
+        row2 = await upsert_draft_toc(
+            conn, aid, toc, updated_by="editor-2",
+            expected_updated_at=got["updated_at"],
+        )
+        assert row2["updated_by"] == "editor-2"
+
+        # stale 令牌 → 并发冲突（409 口径），且整体回滚不被覆盖
+        with pytest.raises(WikiError) as ei:
+            await upsert_draft_toc(
+                conn, aid, toc, updated_by="late",
+                expected_updated_at="2000-01-01T00:00:00+00:00",
+            )
+        assert ei.value.code == "stale_artifact"
+        assert (await get_draft_toc(conn, aid))["updated_by"] == "editor-2"
+
+        # 畸形 toc → ValueError（sections 列表 / 节字段类型 / 嵌套 / 跨节重复）
+        for bad in (
+            {"sections": "不是列表"},
+            {},  # 缺 sections 键
+            {"sections": [{"section_title": 1, "page_keys": []}]},
+            {"sections": [{"section_title": "s", "page_keys": "不是列表"}]},
+            {"sections": [{"section_title": "s", "page_keys": [{"k": 1}]}]},
+            {"sections": [
+                {"section_title": "s1", "page_keys": ["页A"]},
+                {"section_title": "s2", "page_keys": ["页A"]},  # 跨节重复
+            ]},
+        ):
+            with pytest.raises(ValueError):
+                await upsert_draft_toc(conn, aid, bad, updated_by="e")
+
+
+async def test_publish_freezes_toc(async_pool) -> None:
+    """发布冻结：预置 toc 行（含 1 个已删页键 + 漏 1 个现存页）→ publish →
+    快照 toc 无死键、漏页落尾部「其他」节、返回 warnings 带 dropped/
+    appended 两组键；toc 草稿行发布后保留（设计态持续存在，下次编辑起点）。"""
+    adb, wdb, aid = await _make_wiki(async_pool)
+    await wdb.ensure_draft(aid)
+    await _upsert(wdb, aid, _page("页A", "页A", "a", ordinal=0))
+    await _upsert(wdb, aid, _page("页B", "页B", "b", ordinal=1))
+    await _upsert(wdb, aid, _page("页C", "页C", "c", ordinal=2))
+    async with async_pool.connection() as conn:
+        await upsert_draft_toc(conn, aid, {"sections": [
+            {"section_title": "节1", "page_keys": ["页A", "死页X"]},
+            {"section_title": "节2", "page_keys": ["页B"]},
+        ]}, updated_by="editor-1")
+
+    art = await adb.get_artifact(aid)
+    result = await wdb.publish(
+        aid, expected_updated_at=art["updated_at"],
+        change_summary="含目录", published_by="editor-1",
+    )
+    assert result["revision"] == 1
+    warnings = result["warnings"]
+    assert any(w.startswith("toc_dropped_page_keys:死页X") for w in warnings)
+    assert any(w.startswith("toc_appended_page_keys:页C") for w in warnings)
+
+    schema = (await adb.get_revision(aid, 1))["schema_json"]
+    assert schema["toc"] == {"sections": [
+        {"section_title": "节1", "page_keys": ["页A"]},  # 死键已剔
+        {"section_title": "节2", "page_keys": ["页B"]},
+        {"section_title": "其他", "page_keys": ["页C"]},  # 漏页尾部追加
+    ]}
+    # 草稿行发布后保留（冻结进快照 ≠ 清草稿）
+    async with async_pool.connection() as conn:
+        assert await get_draft_toc(conn, aid) is not None
+
+
+async def test_publish_derives_toc_when_absent(async_pool) -> None:
+    """无 toc 行 → 按 ordinal 派生：机器页 ordinal//1000-1 归节（节1 两页/
+    节2 一页）；专页 910000 基段归固定节「矛盾对照」；manual 手工页归
+    「手工页」节；派生无警示（warnings 空）。"""
+    adb, wdb, aid = await _make_wiki(async_pool)
+    await wdb.ensure_draft(aid)
+    await _upsert(wdb, aid, _page("机1", "机1", "x", ordinal=1001,
+                                  origin="machine"))
+    await _upsert(wdb, aid, _page("机2", "机2", "x", ordinal=1002,
+                                  origin="machine"))
+    await _upsert(wdb, aid, _page("机3", "机3", "x", ordinal=2001,
+                                  origin="machine"))
+    await _upsert(wdb, aid, _page(
+        "矛盾1", "矛盾1", "x", ordinal=910001, origin="machine",
+        page_type="contradiction"))
+    await _upsert(wdb, aid, _page("手1", "手1", "x", ordinal=0,
+                                  origin="manual"))
+
+    art = await adb.get_artifact(aid)
+    result = await wdb.publish(
+        aid, expected_updated_at=art["updated_at"],
+        change_summary="派生目录", published_by="editor-1",
+    )
+    assert result["warnings"] == []
+
+    schema = (await adb.get_revision(aid, 1))["schema_json"]
+    assert schema["toc"] == {"sections": [
+        {"section_title": "第1节", "page_keys": ["机1", "机2"]},
+        {"section_title": "第2节", "page_keys": ["机3"]},
+        {"section_title": "矛盾对照", "page_keys": ["矛盾1"]},
+        {"section_title": "手工页", "page_keys": ["手1"]},
+    ]}
+
+
+async def test_rollback_reads_old_toc(async_pool) -> None:
+    """回滚读旧目录（防回归）：r1 快照冻结节 A → 改 toc 发布 r2 冻结节 B →
+    rollback r1 后读 r1 快照仍是节 A（纯指针回滚，快照数据不动）。"""
+    adb, wdb, aid = await _make_wiki(async_pool)
+    await wdb.ensure_draft(aid)
+    await _upsert(wdb, aid, _page("页", "页", "v1"))
+    async with async_pool.connection() as conn:
+        await upsert_draft_toc(conn, aid, {"sections": [
+            {"section_title": "节A", "page_keys": ["页"]},
+        ]}, updated_by="e1")
+    art = await adb.get_artifact(aid)
+    await wdb.publish(
+        aid, expected_updated_at=art["updated_at"],
+        change_summary="r1", published_by="e1",
+    )
+
+    # 改目录（行已存在 → 锁令牌路径）再发布 r2
+    await wdb.ensure_draft(aid)
+    async with async_pool.connection() as conn:
+        token = (await get_draft_toc(conn, aid))["updated_at"]
+        await upsert_draft_toc(conn, aid, {"sections": [
+            {"section_title": "节B", "page_keys": ["页"]},
+        ]}, updated_by="e2", expected_updated_at=token)
+    art = await adb.get_artifact(aid)
+    await wdb.publish(
+        aid, expected_updated_at=art["updated_at"],
+        change_summary="r2", published_by="e2",
+    )
+    r2_toc = (await adb.get_revision(aid, 2))["schema_json"]["toc"]
+    assert r2_toc["sections"][0]["section_title"] == "节B"
+
+    art = await adb.get_artifact(aid)
+    await wdb.rollback_to(aid, 1, expected_updated_at=art["updated_at"])
+    r1_toc = (await adb.get_revision(aid, 1))["schema_json"]["toc"]
+    assert r1_toc == {"sections": [
+        {"section_title": "节A", "page_keys": ["页"]},
+    ]}

@@ -656,8 +656,10 @@ class WikiDB:
         干净态 / rev0 页数=0→wiki_no_pages）③new_rev=GREATEST(current, 历史
         revisions, table/wiki 专有表正版本最大值)+1（回滚拨低指针后重发布不撞
         历史版本行）④pages+links rev0→revN INSERT..SELECT 复制定格 ⑤revisions
-        行（schema_json=页面清单 JSON，toc/glossary 批次3编译填充）⑥清 rev0
-        ⑦拨指针。返回 {"revision", "page_count"}。units 投影是事务外后置
+        行（schema_json=页面清单 JSON；toc=db_wiki_toc.resolve_toc 同事务解析
+        冻结——66号批次1目录定版；glossary 批次3编译填充）⑥清 rev0
+        ⑦拨指针。返回 {"revision", "page_count", "warnings"}（warnings 为
+        toc 解析警示，service 层并入既有发布 warnings）。units 投影是事务外后置
         （service 层 WikiLifecycle 调 project_units——投影失败不回滚发布）。"""
         async with self._pool.connection() as conn:
             async with conn.transaction():
@@ -705,6 +707,12 @@ class WikiDB:
                     (artifact_id,),
                 )
                 manifest = [dict(r) for r in await cur.fetchall()]
+                # 目录定版（66号批次1）：同事务解析草稿目录→冻结进快照。方法内
+                # 导入防循环（db_wiki_toc 依赖本模块 WikiError/_json；先例=
+                # db.py 方法内 location_repository）。
+                from .db_wiki_toc import resolve_toc
+                resolved_toc, toc_warnings = await resolve_toc(
+                    conn, artifact_id, manifest)
                 cur = await conn.execute(
                     """INSERT INTO kb_wiki_pages
                        (artifact_id, revision, page_key, title, page_type,
@@ -735,7 +743,8 @@ class WikiDB:
                         change_summary, published_by)
                        VALUES (%s, %s, %s::jsonb, %s, %s, %s)""",
                     (artifact_id, new_rev,
-                     _json({"pages": manifest, "toc": None, "glossary": []}),
+                     _json({"pages": manifest, "toc": resolved_toc,
+                            "glossary": []}),
                      page_count, change_summary, published_by),
                 )
                 await conn.execute(
@@ -755,7 +764,8 @@ class WikiDB:
                        WHERE artifact_id = %s""",
                     (new_rev, artifact_id),
                 )
-        return {"revision": new_rev, "page_count": page_count}
+        return {"revision": new_rev, "page_count": page_count,
+                "warnings": toc_warnings}
 
     async def rollback_to(
         self, artifact_id: str, revision: int, *, expected_updated_at: Any = None,

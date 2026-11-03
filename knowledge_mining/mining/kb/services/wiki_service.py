@@ -206,7 +206,8 @@ class WikiLifecycle:
                 "removed_count": diff["removed_count"],
                 "changed_count": diff["changed_count"],
             },
-            "warnings": warnings,
+            # toc 解析警示（66号批次1目录定版）并入既有校验 warnings 同构透传
+            "warnings": warnings + list(result.get("warnings") or []),
         }
 
     async def rollback_to(
