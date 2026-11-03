@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from knowledge_mining.mining.kb.db_wiki import WikiError, normalize_page_key
+from knowledge_mining.mining.kb.db_wiki_toc import derive_compile_toc
 from knowledge_mining.mining.kb.services.artifact_service import (
     ROLE_DESIGN,
     _check_freshness,
@@ -525,7 +526,7 @@ class CompileService:
             stats.update(derived)
             stats["conflicts_n"] = len(conflicts)
 
-            await self._inputs.complete_batch(
+            done = await self._inputs.complete_batch(
                 batch_id,
                 {
                     "state": "completed",
@@ -537,6 +538,10 @@ class CompileService:
                     "conflicts": [dict(c) for c in conflicts],
                 },
                 row_count=int(stats["pages_written"]))
+            if done:
+                # completed 首次落目录草稿（66号批次1 Task 1.3）——completed
+                # 真落地才落 toc（cancel 抢先 False 时不写：页是部分态）。
+                await self._seed_draft_toc(artifact_id, details, user)
             self._pop_cache_if_mine(artifact_id, batch_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("wiki 编译 writing 失败 artifact=%s", artifact_id)
@@ -544,6 +549,27 @@ class CompileService:
                              f"writing_failed:{type(exc).__name__}",
                              ("preparing", "writing"))
             self._pop_cache_if_mine(artifact_id, batch_id)
+
+    async def _seed_draft_toc(
+        self, artifact_id: str, details: dict[str, Any], user: str,
+    ) -> None:
+        """completed 钩子：rev0 manifest 派生带确认节名的 page_key 级目录 →
+        草稿行整体替换首落（expected_updated_at=None 跳锁通道——重编译的
+        新目录覆盖旧草稿；updated_by=批次 created_by）。
+
+        best-effort 降级（与质量 LLM 失败降级同口径）：completed 已终态，
+        首落失败仅日志不抛——resolve_toc 无行时按 ordinal 派生兜底，发布
+        不受阻；下次重编译自愈。manifest 取 rev0 全量（含未覆盖的旧
+        machine 页/manual 页——与发布派生兜底同口径，目录覆盖全部现存页）。"""
+        try:
+            manifest = await self._wdb.list_pages(artifact_id, revision=0)
+            toc = derive_compile_toc(manifest, details.get("toc") or [])
+            await self._wdb.upsert_draft_toc(
+                artifact_id, toc, updated_by=user)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "wiki 编译 completed 目录草稿首落失败（发布按 ordinal 派生"
+                "兜底）artifact=%s", artifact_id)
 
     async def _write_one_topic_page(
         self, artifact_id: str, page: dict[str, Any],

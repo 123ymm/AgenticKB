@@ -16,6 +16,8 @@
   ordinal//1000-1 为节索引归节 f"第{n}节"；专页 910000/920000/930000 基段
   归固定节「矛盾对照/开放问题/术语表」；manual 手工页归「手工页」节）。
   返回的 toc 永远是完整 page_key 级目录（所有现存页都出现在某节中）。
+- 编译 completed 钩子（Task 1.3）经 derive_compile_toc 派生带确认节名的
+  目录 → upsert_draft_toc(expected_updated_at=None) 整体重替换首落。
 - warnings 是 list[str]（与 validate_pages_for_publish 的发布 warnings 同构
   ——服务层直接拼接透传）。
 """
@@ -118,12 +120,18 @@ async def upsert_draft_toc(
         return dict(await cur.fetchone())  # type: ignore[arg-type]
 
 
-def _derive_toc_from_manifest(page_manifest: list[dict[str, Any]]) -> dict:
-    """无草稿行时按 ordinal 派生：机器页 ordinal//1000-1 为节索引（节名
-    f"第{idx+1}节"；页序=manifest 序即 ordinal 升序）；专页按
-    910000/920000/930000 基段归固定节；origin=manual 且不在专页段 →
-    「手工页」节。节输出序：机器节升序 → 三专页固定序 → 手工页（派生
-    场景无人编辑过目录，空节无信息量故不出现）。"""
+def _derive_toc_from_manifest(
+    page_manifest: list[dict[str, Any]],
+    section_titles: list[str] | None = None,
+) -> dict:
+    """按 ordinal 派生 page_key 级目录：机器页 ordinal//1000-1 为节索引
+    （页序=manifest 序即 ordinal 升序）；专页按 910000/920000/930000 基段
+    归固定节；origin=manual 且不在专页段 → 「手工页」节。节输出序：机器
+    节升序 → 三专页固定序 → 手工页（空节无信息量故不出现）。
+
+    机器节名：section_titles[idx]（按节序对齐——expand_toc_pages 的
+    ordinal 编码 (si+1)*1000+(pi+1) 使 idx 恒等于确认 toc 节序 si）；缺
+    参 / 越界 / 空串回落 f"第{idx+1}节"（发布派生兜底不传参=原语义）。"""
     machine: dict[int, list[str]] = {}
     special: dict[str, list[str]] = {name: [] for _, name in _SPECIAL_BASES}
     manual: list[str] = []
@@ -141,10 +149,15 @@ def _derive_toc_from_manifest(page_manifest: list[dict[str, Any]]) -> dict:
             manual.append(key)
         else:
             machine.setdefault(ordinal // 1000 - 1, []).append(key)
-    sections: list[dict[str, Any]] = [
-        {"section_title": f"第{idx + 1}节", "page_keys": keys}
-        for idx, keys in sorted(machine.items())
-    ]
+    sections: list[dict[str, Any]] = []
+    for idx, keys in sorted(machine.items()):
+        title = ""
+        if section_titles and 0 <= idx < len(section_titles):
+            title = str(section_titles[idx]).strip()
+        sections.append({
+            "section_title": title or f"第{idx + 1}节",
+            "page_keys": keys,
+        })
     sections.extend(
         {"section_title": name, "page_keys": keys}
         for name, keys in special.items() if keys
@@ -153,6 +166,22 @@ def _derive_toc_from_manifest(page_manifest: list[dict[str, Any]]) -> dict:
         sections.append(
             {"section_title": _MANUAL_SECTION_TITLE, "page_keys": manual})
     return {"sections": sections}
+
+
+def derive_compile_toc(
+    page_manifest: list[dict[str, Any]],
+    confirmed_toc: list[Any],
+) -> dict[str, Any]:
+    """编译 completed 钩子的目录首落派生（66号批次1 Task 1.3）：机器节名
+    按确认 toc（batches.details["toc"]）的 section_title **节序对齐**，缺
+    失/空节名回落「第N节」；专页/手工页归节与发布派生兜底同口径（同一
+    归节实现——节名映射是两场景唯一差异，别抄一份）。confirmed_toc 形态
+    [{section_title, page_hints: [...]}]（normalize_toc 产物）。"""
+    titles = [
+        str(s.get("section_title") or "").strip()
+        for s in (confirmed_toc or []) if isinstance(s, dict)
+    ]
+    return _derive_toc_from_manifest(page_manifest, section_titles=titles)
 
 
 async def resolve_toc(

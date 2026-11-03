@@ -1328,6 +1328,85 @@ async def test_quality_invalid_entries_skipped(env):
     assert det["stats"]["open_question_pages"] == 0
 
 
+# ------------------------------------------------- completed 首落目录草稿
+
+async def test_completed_writes_draft_toc(env):
+    """Task 1.3：completed 首次落目录草稿——page_key 级目录，机器节名=确认
+    toc 节序对齐（ordinal//1000-1=节序），专页归固定三节（矛盾对照/开放
+    问题/术语表，输出序=机器节→专页固定序）；updated_by=批次 created_by。"""
+    all_units = _seed_corpus(env)
+    await _bind_all(env)
+    cid = _cluster_id(all_units)
+    sections = [
+        {"section_title": "架构", "page_hints": [
+            {"title": "页A", "cluster_ids": [cid], "page_type": "topic"}]},
+        {"section_title": "运维", "page_hints": [
+            {"title": "页B", "cluster_ids": [cid], "page_type": "topic"},
+            {"title": "页C", "cluster_ids": [cid], "page_type": "topic"}]},
+    ]
+    env.gen.queue = [
+        {"toc": sections, "glossary": [
+            {"term": "网络切片", "definition_hint": "物理网络多租户切分"}],
+         "open_questions": [{"question": "切片隔离强度？", "why": "文档未覆盖"}]},
+        _page_body("页A"), _page_body("页B"), _page_body("页C"),
+        _quality("页A", "页B"),
+    ]
+    await _start(env)
+    await _wait_state(env, "awaiting_toc")
+    toc = _details(await env.inputs.latest_compile_batch(WID))["toc"]
+    await _confirm(env, toc)
+    await _wait_state(env, "completed")
+
+    row = env.wdb.draft_tocs[WID]
+    assert row["updated_by"] == "u-alice"        # 批次 created_by（触发用户）
+    assert row["toc"] == {"sections": [
+        {"section_title": "架构", "page_keys": ["页A"]},
+        {"section_title": "运维", "page_keys": ["页B", "页C"]},
+        {"section_title": "矛盾对照", "page_keys": ["矛盾-页A-与-页B"]},
+        {"section_title": "开放问题",
+         "page_keys": ["待解-如何灰度扩容", "待解-切片隔离强度"]},
+        {"section_title": "术语表", "page_keys": ["术语-网络切片"]},
+    ]}
+
+
+async def test_recompile_replaces_toc(env):
+    """Task 1.3：重编译 completed → toc 行被新目录整体替换（跳锁通道：
+    旧节名消失、新节名按新确认节序生效）。旧 machine 页未被覆盖（rev0
+    累积语义）仍进 manifest，按其 ordinal 归入新节序同位置的节——与发布
+    派生兜底同口径（目录永远覆盖全部现存页）。"""
+    all_units = _seed_corpus(env)
+    await _bind_all(env)
+    cid = _cluster_id(all_units)
+    empty_quality = {"contradictions": [], "gaps": []}
+
+    env.gen.queue = [
+        _toc_json(["页A"], cid, sections=[
+            {"section_title": "第一版", "page_hints": [
+                {"title": "页A", "cluster_ids": [cid], "page_type": "topic"}]}]),
+        _page_body("页A", broken=False), empty_quality]
+    await _start(env)
+    await _wait_state(env, "awaiting_toc")
+    toc = _details(await env.inputs.latest_compile_batch(WID))["toc"]
+    await _confirm(env, toc)
+    await _wait_state(env, "completed")
+    assert env.wdb.draft_tocs[WID]["toc"] == {"sections": [
+        {"section_title": "第一版", "page_keys": ["页A"]}]}
+
+    env.gen.queue = [
+        _toc_json(["页B"], cid, sections=[
+            {"section_title": "第二版", "page_hints": [
+                {"title": "页B", "cluster_ids": [cid], "page_type": "topic"}]}]),
+        _page_body("页B", broken=False), empty_quality]
+    await _start(env)                       # completed 非在飞 → 守卫放行
+    await _wait_state(env, "awaiting_toc")
+    toc2 = _details(await env.inputs.latest_compile_batch(WID))["toc"]
+    await _confirm(env, toc2)
+    await _wait_state(env, "completed")
+    # 整体替换：旧节「第一版」消失；旧页 页A 保留归入新节序 0 的「第二版」
+    assert env.wdb.draft_tocs[WID]["toc"] == {"sections": [
+        {"section_title": "第二版", "page_keys": ["页A", "页B"]}]}
+
+
 # ------------------------------------------------------------ 发布校验（决策7）
 
 async def _compile_clean(env) -> None:

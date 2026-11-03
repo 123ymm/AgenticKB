@@ -58,6 +58,8 @@ class FakeWikiDB:
         self.units: dict[tuple[str, int], list[dict]] = {}
         # aid -> revision -> revisions 行
         self.revisions: dict[str, dict[int, dict]] = {}
+        # aid -> 目录草稿行（artifact_id/toc/updated_at/updated_by）
+        self.draft_tocs: dict[str, dict] = {}
 
     def _touch(self, artifact_id: str) -> None:
         self.artifacts[artifact_id]["updated_at"] = datetime.now(timezone.utc)
@@ -125,6 +127,27 @@ class FakeWikiDB:
         del bucket[page_key]
         self._touch(artifact_id)
         return True
+
+    # ---- 目录草稿（66号批次1：镜像 WikiDB.upsert_draft_toc——归一走真
+    # validate_toc 纯函数，锁语义同构：行存在且令牌失配 → stale_artifact，
+    # 行不存在首写跳锁）----------------------------------------------------
+
+    async def upsert_draft_toc(
+        self, artifact_id: str, toc, updated_by: str = "",
+        expected_updated_at=None,
+    ) -> dict:
+        from knowledge_mining.mining.kb.db_wiki_toc import validate_toc
+        row = self.draft_tocs.get(artifact_id)
+        if row is not None and expected_updated_at is not None \
+                and row["updated_at"] != expected_updated_at:
+            raise WikiError("stale_artifact")
+        normalized = validate_toc(toc)
+        self.draft_tocs[artifact_id] = {
+            "artifact_id": artifact_id, "toc": normalized,
+            "updated_at": datetime.now(timezone.utc),
+            "updated_by": updated_by,
+        }
+        return dict(self.draft_tocs[artifact_id])
 
     # ---- 链接 ------------------------------------------------------------
 
