@@ -169,6 +169,15 @@ _WIKI_ARTIFACTS_DDL = (
     / "schemas"
     / "018_wiki_artifacts.sql"
 )
+# 66号批次1：wiki 目录草稿持久化——kb_wiki_tocs 单表（自包含、身份列无 FK；
+# 存量库同文版本化迁移=core/20261103_011_wiki_toc）。
+_WIKI_TOC_DDL = (
+    _REPO_ROOT
+    / "databases"
+    / "kb"
+    / "schemas"
+    / "019_wiki_toc.sql"
+)
 # KB 硬删任务化（013）：status 加 deleting + kb_purge_tasks 进度表。
 _KB_PURGE_TASKS_DDL = (
     _REPO_ROOT / "databases" / "kb" / "schemas" / "013_kb_purge_tasks.sql"
@@ -285,6 +294,8 @@ def domain_schema_paths() -> tuple[Path, ...]:
         # 63号批次1：wiki 制品底座四表（自包含，挂链尾；HNSW 依赖 vector 扩展，
         # 链首 002_asset_core 已 CREATE EXTENSION IF NOT EXISTS vector）。
         _WIKI_ARTIFACTS_DDL,
+        # 66号批次1：wiki 目录草稿表（自包含，挂链尾）。
+        _WIKI_TOC_DDL,
     )
 
 

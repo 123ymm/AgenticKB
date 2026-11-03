@@ -48,3 +48,7 @@ migrations:
     path: core/20261021_010_wiki_artifacts.sql
     mode: online_expand
     checksum: 2ce45cdc8dbc14a3ca550a5dca60d8b40fe6fd525ee0997535fc35426c7ec220
+  - id: core/20261103_011_wiki_toc
+    path: core/20261103_011_wiki_toc.sql
+    mode: online_expand
+    checksum: 30eb840b1fb9c55612f2ae1c4f936e6c3fefcbcffd4a3b0ec0cf5a7a5d56325c

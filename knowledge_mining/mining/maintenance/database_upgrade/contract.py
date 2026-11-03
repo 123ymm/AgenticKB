@@ -11,7 +11,8 @@ CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
 # 2026-10-20 三次替换：009 修订（串行建索引，绕开 PG 容器 64MB /dev/shm——
 # 并行建索引的共享排序区按 maintenance_work_mem 申请动态共享内存会 ENOSPC）。
 # 63号批次1：加 010（wiki 制品底座四表+页面单元 HNSW）后刷新。
-CURRENT_SCHEMA_CHECKSUM = "a40aa97d8effd924b2c2d0eb94a4b2108ff034934e2b2c37486ddaa7a42d3445"
+# 66号批次1：加 011（wiki 目录草稿表 kb_wiki_tocs）后刷新。
+CURRENT_SCHEMA_CHECKSUM = "503ef7202bc009242bb9259429b261ecdc3e99e661e1a4577db05e03cf6a6aa0"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")
@@ -87,6 +88,8 @@ FORMAL_TABLES: frozenset[str] = frozenset({
     "kb_wiki_pages",
     "kb_wiki_page_links",
     "kb_wiki_page_units",
+    # wiki 目录草稿（66号批次1，迁移 011）：设计态 toc，发布时冻结进 revisions
+    "kb_wiki_tocs",
 })
 EXPECTED_FORMAL_TABLES = len(FORMAL_TABLES)
 EXPECTED_PHYSICAL_TABLES = EXPECTED_FORMAL_TABLES + 1
@@ -95,8 +98,9 @@ EXPECTED_PHYSICAL_TABLES = EXPECTED_FORMAL_TABLES + 1
 # Java log exists and the unified ledger does not yet exist. The kb_* artifact
 # six-table set (61号), the key-open-artifacts table (008), and the wiki
 # foundation four-table set (63号批次1，迁移 010：kb_artifact_sources 与 wiki 专有
-# 三表) are new in this release, so they are subtracted alongside the
-# access-ledger pair when reconstructing the previous release baseline——
+# 三表), and the wiki toc draft table (66号批次1，迁移 011) are new in this
+# release, so they are subtracted alongside the access-ledger pair when
+# reconstructing the previous release baseline——
 # 漏减会让 validate_supported_rebase_source 拒认 1.1.15 源库（一跳升级被误判）。
 PREVIOUS_RELEASE_TABLES: frozenset[str] = frozenset(
     (
@@ -115,6 +119,7 @@ PREVIOUS_RELEASE_TABLES: frozenset[str] = frozenset(
             "kb_wiki_pages",
             "kb_wiki_page_links",
             "kb_wiki_page_units",
+            "kb_wiki_tocs",
         }
     )
     | {"serving_query_logs"}
@@ -151,5 +156,5 @@ RETIRED_TABLES: tuple[str, ...] = (
 if len(RETIRED_TABLES) != len(set(RETIRED_TABLES)):  # pragma: no cover - import guard
     raise RuntimeError("RETIRED_TABLES contains duplicates")
 
-if EXPECTED_FORMAL_TABLES != 64:  # pragma: no cover - import guard
-    raise RuntimeError("FORMAL_TABLES must contain exactly 64 names")
+if EXPECTED_FORMAL_TABLES != 65:  # pragma: no cover - import guard
+    raise RuntimeError("FORMAL_TABLES must contain exactly 65 names")

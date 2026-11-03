@@ -87,6 +87,8 @@ EXPORT_TABLES = [
     "kb_wiki_pages",
     "kb_wiki_page_links",
     "kb_wiki_page_units",
+    # wiki 目录草稿（66号批次1，迁移 011，019 启动链同文；无外键）
+    "kb_wiki_tocs",
 ]
 
 # 兼容尚未完成 52 号 bootstrap 的测试/旧库；生产收敛库验证要求这些表存在。
