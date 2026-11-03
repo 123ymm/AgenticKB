@@ -11,6 +11,7 @@ T1）/ collect_units 编译取材（批次3 T2：列/scope 过滤/向量解码/�
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from array import array
@@ -1014,4 +1015,52 @@ async def test_rollback_reads_old_toc(async_pool) -> None:
     r1_toc = (await adb.get_revision(aid, 1))["schema_json"]["toc"]
     assert r1_toc == {"sections": [
         {"section_title": "节A", "page_keys": ["页"]},
+    ]}
+
+
+async def test_hard_delete_cascades_toc_row(async_pool) -> None:
+    """硬删级联守卫（审查 I-1）：kb_wiki_tocs 身份列刻意无 FK（跨表身份
+    TEXT 引用约定），清理责任在统一硬删管线——delete_artifact 必须连带清
+    toc 草稿行，否则制品删净后残留孤儿行，违反 1.1.7 删除体系不变量。"""
+    adb, wdb, aid = await _make_wiki(async_pool)
+    await wdb.ensure_draft(aid)
+    await _upsert(wdb, aid, _page("页", "页", "x"))
+    async with async_pool.connection() as conn:
+        await upsert_draft_toc(conn, aid, {"sections": [
+            {"section_title": "节", "page_keys": ["页"]},
+        ]}, updated_by="e")
+        assert await get_draft_toc(conn, aid) is not None  # 前置
+
+    await adb.delete_artifact(aid)
+
+    async with async_pool.connection() as conn:
+        assert await get_draft_toc(conn, aid) is None  # 级联已清
+    assert await adb.get_artifact(aid) is None  # 制品已删净
+
+
+async def test_publish_survives_malformed_toc_row(async_pool) -> None:
+    """resolve_toc 窄防御（审查 M-3）：toc 列是 JSONB 无库级形态约束，绕过
+    写路径校验直插畸形行（sections 非 list——运维/脏数据路径）发布不炸
+    事务：畸形节集/节/键列表统一视作空，全页落「其他」节 + appended 警示
+    ——快照仍产出完整目录。"""
+    adb, wdb, aid = await _make_wiki(async_pool)
+    await wdb.ensure_draft(aid)
+    await _upsert(wdb, aid, _page("页A", "页A", "a"))
+    async with async_pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO kb_wiki_tocs (artifact_id, toc, updated_by)"
+            " VALUES (%s, %s::jsonb, 'ops')",
+            (aid, json.dumps({"sections": "运维直插的脏数据"})),
+        )
+
+    art = await adb.get_artifact(aid)
+    result = await wdb.publish(
+        aid, expected_updated_at=art["updated_at"],
+        change_summary="脏toc", published_by="editor-1",
+    )
+    assert any(w.startswith("toc_appended_page_keys:页A")
+               for w in result["warnings"])
+    schema = (await adb.get_revision(aid, 1))["schema_json"]
+    assert schema["toc"] == {"sections": [
+        {"section_title": "其他", "page_keys": ["页A"]},
     ]}

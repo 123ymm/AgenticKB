@@ -164,7 +164,12 @@ async def resolve_toc(
     未收录现存页追加尾部「其他」节（warnings 记 toc_appended_page_keys）；
     空节保留（用户显式组织的节结构不因页删除静默消失）。无 toc 行：按
     ordinal 派生（见 _derive_toc_from_manifest），无警示。两种路径都保证
-    返回完整 page_key 级目录（所有现存页都出现在某节中）。"""
+    返回完整 page_key 级目录（所有现存页都出现在某节中）。
+
+    窄防御（审查 M-3）：toc 列是 JSONB 无库级形态约束，绕过写路径校验的
+    直插脏数据（sections 非 list / 节非 dict / page_keys 非 list）统一
+    **视作空**降级处理——发布是关键事务，畸形数据降级为「全页进其他节」
+    优于炸发布；写路径（upsert_draft_toc）已有 validate_toc 拦截。"""
     existing_keys = [str(p["page_key"]) for p in page_manifest]
     existing = set(existing_keys)
     row = await get_draft_toc(conn, artifact_id)
@@ -172,11 +177,18 @@ async def resolve_toc(
         return _derive_toc_from_manifest(page_manifest), []
 
     draft = row["toc"] if isinstance(row["toc"], dict) else {}
+    sections_in = draft.get("sections")
+    if not isinstance(sections_in, list):
+        sections_in = []
     sections_out: list[dict[str, Any]] = []
     dropped: list[str] = []
     covered: set[str] = set()
-    for sec in draft.get("sections") or []:
-        keys_in = [str(k) for k in (sec.get("page_keys") or [])]
+    for sec in sections_in:
+        if not isinstance(sec, dict):
+            continue
+        keys_raw = sec.get("page_keys")
+        keys_in = ([str(k) for k in keys_raw]
+                   if isinstance(keys_raw, list) else [])
         kept = [k for k in keys_in if k in existing]
         dropped.extend(k for k in keys_in if k not in existing)
         covered.update(kept)

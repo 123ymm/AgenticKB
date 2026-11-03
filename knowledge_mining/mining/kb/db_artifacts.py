@@ -230,6 +230,12 @@ class ArtifactDB:
                     "DELETE FROM kb_wiki_pages WHERE artifact_id = %s",
                     (artifact_id,),
                 )
+                # 66号批次1审查 I-1：toc 草稿行同入级联（无 FK 的清理责任在
+                # 管线；对非 wiki 制品为空删零副作用）。
+                await conn.execute(
+                    "DELETE FROM kb_wiki_tocs WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
                 await conn.execute(
                     "DELETE FROM kb_artifact_sources WHERE artifact_id = %s",
                     (artifact_id,),
