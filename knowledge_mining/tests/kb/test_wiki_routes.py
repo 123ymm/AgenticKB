@@ -944,3 +944,111 @@ async def test_unit_source_revision_view_matrix(env):
     r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
                              params={"unit_id": "ru-2"})
     assert r.status_code == 404
+
+
+# ---------------------------------------------- Q01 投影修复（66号批次5 Task 5.3）
+# POST /wiki/reproject：对 current_revision 的 units 投影幂等重入——修复仅重建
+# 既定版本的检索投影，不悄悄改正文、不产生伪发布版本（66号 §14）。editor+；
+# 健康投影 no-op（reprojected=False，不重置已 done 的 units）；failed>0 /
+# 投影缺失（发布后置失败）→ 重入 project_units + embedding 重拉起
+# （reprojected=True）。
+
+async def test_reproject_permissions_and_healthy_noop(env):
+    """权限矩阵：editor 200 / viewer 403 / 非成员 404；健康投影（发布后置
+    完成，全 done）→ no-op 成功 reprojected=False。"""
+    await _publish_one_page(env)   # rev1 + drain → units 全 done
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.post(f"/api/artifacts/{WID}/wiki/reproject")
+    assert r.status_code == 403
+    env.holder["user"] = _user("u-stranger")
+    r = await env.client.post(f"/api/artifacts/{WID}/wiki/reproject")
+    assert r.status_code == 404   # 反探测
+
+    env.holder["user"] = _user("u-bob")   # editor
+    r = await env.client.post(f"/api/artifacts/{WID}/wiki/reproject")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"artifact_id": WID, "revision": 1,
+                        "reprojected": False}
+    # 健康态 no-op：已 done 的 units 不被重置
+    assert (await env.wdb.units_status(WID, 1))["done"] == 1
+
+
+async def test_reproject_failed_units_rebuilt_no_fake_revision(env):
+    """failed>0 → reprojected=True：投影重置（failed 清零、pending 待重嵌），
+    embedding 重拉起自愈；**不产伪版本**——revisions 行数 / current_revision /
+    正文一字不动（66号 §14）。"""
+    await _publish_one_page(env)
+    rows = env.wdb.units[(WID, 1)]
+    assert rows   # 发布后置投影应存在（单页 1 unit）
+    await env.wdb.mark_units_failed(WID, 1, [r["unit_key"] for r in rows])
+
+    env.holder["user"] = _user("u-bob")
+    r = await env.client.post(f"/api/artifacts/{WID}/wiki/reproject")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"artifact_id": WID, "revision": 1,
+                        "reprojected": True}
+
+    # 投影重置：failed 清零、全量 pending（待 embedding 自愈）
+    status = await env.wdb.units_status(WID, 1)
+    assert status["failed"] == 0
+    assert status["pending"] == status["total"] == 1
+
+    # 不产伪版本（66号 §14 铁律三面）
+    assert set(env.wdb.revisions[WID]) == {1}
+    assert env.adb.artifacts[WID]["current_revision"] == 1
+    page = await env.wdb.get_page(WID, 1, "首页")
+    assert page["title"] == "首页" and page["body_md"] == "v1"
+
+    # 后台 embedding 重拉起 → 自愈闭环（drain 后全 done）
+    await _drain_background()
+    assert await env.wdb.units_status(WID, 1) == \
+        {"total": 1, "done": 1, "failed": 0, "pending": 0}
+
+
+async def test_reproject_idempotent_second_call_noop(env):
+    """幂等（66号 §14）：连调两次——第一次修复（reprojected=True）→ 自愈完成
+    → 第二次 no-op 成功（reprojected=False），已 done 的 units 不被重置
+    （不产无谓 pending / 重复 embedding）。"""
+    await _publish_one_page(env)
+    await env.wdb.mark_units_failed(
+        WID, 1, [r["unit_key"] for r in env.wdb.units[(WID, 1)]])
+
+    env.holder["user"] = _user("u-bob")
+    r1 = await env.client.post(f"/api/artifacts/{WID}/wiki/reproject")
+    assert r1.json()["reprojected"] is True
+    await _drain_background()   # 重嵌完成 → done
+
+    r2 = await env.client.post(f"/api/artifacts/{WID}/wiki/reproject")
+    assert r2.status_code == 200, r2.text
+    assert r2.json() == {"artifact_id": WID, "revision": 1,
+                         "reprojected": False}
+    # 第二次未重置投影：units 仍全 done（若重入会落回 pending）
+    assert (await env.wdb.units_status(WID, 1))["done"] == 1
+
+
+async def test_reproject_missing_projection_rebuilt(env):
+    """投影缺失（发布后置 project_units 失败只记日志——63号 §5.1 语义）→
+    reproject 补建投影（total=0 亦视为待修面）。"""
+    await _publish_one_page(env)
+    del env.wdb.units[(WID, 1)]   # 模拟投影从未落地
+    assert (await env.wdb.units_status(WID, 1))["total"] == 0
+
+    env.holder["user"] = _user("u-bob")
+    r = await env.client.post(f"/api/artifacts/{WID}/wiki/reproject")
+    assert r.status_code == 200, r.text
+    assert r.json()["reprojected"] is True
+    await _drain_background()
+    assert await env.wdb.units_status(WID, 1) == \
+        {"total": 1, "done": 1, "failed": 0, "pending": 0}
+
+
+async def test_reproject_unpublished_404(env):
+    """未发布（rev0）→ 404 revision_not_found（无既定版本可修投影）。"""
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('首页')}",
+        json={"title": "首页", "body_md": "v1"})   # 草稿页，不发布
+    env.holder["user"] = _user("u-bob")
+    r = await env.client.post(f"/api/artifacts/{WID}/wiki/reproject")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "revision_not_found"

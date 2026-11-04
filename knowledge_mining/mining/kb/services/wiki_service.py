@@ -710,6 +710,36 @@ class WikiService:
             self._lifecycle._spawn_embed(artifact_id, rev)
         return {"revision": rev, "units": units}
 
+    # ------------------------------------------- Q01 投影修复（66号批次5 Task 5.3）
+
+    async def reproject(
+        self, user: dict[str, Any], artifact_id: str,
+    ) -> dict[str, Any]:
+        """检索投影修复（editor+）：对 current_revision 幂等重入
+        wdb.project_units——**修复仅重建既定版本的检索投影，不悄悄改正文、
+        不产生伪发布版本**（66号 §14；project_units 只写
+        kb_wiki_page_units，不触 pages/revisions/制品行）。
+
+        重入条件（健康 no-op 语义，幂等键二保证）：failed>0（终态失败不自动
+        重试）或 total==0（发布后置投影失败只记日志的存量面）→ 重入投影 +
+        embedding 重拉起（failed 随 delete+insert 落回 pending 待重嵌）；健康
+        /在飞（pending>0 且无 failed）→ reprojected=False 不动投影（不把已
+        done 的 units 无谓重置）。未发布（rev0）→ 404 revision_not_found。
+        """
+        artifact, _ = await self._artifacts._assert_role(
+            user, artifact_id, *ROLE_DESIGN)
+        rev = int(artifact.get("current_revision") or 0)
+        if rev <= 0:
+            raise WikiError("revision_not_found")
+        units = await self._wdb.units_status(artifact_id, rev)
+        if units.get("total", 0) > 0 and units.get("failed", 0) <= 0:
+            return {"artifact_id": artifact_id, "revision": rev,
+                    "reprojected": False}
+        await self._wdb.project_units(artifact_id, rev)
+        self._lifecycle._spawn_embed(artifact_id, rev)
+        return {"artifact_id": artifact_id, "revision": rev,
+                "reprojected": True}
+
     # ------------------------------------------- 运行态检索转发（63号批次4 Task 4）
 
     async def search(

@@ -1,6 +1,6 @@
 """Wiki 制品 REST 路由 —— /api/artifacts/{artifact_id}/wiki/*（63号 §5.5）。
 
-十六端点：toc 目录读·写（66号批次1 Task 1.4：runtime/revision 快照读 +
+十七端点：toc 目录读·写（66号批次1 Task 1.4：runtime/revision 快照读 +
 draft 行读 + PUT 整体替换，行级乐观锁）/ pages 清单 / page 单页读·改·删 /
 links 出入边 / status units 进度 / search 三通道检索转发（批次4 Task 4：
 ROLE_RUNTIME_READ 前置 → httpx 转发 serving internal
@@ -8,7 +8,8 @@ ROLE_RUNTIME_READ 前置 → httpx 转发 serving internal
 GET/PUT/DELETE——绑定 kb 目录 + 脏标记观测）/ compile 编译四端点（批次3
 Task 3：启动/进度/目录确认/取消——业务在 CompileService，见
 services/wiki_compile_service.py）+ unit-source 回原文薄端点（66号批次5
-Task 5.2 Q01：unit_id → 原文截读 500 字，双重权限在服务层）。
+Task 5.2 Q01：unit_id → 原文截读 500 字，双重权限在服务层）+ reproject
+投影修复端点（66号批次5 Task 5.3 Q01：editor+ 幂等重入投影，不动正文）。
 业务与权限全部在服务层。
 
 网关铁律：page_key 走 URL path 一律 UTF-8 hex 传输（raw path 含 % 即 400）——
@@ -439,6 +440,22 @@ async def unit_source(
         return await svc.unit_source(
             user=user, artifact_id=artifact_id, unit_id=unit_id,
             draft=draft, revision=revision)
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{artifact_id}/wiki/reproject")
+async def reproject(
+    artifact_id: str,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_wiki_service),
+):
+    """Q01 投影修复（66号批次5 Task 5.3）：editor+，对 current_revision
+    幂等重入投影——failed>0 / 投影缺失才重建（reprojected=true，embedding
+    随之重拉起），健康态 no-op；不改正文、不产伪发布版本（66号 §14）。
+    返回 {artifact_id, revision, reprojected}。"""
+    try:
+        return await svc.reproject(user=user, artifact_id=artifact_id)
     except (ArtifactError, WikiError) as exc:
         raise _map_error(exc) from None
 

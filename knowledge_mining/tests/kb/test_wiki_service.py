@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +45,21 @@ WID = "art_wiki1"
 DOMAIN = "plant-a"
 NOW = datetime(2026, 10, 22, 9, 0, 0, 500000, tzinfo=timezone.utc)
 
+# Fake 单调时钟（Task 5.2 双审 flake 项，随 Task 5.3 修复）：Windows 下
+# datetime.now 精度不足以区分同刻连写——upsert_draft_toc 两次调用同微秒时
+# 「令牌随写推进」（updated_at 严格大于旧值）假失败（5 连跑 3 败）。模块级
+# 单调计数保证每次取值 strictly greater，保持「新令牌≠旧令牌」语义。
+_fake_last_now = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _fake_now() -> datetime:
+    global _fake_last_now
+    now = datetime.now(timezone.utc)
+    if now <= _fake_last_now:
+        now = _fake_last_now + timedelta(microseconds=1)
+    _fake_last_now = now
+    return now
+
 
 # ---------------------------------------------------------------- fakes
 
@@ -66,7 +81,7 @@ class FakeWikiDB:
         self.draft_tocs: dict[str, dict] = {}
 
     def _touch(self, artifact_id: str) -> None:
-        self.artifacts[artifact_id]["updated_at"] = datetime.now(timezone.utc)
+        self.artifacts[artifact_id]["updated_at"] = _fake_now()
 
     def _assert_expected(self, artifact_id: str, expected_updated_at) -> None:
         if expected_updated_at is None:
@@ -115,7 +130,7 @@ class FakeWikiDB:
             "frontmatter": dict(frontmatter or {}), "body_md": body_md,
             "origin": origin, "provenance": list(provenance or []),
             "flags": dict(flags or {}), "ordinal": int(ordinal),
-            "updated_at": datetime.now(timezone.utc), "updated_by": updated_by,
+            "updated_at": _fake_now(), "updated_by": updated_by,
         }
         self.pages.setdefault(artifact_id, {}).setdefault(0, {})[page_key] = row
         self._touch(artifact_id)
@@ -167,7 +182,7 @@ class FakeWikiDB:
                 raise WikiError("stale_artifact")
         self.draft_tocs[artifact_id] = {
             "artifact_id": artifact_id, "toc": normalized,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": _fake_now(),
             "updated_by": updated_by,
         }
         return dict(self.draft_tocs[artifact_id])
@@ -313,7 +328,7 @@ class FakeWikiDB:
             max((r for r in page_revs if r > 0), default=0),
         ) + 1
         self.pages[artifact_id][new_rev] = {
-            k: {**v, "updated_at": datetime.now(timezone.utc),
+            k: {**v, "updated_at": _fake_now(),
                 "updated_by": published_by}
             for k, v in rev0.items()
         }
