@@ -22,6 +22,8 @@
 - **git**：add 只写显式路径（`git add -A` 卷密钥事故教训）；每 Task 一提交，conventional commits。
 - **真库容器**：独占端口 + `unified-` 前缀命名，用完 `docker rm -f`；不动正在运行的其他容器。
 - **66号边界**：不新增 owner 转移/任意负责人、不在制品页加任意 key 管理、viewer 不放开草稿/历史、不做工作区/算子/画布（1.1.16 线）。
+- **新表必挂硬删级联**：凡新增制品域表（如 kb_wiki_tocs），必须在 db_artifacts.py 统一硬删管线补 DELETE 并加守卫测试（迁移无 FK 是刻意设计，清理责任在管线——Task 1.2 审查 I-1 教训）。
+- **toc PUT 必须强制乐观锁令牌**：行已存在时 expected_updated_at 缺省不得静默覆盖（Task 1.2 审查 M-1/M-2 交接要求，Task 1.4 落地）。
 - **修实现不修测试**（除非断言本身错——裁定记录在提交信息）。
 
 ---
@@ -163,6 +165,11 @@ COMMENT ON TABLE kb_wiki_tocs IS 'wiki 制品设计态目录（page_key 级）�
 ## 批次3：前端统一外壳——L01 筛选 / D01 头部 / D03 目录 / P01 wiki 差异 / V01 按类型
 
 ### Task 3.1: API/类型层扩展
+
+> **API 形态更新（Task 1.4 实测定案，偏离原设计稿 mode= 参数，对齐 pages/links 端点风格）：**
+> `GET /api/artifacts/{id}/wiki/toc?draft=true`（设计态读 toc 行+pages_total）/ `?revision=N`（历史，editor+）/ 缺省=runtime 读 current 快照（viewer 可读，rev0→404 反探测）；revision 与 draft 同传时 **revision 优先**；无 toc 行/旧快照 toc=null → `{"sections":[],"flat":true}`。
+> `PUT .../wiki/toc` body `{sections, expected_updated_at?}`——**toc 行已存在时令牌必传**（缺→409 stale_artifact，锁内强制；首次创建可省）；畸形→422 `invalid_toc_shape`；页键不存在→422 `toc_unknown_page_keys:键,…`。
+> **前端令牌注意**：toc 写不推进 kb_artifacts.updated_at——目录编辑器的并发令牌用 **toc 行自己的 updated_at**（GET draft 响应返回）。
 
 **Files:**
 - Modify: `kb-ui/src/api/artifacts.ts`（+`getWikiToc(payload)`/`saveWikiToc`；diff 返回类型注释更新）
