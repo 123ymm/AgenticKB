@@ -90,12 +90,20 @@ async def get_draft_toc(conn: Any, artifact_id: str) -> dict[str, Any] | None:
 async def upsert_draft_toc(
     conn: Any, artifact_id: str, toc: Any, updated_by: str = "",
     expected_updated_at: Any = None,
+    require_token_if_exists: bool = False,
 ) -> dict[str, Any]:
     """写草稿目录行（单事务：FOR UPDATE 锁行 → 令牌比对 → UPSERT）。
 
     乐观锁对象是**本行** updated_at（行不存在时首次写入跳过锁检查）；失配
     WikiError("stale_artifact")——两 editor 并发改目录不静默互相覆盖。
-    返回完整行（toc 为归一形态，updated_at 是下次编辑的新令牌）。"""
+
+    require_token_if_exists=True（Task 1.4 质量审查 I-1）：行已存在时
+    expected_updated_at **必传**——缺令牌在锁内判 409，消除 service 层预检
+    （独立连接）与 FOR UPDATE 非同事务的 TOCTOU 窗口（并发首写：后到者
+    预检时行不存在而放行，锁内行已被先到者插入 → 不再静默覆盖）。调用方：
+    人工 PUT（wiki_service.save_toc）传 True；编译 completed 钩子整体替换
+    首落走默认 False（编译器重编译语义，expected=None 跳锁）。返回完整行
+    （toc 为归一形态，updated_at 是下次编辑的新令牌）。"""
     normalized = validate_toc(toc)
     async with conn.transaction():
         cur = await conn.execute(
@@ -104,9 +112,12 @@ async def upsert_draft_toc(
             (artifact_id,),
         )
         row = await cur.fetchone()
-        if row is not None and expected_updated_at is not None \
-                and row["updated_at"] != expected_updated_at:
-            raise WikiError("stale_artifact")
+        if row is not None:
+            if require_token_if_exists and expected_updated_at is None:
+                raise WikiError("stale_artifact")
+            if expected_updated_at is not None \
+                    and row["updated_at"] != expected_updated_at:
+                raise WikiError("stale_artifact")
         cur = await conn.execute(
             """INSERT INTO kb_wiki_tocs (artifact_id, toc, updated_at, updated_by)
                VALUES (%s, %s::jsonb, now(), %s)

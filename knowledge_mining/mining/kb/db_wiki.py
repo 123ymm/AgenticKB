@@ -673,16 +673,20 @@ class WikiDB:
     async def upsert_draft_toc(
         self, artifact_id: str, toc: Any, updated_by: str = "",
         expected_updated_at: Any = None,
+        require_token_if_exists: bool = False,
     ) -> dict[str, Any]:
         """目录草稿行写（66号批次1）：连接编排在此、写逻辑在 db_wiki_toc
         （方法内导入防循环——先例=publish 对 resolve_toc）。编译 completed
         钩子走 expected_updated_at=None 跳锁整体替换（编译器重编译语义：
-        新目录全量覆盖旧草稿，不与编辑令牌纠缠）。"""
+        新目录全量覆盖旧草稿，不与编辑令牌纠缠）。require_token_if_exists
+        语义见 db_wiki_toc.upsert_draft_toc（Task 1.4 质量审查 I-1：人工
+        PUT 传 True 把「行存在缺令牌 → 409」判定搬进锁内）。"""
         from .db_wiki_toc import upsert_draft_toc as _upsert_toc
         async with self._pool.connection() as conn:
             return await _upsert_toc(
                 conn, artifact_id, toc, updated_by=updated_by,
-                expected_updated_at=expected_updated_at)
+                expected_updated_at=expected_updated_at,
+                require_token_if_exists=require_token_if_exists)
 
     async def publish(
         self, artifact_id: str, *, expected_updated_at: Any = None,

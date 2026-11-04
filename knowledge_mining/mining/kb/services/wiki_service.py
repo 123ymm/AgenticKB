@@ -592,34 +592,37 @@ class WikiService:
         self, user: dict[str, Any], artifact_id: str, *, draft: bool = False,
         revision: int | None = None,
     ) -> dict[str, Any]:
-        """目录读三口径（对齐 pages 端点的 draft/revision 路由）：
+        """目录读三口径（draft/revision 路由对齐 pages 端点；**revision 优先**
+        ——draft+revision 同传按 revision 处理，质量审查 M-1 统一口径）：
 
+        - revision=N（ROLE_DESIGN，历史读）：读该版快照；不存在 → 404。
         - draft=true（ROLE_DESIGN）：读 **toc 行本身**（设计态编辑对象）+ 附
           pages_total（当前设计态视图页数，供前端显示未收录数）。无行 →
           {"sections":[],"flat":true}（空目录=平铺）。pages_total 的 revision
           照 _design_revision 口径：draft_open 时 rev0，干净态投影 current。
-        - revision=N（ROLE_DESIGN，历史读）：读该版快照；不存在 → 404。
         - 缺省（ROLE_RUNTIME_READ）：读 current_revision 快照；未发布（rev0）
           → toc_not_found 404（反探测，口径同单页读——运行态查不到即 404）。
         """
         if draft or revision is not None:
-            if draft:
-                rev = await self._design_revision(user, artifact_id, None)
-                row = await self._wdb.get_draft_toc(artifact_id)
-                pages_total = await self._wdb.count_pages(artifact_id, rev)
-                if row is None:
-                    return {"sections": [], "flat": True,
-                            "pages_total": pages_total}
-                sections = ((row.get("toc") or {}).get("sections")) or []
-                return {
-                    "sections": sections,
-                    "flat": not sections,
-                    "pages_total": pages_total,
-                    "updated_at": row.get("updated_at"),
-                    "updated_by": row.get("updated_by"),
-                }
-            await self._design_revision(user, artifact_id, revision)
-            return await self._snapshot_toc(artifact_id, int(revision or 0))
+            if revision is not None:
+                # 返回值丢弃：调用仅为权限断言（design 角色）；快照存在性由
+                # _snapshot_toc 判 revision_not_found。
+                await self._design_revision(user, artifact_id, revision)
+                return await self._snapshot_toc(artifact_id, int(revision))
+            rev = await self._design_revision(user, artifact_id, None)
+            row = await self._wdb.get_draft_toc(artifact_id)
+            pages_total = await self._wdb.count_pages(artifact_id, rev)
+            if row is None:
+                return {"sections": [], "flat": True,
+                        "pages_total": pages_total}
+            sections = ((row.get("toc") or {}).get("sections")) or []
+            return {
+                "sections": sections,
+                "flat": not sections,
+                "pages_total": pages_total,
+                "updated_at": row.get("updated_at"),
+                "updated_by": row.get("updated_by"),
+            }
         rev = await self._runtime_revision(user, artifact_id)
         if rev <= 0:
             raise WikiError("toc_not_found")
@@ -633,18 +636,22 @@ class WikiService:
 
         乐观锁对象是 **toc 行自身** updated_at（页 PUT 比对 kb_artifacts.
         updated_at 的行级变体）：行已存在时 expected_updated_at 必传——缺令牌
-        → WikiError("stale_artifact") 409（Task 1.2 审查 M-1 铁律：两 editor
-        并发改目录不静默 last-write-wins；信封同页 PUT 令牌失配先例）；行不
-        存在（首次创建）免令牌（编译钩子/首次编辑场景）。
+        → stale_artifact 409（Task 1.2 审查 M-1 铁律：两 editor 并发改目录
+        不静默 last-write-wins；信封同页 PUT 令牌失配先例）；行不存在（首次
+        创建）免令牌（编译钩子/首次编辑场景）。**权威判定在 wdb 锁内**
+        （require_token_if_exists=True，质量审查 I-1 消 TOCTOU：service 预检
+        与 FOR UPDATE 非同事务，并发首写窗口内后到者不再静默覆盖先到者）；
+        service 层保留同款快检（409 零副作用在 ensure_draft 检出之前，先例
+        =_check_freshness 快检 + db 层权威的双层模式）。
 
         校验次序（畸形优先于 stale——对齐 db 层审查 I-2：校验失败不占行锁；
         且全部失败零副作用在 ensure_draft 之前）：①validate_toc 形态（422
-        invalid_toc_shape:路径）②行存在缺令牌 409 ③ensure_draft 检出（页键
-        校验对象是 rev0 草稿页）④页键存在性——body 全部 page_keys 必须存在
-        于 rev0，缺 → 422 toc_unknown_page_keys:键名清单（审查 M-4 消解：写
-        入面即拒，发布 dropped 警示不再承担逗号歧义）⑤wdb.upsert_draft_toc
-        （内部重复形态校验无害 + 权威 FOR UPDATE 比对）。返回完整 toc 行
-        （updated_at=下次编辑的新令牌）。
+        invalid_toc_shape:路径）②行存在缺令牌 409（快检）③ensure_draft 检出
+        （页键校验对象是 rev0 草稿页）④页键存在性——body 全部 page_keys
+        必须存在于 rev0，缺 → 422 toc_unknown_page_keys:键名清单（审查 M-4
+        消解：写入面即拒，发布 dropped 警示不再承担逗号歧义）⑤wdb.
+        upsert_draft_toc（内部重复形态校验无害 + 锁内权威判定）。返回完整
+        toc 行（updated_at=下次编辑的新令牌）。
         """
         await self._artifacts._assert_role(user, artifact_id, *ROLE_DESIGN)
         try:
@@ -664,7 +671,8 @@ class WikiService:
             raise WikiError("toc_unknown_page_keys:" + ",".join(missing))
         return await self._wdb.upsert_draft_toc(
             artifact_id, toc, updated_by=str(user["id"]),
-            expected_updated_at=_expected_dt(expected_updated_at))
+            expected_updated_at=_expected_dt(expected_updated_at),
+            require_token_if_exists=True)
 
     async def status(self, user: dict[str, Any], artifact_id: str) -> dict[str, Any]:
         """units 进度（运行态信息）：{revision, units 四计数}。重启自愈——

@@ -146,16 +146,21 @@ class FakeWikiDB:
 
     async def upsert_draft_toc(
         self, artifact_id: str, toc, updated_by: str = "",
-        expected_updated_at=None,
+        expected_updated_at=None, require_token_if_exists: bool = False,
     ) -> dict:
         from knowledge_mining.mining.kb.db_wiki_toc import validate_toc
         # 先形态校验再 stale 比对——对齐真实现次序（审查 I-2：畸形 422
-        # 优先于 stale 409，校验失败不占行锁）
+        # 优先于 stale 409，校验失败不占行锁）。require_token_if_exists 判定
+        # 次序同真实现锁内（缺令牌 409 先于令牌失配 409——I-1：fake 无真
+        # FOR UPDATE，语义镜像供直调路径覆盖）。
         normalized = validate_toc(toc)
         row = self.draft_tocs.get(artifact_id)
-        if row is not None and expected_updated_at is not None \
-                and row["updated_at"] != expected_updated_at:
-            raise WikiError("stale_artifact")
+        if row is not None:
+            if require_token_if_exists and expected_updated_at is None:
+                raise WikiError("stale_artifact")
+            if expected_updated_at is not None \
+                    and row["updated_at"] != expected_updated_at:
+                raise WikiError("stale_artifact")
         self.draft_tocs[artifact_id] = {
             "artifact_id": artifact_id, "toc": normalized,
             "updated_at": datetime.now(timezone.utc),

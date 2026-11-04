@@ -582,7 +582,17 @@ async def test_toc_revision_history_and_null_fallback(env):
     r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
                              params={"revision": 99})
     assert r.status_code == 404
-    assert "revision_not_found" in r.text
+    # M-2：无后缀 404 码走 {code,message} 信封（与 toc_not_found 同面）
+    assert r.json()["detail"]["code"] == "revision_not_found"
+    assert r.json()["detail"]["message"]
+
+    # M-1：draft+revision 同传 → revision 优先（口径同 pages/_design_revision）
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/toc",
+                             params={"draft": "true", "revision": 1})
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "sections": [{"section_title": "S1", "page_keys": ["页A"]}],
+        "flat": False, "revision": 1}   # revision 视图形态（无 pages_total）
 
     # 旧版快照回落：目录定版前发布的版本行无 toc → sections=[] flat=true
     env.wdb.revisions[WID][1]["schema_json"]["toc"] = None
@@ -666,6 +676,37 @@ async def test_toc_put_lock_and_validation(env):
         json={"sections": [{"section_title": "S3", "page_keys": ["页A"]}],
               "expected_updated_at": r.json()["updated_at"]})
     assert r.status_code == 200, r.text
+
+
+async def test_toc_upsert_in_lock_token_required(env):
+    """I-1（质量审查）：锁内权威判定——直调 wdb.upsert_draft_toc(
+    require_token_if_exists=True) 行存在+缺令牌 → stale_artifact（绕过
+    service 快检路径，覆盖 TOCTOU 窗口关闭的锁内分支；PG 并发真首写竞态
+    用例留批次6）。默认 False（编译钩子口径）：行存在+缺令牌 → 放行整体
+    替换。"""
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('页A')}",
+        json={"title": "页A", "body_md": "v1"})
+    toc = {"sections": [{"section_title": "S1", "page_keys": ["页A"]}]}
+    await env.wdb.upsert_draft_toc(WID, toc, updated_by="u-bob")
+
+    # require_token_if_exists=True：行存在 + 缺令牌 → 锁内 409 口径
+    with pytest.raises(WikiError, match="stale_artifact"):
+        await env.wdb.upsert_draft_toc(
+            WID, toc, updated_by="u-bob", require_token_if_exists=True)
+
+    # 同参数但带当前令牌 → 放行（权威比对分支不受影响）
+    row = env.wdb.draft_tocs[WID]
+    updated = await env.wdb.upsert_draft_toc(
+        WID, toc, updated_by="u-bob",
+        expected_updated_at=row["updated_at"],
+        require_token_if_exists=True)
+    assert updated["updated_at"] != row["updated_at"]   # 令牌随写前进
+
+    # 默认 False（编译 completed 钩子口径）：行存在 + 缺令牌 → 整体替换放行
+    replaced = await env.wdb.upsert_draft_toc(
+        WID, toc, updated_by="compiler")
+    assert replaced["updated_by"] == "compiler"
 
 
 async def test_publish_toc_warnings_end_to_end(env):

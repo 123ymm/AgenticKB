@@ -184,6 +184,10 @@ _WIKI_MESSAGES: dict[str, str] = {
                              "awaiting_toc 态）",
     "compile_not_found": "该制品尚无编译批次（先启动编译）",
     "toc_not_found": "该制品尚无已发布目录（先发布或切草稿视图编辑）",
+    # 质量审查 M-2：无后缀 404 码统一走 {code,message} 信封（与 toc_not_found
+    # 同面）；带细节后缀的 422 码（invalid_toc_shape/toc_unknown_page_keys）
+    # 维持裸 detail 透传（先例=invalid_frontmatter）。
+    "revision_not_found": "该版本不存在（无对应发布快照）",
     "no_sources": "未绑定任何知识库来源，请先在来源面板绑定",
     # 上限数从服务常量派生（审查 Minor：文案与 MAX_UNITS 不双源漂移）。
     "too_many_units": f"绑定范围内检索单元超上限（{MAX_UNITS}），"
