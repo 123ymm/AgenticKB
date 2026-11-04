@@ -236,11 +236,13 @@ const previewHtml = computed(() => renderMarkdown(form.value.bodyMd))
 
 onMounted(loadPages)
 
-/** 页面清单：编辑者读设计态 draft 视图（rev0 工作区），viewer 读运行态。 */
+/** 页面清单：编辑者读设计态 draft 视图（rev0 工作区），viewer 读运行态。
+ * 响应为 {revision, pages} 信封（D03.1）——清单只消费 pages。 */
 async function loadPages(): Promise<void> {
   loading.value = true
   try {
-    pages.value = await api.listWikiPages(props.artifactId, { draft: props.canWrite })
+    const envelope = await api.listWikiPages(props.artifactId, { draft: props.canWrite })
+    pages.value = envelope.pages
     if (selectedKey.value && !pages.value.some(p => p.page_key === selectedKey.value)) {
       selectedKey.value = ''   // 选中页已被删（并发）→ 收起表单
     }
@@ -418,7 +420,8 @@ function splitCsv(value: string): string[] {
   return value.split(/[，,]/).map(v => v.trim()).filter(Boolean)
 }
 
-defineExpose({ loadPages })
+/** selectPage 暴露给父级（D03.1：图谱「打开页面」回页面视图定位该页）。 */
+defineExpose({ loadPages, selectPage })
 </script>
 
 <style scoped>

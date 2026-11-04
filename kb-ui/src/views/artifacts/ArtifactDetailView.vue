@@ -97,7 +97,8 @@
           :description="emptyGuide.description"
         />
         <!-- wiki 分支（63号批次2/3）：编译面板（来源绑定+目录确认+进度轮询）
-             在上、页面编辑面板在下；viewer 也可读（面板内部按 canWrite 收敛写入口） -->
+             在上；内容区「页面｜图谱」切换（66号 D03.1——四个主页签不变）。
+             viewer 也可读（面板内部按 canWrite 收敛写入口）。 -->
         <template v-if="artifact.kind === 'wiki'">
           <WikiCompilePanel
             :artifact-id="artifactId"
@@ -105,13 +106,36 @@
             :expected-updated-at="artifact.updated_at"
             @changed="reloadAll"
           />
-          <el-divider content-position="left">页面编辑</el-divider>
+          <el-divider content-position="left">
+            <el-button-group size="small" class="artifact-detail__wiki-views">
+              <el-button
+                :type="designWikiView === 'pages' ? 'primary' : ''"
+                data-test="wiki-design-view-pages"
+                @click="setWikiView('design', 'pages')"
+              >页面</el-button>
+              <el-button
+                :type="designWikiView === 'graph' ? 'primary' : ''"
+                data-test="wiki-design-view-graph"
+                @click="setWikiView('design', 'graph')"
+              >图谱</el-button>
+            </el-button-group>
+          </el-divider>
+          <!-- v-show 常驻：切图谱不丢编辑器状态（目录未保存修改守卫在面板内） -->
           <WikiEditorPanel
+            v-show="designWikiView === 'pages'"
+            ref="wikiEditorRef"
             :artifact-id="artifactId"
             :can-write="canWrite"
             :expected-updated-at="artifact.updated_at"
             :draft-open="artifact.draft_open"
             @changed="reloadAll"
+          />
+          <WikiGraphPanel
+            v-if="designGraphActivated"
+            v-show="designWikiView === 'graph'"
+            :artifact-id="artifactId"
+            :draft="canWrite"
+            @open-page="openWikiPageFromDesign"
           />
         </template>
         <template v-else-if="canWrite">
@@ -160,12 +184,35 @@
           <el-button data-test="edit-meta" @click="openMetaEdit">编辑元信息</el-button>
         </div>
 
-        <!-- wiki 运行态阅读器（63号批次2）：面板自加载 current_revision 投影；
-             表格制品走下方只读行表（两条路径互斥，DOM 结构各不受扰） -->
-        <WikiReaderPanel
-          v-if="artifact.kind === 'wiki'"
-          :artifact-id="artifactId"
-        />
+        <!-- wiki 运行态阅读器/图谱（63号批次2 + 66号 D03.1）：面板自加载
+             current_revision 投影；「页面｜图谱」内容区切换（只读——图谱
+             draft=false 读正式版）。表格制品走下方只读行表（互斥）。 -->
+        <template v-if="artifact.kind === 'wiki'">
+          <el-button-group size="small" class="artifact-detail__wiki-views">
+            <el-button
+              :type="runtimeWikiView === 'pages' ? 'primary' : ''"
+              data-test="wiki-runtime-view-pages"
+              @click="setWikiView('runtime', 'pages')"
+            >页面</el-button>
+            <el-button
+              :type="runtimeWikiView === 'graph' ? 'primary' : ''"
+              data-test="wiki-runtime-view-graph"
+              @click="setWikiView('runtime', 'graph')"
+            >图谱</el-button>
+          </el-button-group>
+          <WikiReaderPanel
+            v-show="runtimeWikiView === 'pages'"
+            ref="wikiReaderRef"
+            :artifact-id="artifactId"
+          />
+          <WikiGraphPanel
+            v-if="runtimeGraphActivated"
+            v-show="runtimeWikiView === 'graph'"
+            :artifact-id="artifactId"
+            :draft="false"
+            @open-page="openWikiPageFromRuntime"
+          />
+        </template>
         <template v-else>
           <el-table v-loading="rowsLoading" :data="runtimeRows" size="small">
             <el-table-column label="行键" min-width="150">
@@ -289,6 +336,7 @@ import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.
 import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
 import WikiCompilePanel from '@/components/artifacts/WikiCompilePanel.vue'
 import WikiEditorPanel from '@/components/artifacts/WikiEditorPanel.vue'
+import WikiGraphPanel from '@/components/artifacts/WikiGraphPanel.vue'
 import WikiReaderPanel from '@/components/artifacts/WikiReaderPanel.vue'
 import { decodeRowKey } from '@/utils/rowKey'
 import type { ArtifactColumn, ArtifactDetail, ArtifactKind, ArtifactRow } from '@/types/artifacts'
@@ -323,6 +371,39 @@ const metaForm = ref({ title: '', description: '', usage_note: '', visibility: '
 
 // 发布
 const publishVisible = ref(false)
+
+// ── wiki 内容区「页面｜图谱」切换（66号 D03.1：四个主页签不变，表格制品无此入口）──
+/** 当前内容视图（pages=编辑器/阅读器；graph=只读图谱）。 */
+const designWikiView = ref<'pages' | 'graph'>('pages')
+const runtimeWikiView = ref<'pages' | 'graph'>('pages')
+/** 图谱懒挂载：首次切图谱才 mount（不拉数据），此后 v-show 常驻（切回不重载）。 */
+const designGraphActivated = ref(false)
+const runtimeGraphActivated = ref(false)
+/** 面板引用：图谱「打开页面」→ 切回页面视图并定位该页（selectPage 已 expose）。 */
+const wikiEditorRef = ref<InstanceType<typeof WikiEditorPanel> | null>(null)
+const wikiReaderRef = ref<InstanceType<typeof WikiReaderPanel> | null>(null)
+
+function setWikiView(area: 'design' | 'runtime', view: 'pages' | 'graph'): void {
+  if (area === 'design') {
+    if (view === 'graph') designGraphActivated.value = true
+    designWikiView.value = view
+  } else {
+    if (view === 'graph') runtimeGraphActivated.value = true
+    runtimeWikiView.value = view
+  }
+}
+
+/** 图谱「打开页面」：切回页面视图 + 定位该页（编辑器/阅读器 v-show 常驻已挂载；
+ * 方法级可选调用——面板被测试桩替换等边缘形态下静默跳过）。 */
+function openWikiPageFromDesign(pageKey: string): void {
+  designWikiView.value = 'pages'
+  void wikiEditorRef.value?.selectPage?.(pageKey)
+}
+
+function openWikiPageFromRuntime(pageKey: string): void {
+  runtimeWikiView.value = 'pages'
+  void wikiReaderRef.value?.selectPage?.(pageKey)
+}
 
 /** canWrite = my_role ∈ {owner, editor}（详情响应附带；admin 后端归一 owner）。 */
 const canWrite = computed(() => artifact.value?.my_role === 'owner' || artifact.value?.my_role === 'editor')
@@ -598,5 +679,7 @@ defineExpose({ reloadAll })
 .artifact-detail__usage-missing { color: var(--el-color-warning); }
 .artifact-detail__visibility-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; line-height: 1.5; }
 .artifact-detail__empty-guide { margin-bottom: 14px; }
+/* wiki 内容区「页面｜图谱」切换（D03.1）：运行态入口组与面板间距 */
+.artifact-detail__wiki-views { margin-bottom: 10px; }
 .artifact-detail__pager { margin-top: 12px; justify-content: flex-end; }
 </style>

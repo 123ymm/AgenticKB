@@ -336,6 +336,55 @@ async def test_links_endpoint_direction_and_draft(env):
     assert r.status_code == 403
 
 
+async def test_pages_links_revision_envelope(env):
+    """D03.1：pages/links 响应信封回填 revision（图谱混版判定契约——66号：
+    前端 pages/links 两请求间发生发布须可检出）：runtime=current（未发布
+    0）；draft=设计态投影（draft_open 时 rev0，干净态投影 current）；显式
+    revision=N 原样回填。"""
+    # 未发布 runtime：revision=0 + 空集（rev0 对 runtime 不可见）
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/pages")
+    assert r.status_code == 200
+    assert r.json() == {"revision": 0, "pages": []}
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/links")
+    assert r.json() == {"revision": 0, "links": []}
+
+    # 建页 + 发布 → runtime 两端点 revision=1（同版可判定）
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('A页')}",
+        json={"title": "A页", "body_md": "参见 [[B页]]"})
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('B页')}", json={"title": "B页"})
+    await _publish(env)
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/pages")
+    assert r.json()["revision"] == 1
+    assert len(r.json()["pages"]) == 2
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/links")
+    assert r.json()["revision"] == 1
+    assert len(r.json()["links"]) == 1
+
+    # draft 视图（editor）：干净态投影 current=1；检出草稿后 rev0
+    r = await env.client.get(
+        f"/api/artifacts/{WID}/wiki/pages", params={"draft": "true"})
+    assert r.status_code == 200 and r.json()["revision"] == 1
+    await env.client.put(   # 页写检出草稿（draft_open=True）
+        f"/api/artifacts/{WID}/wiki/page/{_hex('草稿')}",
+        json={"title": "草稿页"})
+    r = await env.client.get(
+        f"/api/artifacts/{WID}/wiki/pages", params={"draft": "true"})
+    assert r.json()["revision"] == 0
+    r = await env.client.get(
+        f"/api/artifacts/{WID}/wiki/links", params={"draft": "true"})
+    assert r.json()["revision"] == 0
+
+    # 显式历史 revision 原样回填（design 角色）
+    r = await env.client.get(
+        f"/api/artifacts/{WID}/wiki/pages", params={"revision": 1})
+    assert r.status_code == 200 and r.json()["revision"] == 1
+    r = await env.client.get(
+        f"/api/artifacts/{WID}/wiki/links", params={"revision": 1})
+    assert r.json()["revision"] == 1
+
+
 async def test_status_endpoint(env):
     """status：未发布 revision=0/units 全 0；发布后 units 进度（发布后置
     embedding 完成后 done=total）。"""

@@ -242,13 +242,27 @@ export interface WikiPage extends WikiPageMeta {
   provenance?: unknown[] | null
 }
 
-/** 页面边（GET /wiki/links 信封 {links}；to_page 已按 page_key ∪ aliases
+/** 页面边（GET /wiki/links 信封；to_page 已按 page_key ∪ aliases
  * 归一到 canonical 键——反向链接与阅读器跳转的正确性前提）。 */
 export interface WikiLink {
   from_page: string
   to_page: string
   anchor_text: string
   status: 'valid' | 'broken'
+}
+
+/** GET /wiki/pages 信封（D03.1）：revision=服务端实际读取版本（draft 视图
+ * rev0 / runtime current_revision / 显式历史 N）——图谱 pages/links 两请求
+ * 混版判定用（两请求间发生发布可检出）。 */
+export interface WikiPagesEnvelope {
+  revision: number
+  pages: WikiPageMeta[]
+}
+
+/** GET /wiki/links 信封（D03.1）：revision 口径同 WikiPagesEnvelope。 */
+export interface WikiLinksEnvelope {
+  revision: number
+  links: WikiLink[]
 }
 
 /** units embedding 进度四计数（GET /wiki/status 的 units 面）。 */

@@ -264,12 +264,14 @@ const emptyText = computed(() => {
 
 onMounted(loadPages)
 
-/** 页面清单（运行态：draft=false 读 current_revision 投影）+ 首选页/保持选中页。 */
+/** 页面清单（运行态：draft=false 读 current_revision 投影）+ 首选页/保持
+ * 选中页。响应为 {revision, pages} 信封（D03.1）——清单只消费 pages。 */
 async function loadPages(): Promise<void> {
   loading.value = true
   loadFailedText.value = ''
   try {
-    pages.value = await api.listWikiPages(props.artifactId, { draft: false })
+    const envelope = await api.listWikiPages(props.artifactId, { draft: false })
+    pages.value = envelope.pages
     // 分节目录先于首选页落地（失败静默回落平铺）——目录序决定初始选中页，
     // 保证打开阅读器时目录首项高亮与正文一致（分节下≠ordinal 首页）。
     await loadToc()
@@ -327,16 +329,17 @@ async function selectPage(pageKey: string): Promise<void> {
   }
 }
 
-/** 出入边并行拉取；仅当仍是当前页时落地（切页竞态防串台）。 */
+/** 出入边并行拉取；仅当仍是当前页时落地（切页竞态防串台）。响应为
+ * {revision, links} 信封（D03.1）——侧栏只消费 links。 */
 async function loadLinks(pageKey: string): Promise<void> {
   try {
-    const [out, inn] = await Promise.all([
+    const [outEnv, inEnv] = await Promise.all([
       api.listWikiLinks(props.artifactId, { page_key: pageKey, direction: 'out' }),
       api.listWikiLinks(props.artifactId, { page_key: pageKey, direction: 'in' }),
     ])
     if (selectedKey.value !== pageKey) return
-    outLinks.value = out
-    inLinks.value = inn
+    outLinks.value = outEnv.links
+    inLinks.value = inEnv.links
   } catch (error) {
     if (selectedKey.value === pageKey) {
       ElMessage.error(`加载链接信息失败：${await apiErrorDetail(error)}`)
@@ -467,8 +470,9 @@ function pageTypeMeta(pageType: WikiPageType | string) {
   return PAGE_TYPES.find(t => t.value === pageType)
 }
 
-/** 命令式刷新（发布后父级 reloadAll 可不接线——面板自管理；暴露给外层按需调用）。 */
-defineExpose({ reload: loadPages })
+/** 命令式刷新（发布后父级 reloadAll 可不接线——面板自管理）；selectPage
+ * 暴露给父级（D03.1：图谱「打开页面」回页面视图定位该页）。 */
+defineExpose({ reload: loadPages, selectPage })
 </script>
 
 <style scoped>

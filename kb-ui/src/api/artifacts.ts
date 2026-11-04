@@ -24,10 +24,10 @@ import type {
   RevisionInfo,
   WikiCompileStatus,
   WikiDiffResult,
-  WikiLink,
+  WikiLinksEnvelope,
   WikiPage,
-  WikiPageMeta,
   WikiPageType,
+  WikiPagesEnvelope,
   WikiSearchResult,
   WikiSource,
   WikiStatus,
@@ -346,12 +346,13 @@ export function useArtifactsApi() {
 
     // ── Wiki 制品（63号批次2 六端点）──
     /** 页面清单：设计态编辑传 draft=true（rev0 工作区；干净态投影 current）；
-     * viewer 走 runtime 视图（draft=false 读 current_revision）。 */
+     * viewer 走 runtime 视图（draft=false 读 current_revision）。信封含
+     * revision（D03.1 图谱混版判定——两请求间发生发布可检出）。 */
     async listWikiPages(
       artifactId: string, params?: { draft?: boolean; revision?: number },
-    ): Promise<WikiPageMeta[]> {
+    ): Promise<WikiPagesEnvelope> {
       const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/pages`, { params })
-      return data.pages ?? []
+      return data
     },
 
     /** 单页全字段（page_key 自动 hex 编码进 URL——raw path 含 % 即网关 400）。 */
@@ -384,13 +385,14 @@ export function useArtifactsApi() {
     },
 
     /** 出入边（63号 §2.4 反向链接）：page_key 是明文 query 参数——
-     * query 不经网关 path 校验，无需 hex。 */
+     * query 不经网关 path 校验，无需 hex；缺省=全量（图谱视图口径）。
+     * 信封含 revision（D03.1 混版判定，口径同 listWikiPages）。 */
     async listWikiLinks(
       artifactId: string,
       params?: { page_key?: string; direction?: 'out' | 'in'; draft?: boolean },
-    ): Promise<WikiLink[]> {
+    ): Promise<WikiLinksEnvelope> {
       const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/links`, { params })
-      return data.links ?? []
+      return data
     },
 
     /** units embedding 进度（运行态信息，viewer+ 可读）。 */

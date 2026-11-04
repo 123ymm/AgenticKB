@@ -302,6 +302,55 @@ describe('artifact detail view — 设计态空制品引导（66号 §4）', () 
   })
 })
 
+describe('artifact detail view — D03.1 wiki 内容区「页面｜图谱」切换', () => {
+  interface WikiViewVm {
+    activeTab: string
+    designWikiView: 'pages' | 'graph'
+    runtimeWikiView: 'pages' | 'graph'
+  }
+
+  it('图谱懒挂载（design draft=canWrite / runtime 恒 false）；打开页面切回页面视图；表格制品无入口', async () => {
+    state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, kind: 'wiki' })
+    const wrapper = mountDetail()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as WikiViewVm
+
+    // 初始：页面视图，图谱未挂载（不预拉数据）
+    expect(vm.designWikiView).toBe('pages')
+    expect(wrapper.findComponent({ name: 'WikiGraphPanel' }).exists()).toBe(false)
+
+    // 设计态切图谱 → 懒挂载；owner 读草稿图（draft=canWrite，入口守卫口径）
+    await wrapper.find('[data-test="wiki-design-view-graph"]').trigger('click')
+    const designGraph = wrapper.findComponent({ name: 'WikiGraphPanel' })
+    expect(designGraph.exists()).toBe(true)
+    expect(designGraph.props('artifactId')).toBe('art-1')
+    expect(designGraph.props('draft')).toBe(true)
+
+    // 图谱「打开页面」→ 切回页面视图（编辑器 v-show 常驻，状态不丢）
+    designGraph.vm.$emit('open-page', 'home')
+    await flushPromises()
+    expect(vm.designWikiView).toBe('pages')
+
+    // 运行态切图谱 → 恒 draft=false（正式版图，viewer 不可借图谱读草稿）
+    vm.activeTab = 'runtime'
+    await flushPromises()
+    await wrapper.find('[data-test="wiki-runtime-view-graph"]').trigger('click')
+    const runtimeGraphs = wrapper.findAllComponents({ name: 'WikiGraphPanel' })
+      .filter(g => g.props('draft') === false)   // 设计态图 draft=true（owner）
+    expect(runtimeGraphs).toHaveLength(1)   // 运行态独立懒挂载
+    runtimeGraphs[0].vm.$emit('open-page', 'home')
+    await flushPromises()
+    expect(vm.runtimeWikiView).toBe('pages')
+
+    // 表格制品：两内容区均无「图谱」入口（66号：表格不加此入口）
+    state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, kind: 'table' })
+    const tableDetail = mountDetail()
+    await flushPromises()
+    expect(tableDetail.find('[data-test="wiki-design-view-graph"]').exists()).toBe(false)
+    expect(tableDetail.find('[data-test="wiki-runtime-view-graph"]').exists()).toBe(false)
+  })
+})
+
 describe('artifact detail view — D01 头部服务版本与待发布并存表述（66号 §5）', () => {
   /** 头部 tag 区文本（标题不含版本语义，tag 区是并存表述的落点）。 */
   const headerTags = (wrapper: VueWrapper): string =>

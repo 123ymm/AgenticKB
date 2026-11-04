@@ -448,6 +448,17 @@ class WikiService:
             user, artifact_id, *ROLE_RUNTIME_READ)
         return int(artifact.get("current_revision") or 0)
 
+    async def resolve_view_revision(
+        self, user: dict[str, Any], artifact_id: str, *,
+        draft: bool = False, revision: int | None = None,
+    ) -> int:
+        """视图 revision 解析（66号 D03.1：pages/links 响应信封回填——图谱
+        两请求混版判定）。与 list_pages/list_links 完全同口径单源复用：
+        draft/显式 revision → design；缺省 → runtime。"""
+        if draft or revision is not None:
+            return await self._design_revision(user, artifact_id, revision)
+        return await self._runtime_revision(user, artifact_id)
+
     # ------------------------------------------------------ 页面写
 
     async def upsert_page(

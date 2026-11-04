@@ -93,7 +93,8 @@ function mountPanel(canWrite = true): VueWrapper {
 }
 
 beforeEach(() => {
-  state.api.listWikiPages.mockReset().mockResolvedValue(metaPages)
+  // D03.1 信封形态：{revision, pages}（清单只消费 pages）
+  state.api.listWikiPages.mockReset().mockResolvedValue({ revision: 0, pages: metaPages })
   state.api.getWikiPage.mockReset().mockResolvedValue(homePage)
   state.api.upsertWikiPage.mockReset().mockResolvedValue(homePage)
   state.api.deleteWikiPage.mockReset().mockResolvedValue(undefined)
@@ -284,7 +285,7 @@ describe('WikiEditorPanel', () => {
   })
 
   it('shows the empty state when the artifact has no pages', async () => {
-    state.api.listWikiPages.mockResolvedValueOnce([])
+    state.api.listWikiPages.mockResolvedValueOnce({ revision: 0, pages: [] })
     const wrapper = mountPanel()
     await flushPromises()
 

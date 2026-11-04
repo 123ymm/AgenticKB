@@ -278,8 +278,13 @@ async def list_pages(
     user: dict[str, Any] = Depends(current_user),
     svc: Any = Depends(get_wiki_service),
 ):
+    """页面清单（轻量）。信封回填 revision=实际读取版本（66号 D03.1：图谱
+    pages/links 两请求混版判定——两请求间发生发布可检出）。"""
     try:
-        return {"pages": await svc.list_pages(
+        resolved = await svc.resolve_view_revision(
+            user=user, artifact_id=artifact_id,
+            draft=draft, revision=revision)
+        return {"revision": resolved, "pages": await svc.list_pages(
             user=user, artifact_id=artifact_id,
             draft=draft, revision=revision)}
     except (ArtifactError, WikiError) as exc:
@@ -355,8 +360,12 @@ async def list_links(
     user: dict[str, Any] = Depends(current_user),
     svc: Any = Depends(get_wiki_service),
 ):
+    """出边/入边。信封回填 revision=实际读取版本（口径同 pages 端点——66号
+    D03.1 混版判定；links 不支持显式 revision 查询参数，随 draft/缺省视图）。"""
     try:
-        return {"links": await svc.list_links(
+        resolved = await svc.resolve_view_revision(
+            user=user, artifact_id=artifact_id, draft=draft)
+        return {"revision": resolved, "links": await svc.list_links(
             user=user, artifact_id=artifact_id, page_key=page_key,
             direction=direction, draft=draft)}
     except (ArtifactError, WikiError) as exc:

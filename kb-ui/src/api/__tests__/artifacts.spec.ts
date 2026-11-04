@@ -19,9 +19,9 @@ vi.mock('axios', () => ({
         if (url.endsWith('/table/columns')) return { data: { columns: [{ column_id: 'c1' }] } }
         if (url.includes('/table/rows')) return { data: { rows: [], total: 0, page: 1, size: 50 } }
         if (url.endsWith('/diff')) return { data: { added: [], removed: [], changed: [], added_count: 0, removed_count: 0, changed_count: 0 } }
-        if (url.includes('/wiki/pages')) return { data: { pages: [{ page_key: 'home' }] } }
+        if (url.includes('/wiki/pages')) return { data: { revision: 2, pages: [{ page_key: 'home' }] } }
         if (url.includes('/wiki/page/')) return { data: { page_key: 'home', body_md: '# x' } }
-        if (url.includes('/wiki/links')) return { data: { links: [{ from_page: 'home', to_page: 'a', anchor_text: '', status: 'valid' }] } }
+        if (url.includes('/wiki/links')) return { data: { revision: 2, links: [{ from_page: 'home', to_page: 'a', anchor_text: '', status: 'valid' }] } }
         if (url.includes('/wiki/status')) return { data: { revision: 1, units: { total: 2, done: 1, failed: 0, pending: 1 } } }
         if (url.endsWith('/wiki/toc')) {
           if (method === 'put') return { data: { artifact_id: 'a1', toc: { sections: [] }, updated_at: '2026-11-04T00:00:00Z', updated_by: 'u1' } }
@@ -242,10 +242,13 @@ describe('artifacts API', () => {
   it('unwraps wiki pages/links/status envelopes', async () => {
     const api = useArtifactsApi()
 
-    await expect(api.listWikiPages('a1')).resolves.toEqual([{ page_key: 'home' }])
-    await expect(api.listWikiLinks('a1')).resolves.toEqual([
-      { from_page: 'home', to_page: 'a', anchor_text: '', status: 'valid' },
-    ])
+    // D03.1：pages/links 信封含 revision（图谱混版判定），不再解成裸数组
+    await expect(api.listWikiPages('a1')).resolves.toEqual(
+      { revision: 2, pages: [{ page_key: 'home' }] })
+    await expect(api.listWikiLinks('a1')).resolves.toEqual({
+      revision: 2,
+      links: [{ from_page: 'home', to_page: 'a', anchor_text: '', status: 'valid' }],
+    })
     await expect(api.getWikiStatus('a1')).resolves.toEqual({
       revision: 1, units: { total: 2, done: 1, failed: 0, pending: 1 },
     })

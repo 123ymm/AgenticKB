@@ -85,12 +85,16 @@ function mountReader(): VueWrapper {
 }
 
 beforeEach(() => {
-  state.api.listWikiPages.mockReset().mockResolvedValue(metaPages)
+  // D03.1 信封形态：{revision, pages}（清单只消费 pages）
+  state.api.listWikiPages.mockReset().mockResolvedValue({ revision: 3, pages: metaPages })
   state.api.getWikiPage.mockReset().mockImplementation(
     (_id: string, key: string) => Promise.resolve(key === 'home' ? homePage : glossaryPage))
+  // D03.1 信封形态：{revision, links}（侧栏只消费 links）
   state.api.listWikiLinks.mockReset().mockImplementation(
     (_id: string, params?: { direction?: 'out' | 'in' }) =>
-      Promise.resolve(params?.direction === 'out' ? outLinks : inLinks))
+      Promise.resolve(params?.direction === 'out'
+        ? { revision: 3, links: outLinks }
+        : { revision: 3, links: inLinks }))
   state.api.searchWiki.mockReset().mockResolvedValue(
     { revision: 1, degraded_dense: false, results: [] })
   // 运行态目录缺省平铺（无 toc 行/空目录——D03 分节渲染不触发）
@@ -202,7 +206,7 @@ describe('WikiReaderPanel', () => {
   })
 
   it('未发布（listWikiPages 空）→ EmptyState 尚未发布版本', async () => {
-    state.api.listWikiPages.mockResolvedValueOnce([])
+    state.api.listWikiPages.mockResolvedValueOnce({ revision: 0, pages: [] })
     const wrapper = mountReader()
     await flushPromises()
 
