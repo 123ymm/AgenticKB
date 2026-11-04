@@ -376,6 +376,11 @@ grep -rn "source_locator\|locator" knowledge_mining/mining/kb/routes/ | head
 
 ### Task 6.4: E2E 冒烟 + 完成记录 + 发版清单
 
+> **✅ 6.1-6.3 + 顺手修完成（2026-11-04）**：6.1 Python 真库全套 **300 passed**（14 文件）；6.2 单测 **562/562** + wiki IT **8/8**（f8eb09f 补卡片真库断言）+ jar 纯源码构建 SUCCESS（33MB）；6.3 五闭环统一验收 **8/8**（61f91a2，601 行；三文件同跑 22/22 无互扰）。顺手修：McpKeyConfigPanel/server.py 文案对齐两类制品（caee7d3）+ 镜像 DDL 同文守卫测试 011↔019/010↔018（3634485）。
+> **6.2 口径勘定**：7 个存量 pg-integration IT（KbAccessServiceIT 等）为环境门控预置库类（需 schema+账本+活跃 KB 种子），空库全量 verify 必挂——属既定口径非回归；1.1.15「484 基线」=单测口径，IT 选择性定向跑（批次5 同法）。
+> **6.3 语义修正记录**（测试口径以真实现为准）：域撤销=钥匙直接吊销（非静默收缩）；断链无专门发布 warning（links 视图可辨识）；停用滤除在 serving 侧（Python 侧 deprecate 后仍可读，分工注明）。
+> **待办**：部署冒烟（本地 cmkb 或内网 staging——需用户拍板部署时机）+ 发版清单（**版本号待用户拍板**：66号代号 1.1.15 线但 tag v1.1.15 已占；建议 1.1.16 或 1.1.15-ui）。
+
 - [ ] 部署冒烟（本地 cmkb 栈或内网 staging，按届时环境）：Web 登录→制品中心建两类制品→走查 §18 七条→MCP `get_knowledge(art_…)` wiki 卡片含 description/usage_note→检索三通道
 - [ ] 完成记录 docs/superpowers/plans/ 伴随文档（偏差/坑/接手清单）
 - [ ] **发版清单（版本号为用户拍板项，不自行决定）**：changelog、迁移 011 apply 前置（真库预演已做）、jar 纯源码、dist、deploy-sync 包、内网 apply 步骤（含级联重启）
