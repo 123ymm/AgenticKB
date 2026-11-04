@@ -744,6 +744,59 @@ async def test_kb_readable_delegates_to_is_visible(async_pool) -> None:
         await kbdb.is_visible(kb_id=kb_id, user_id=stranger["id"])
 
 
+async def test_unit_source_provenance_gate_and_unit_join(async_pool) -> None:
+    """Q01 回原文（66号批次5 Task 5.2）unit_source：页 provenance 归属门
+    （unit_ids 数组元素命中才放行——不开放任意 unit 反查）+ units v2 真身
+    JOIN（content_text/section_ref/snapshot_id）；revision 精确匹配；原文
+    退役（真身删除）→ None；多页同 unit 确定性（ORDER BY page_key 首遇）。"""
+    inputs = CompileInputsDB(async_pool)
+    kbdb, kb_id = await _seed_kb(async_pool)
+    doc = await _add_doc(kbdb, kb_id)
+    snap = await _seed_build(async_pool, kb_id=kb_id, document_id=doc, units=2)
+    rid0, rid1 = f"ru-{snap[:16]}-0", f"ru-{snap[:16]}-1"
+
+    adb, wdb, aid = await _make_wiki(async_pool)
+    await wdb.ensure_draft(aid)
+    await _upsert(wdb, aid, _page("页一", "标题", provenance=[
+        {"kb_id": kb_id, "snapshot_id": snap, "unit_ids": [rid0]}]))
+    art = await adb.get_artifact(aid)
+    await wdb.publish(aid, expected_updated_at=art["updated_at"],
+                      change_summary="v1", published_by="editor-1")
+
+    # 命中：真身行 + provenance 的 (kb_id, snapshot_id)
+    row = await inputs.unit_source(aid, rid0, [1])
+    assert row == {"kb_id": kb_id, "snapshot_id": snap,
+                   "content_text": "单元0", "section_ref": "s-0"}
+
+    # 归属门：库里存在但不在本制品 provenance（rev1）→ None
+    assert await inputs.unit_source(aid, rid1, [1]) is None
+    # 完全未知 unit → None
+    assert await inputs.unit_source(aid, "ru-none", [1]) is None
+    # revision 不匹配（发布清 rev0；rev2 不存在）→ None
+    assert await inputs.unit_source(aid, rid0, [0]) is None
+    assert await inputs.unit_source(aid, rid0, [2]) is None
+    # 空 revision 集（调用方 runtime 空集语义）→ None
+    assert await inputs.unit_source(aid, rid0, []) is None
+
+    # 多页含同一 unit：第二页 page_key 序在前 → 确定性取该页的 provenance 账
+    await wdb.ensure_draft(aid)   # checkout current→rev0
+    await _upsert(wdb, aid, _page("A页", "标题", provenance=[
+        {"kb_id": kb_id, "snapshot_id": snap, "unit_ids": [rid0]}]))
+    art = await adb.get_artifact(aid)
+    await wdb.publish(aid, expected_updated_at=art["updated_at"],
+                      change_summary="v2", published_by="editor-1")
+    row2 = await inputs.unit_source(aid, rid0, [2])
+    assert row2 == {"kb_id": kb_id, "snapshot_id": snap,
+                    "content_text": "单元0", "section_ref": "s-0"}
+
+    # 原文退役：真身删除 → JOIN 不上 → None（页 provenance 仍在）
+    async with async_pool.connection() as conn:
+        await conn.execute(
+            "DELETE FROM asset_retrieval_units_v2 WHERE representation_id = %s",
+            (rid0,))
+    assert await inputs.unit_source(aid, rid0, [1]) is None
+
+
 async def test_update_batch_details_merge_and_latest_compile_batch(
     async_pool,
 ) -> None:

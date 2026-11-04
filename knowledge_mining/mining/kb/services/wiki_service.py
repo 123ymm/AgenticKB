@@ -75,6 +75,9 @@ _EMBED_MAX_ATTEMPTS = 3
 _MAX_DIRECTORIES = 50
 _MAX_DIRECTORY_CHARS = 500
 
+#: Q01 回原文截读长度（66号批次5 Task 5.2）：引用气泡级预览，前 500 字符。
+_UNIT_SNIPPET_CHARS = 500
+
 #: (artifact_id, revision) 全局防重入——发布后置与 status 自愈共用同一集合
 #: （status() 的 O(1) 查询面；清理只在 _embed_units 的 finally）。
 _EMBED_INFLIGHT: set[tuple[str, int]] = set()
@@ -738,6 +741,44 @@ class WikiService:
             domain=str(artifact["domain_id"]),
             username=str(user.get("username") or _uid(user)),
         )
+
+    # ------------------------------------------- Q01 回原文（66号批次5 Task 5.2）
+
+    async def unit_source(
+        self, user: dict[str, Any], artifact_id: str, unit_id: str, *,
+        draft: bool = False, revision: int | None = None,
+    ) -> dict[str, Any]:
+        """unit_id（=retrieval units v2 的 representation_id，provenance
+        unit_ids 元素）→ 来源单元原文截读（前 500 字）。视图 revision 口径
+        对齐单页读：draft/显式 revision → design 角色（rev0 草稿或历史版）；
+        缺省 → runtime（current_revision；未发布=空集直接 404）。
+
+        双重权限（66号 §2「来源回查重新校验原文读取权限；能读制品不等于
+        能读整个来源知识库」）：制品读取角色前置（viewer 可读运行态）→
+        **源 kb 可读二次校验**（kb_readable=KbDB.is_visible 谓词唯一真相
+        源，制品 public ≠ 来源 kb 可读，两者独立判定）。失败面（非本制品
+        provenance / 原文退役 / 源库无读权）一律 unit_not_found 404 反探测
+        单码——不区分暴露存在性。"""
+        if draft or revision is not None:
+            rev = await self._design_revision(user, artifact_id, revision)
+            revs = [int(rev)]
+        else:
+            rev = await self._runtime_revision(user, artifact_id)
+            revs = [int(rev)] if rev > 0 else []
+        row = (await self._inputs.unit_source(artifact_id, unit_id, revs)
+               if revs else None)
+        if row is None:
+            raise WikiError("unit_not_found")
+        if not await self._inputs.kb_readable(
+                str(row["kb_id"]), str(user["id"])):
+            raise WikiError("unit_not_found")
+        return {
+            "unit_id": unit_id,
+            "content_text": str(row.get("content_text") or "")[:_UNIT_SNIPPET_CHARS],
+            "kb_id": str(row["kb_id"]),
+            "snapshot_id": str(row["snapshot_id"]),
+            "section_ref": row.get("section_ref"),
+        }
 
     # ------------------------------------------------------ 来源绑定（批次3）
 

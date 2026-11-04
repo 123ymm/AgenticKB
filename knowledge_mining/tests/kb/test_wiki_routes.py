@@ -35,6 +35,7 @@ from knowledge_mining.tests.kb.test_wiki_service import (
     FakeWikiDB,
     _drain_background,
 )
+from knowledge_mining.tests.kb.test_wiki_sources import FakeCompileInputsDB
 
 pytestmark = pytest.mark.asyncio
 
@@ -62,7 +63,12 @@ async def env():
     tc = FakeTaskClient()
     lifecycle = WikiLifecycle(wdb, tc)
     art_svc = ArtifactService(adb, wiki=lifecycle)
-    svc = WikiService(art_svc, wdb, lifecycle)
+    # Q01（66号批次5 Task 5.2）：注入 fake 取材域——unit-source 端点数据源
+    # （现有用例不触达 sources/unit-source，注入零影响）。kb-1/kb-2 预置
+    # 可读（与 sources 夹具同款）；其余 kb_id 默认不可读（kb 门负例）。
+    inputs = FakeCompileInputsDB(adb.artifacts)
+    inputs.readable = {"kb-1", "kb-2"}
+    svc = WikiService(art_svc, wdb, lifecycle, inputs_db=inputs)
 
     app = FastAPI()
     app.include_router(wiki_router)
@@ -73,7 +79,7 @@ async def env():
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield SimpleNamespace(
             adb=adb, wdb=wdb, tc=tc, svc=svc, art_svc=art_svc,
-            app=app, client=client, holder=holder,
+            inputs=inputs, app=app, client=client, holder=holder,
         )
 
 
@@ -805,3 +811,136 @@ async def test_publish_toc_warnings_end_to_end(env):
     result = await _publish(env)
     assert any(w.startswith("toc_dropped_page_keys:页A")
                for w in result["warnings"]), result["warnings"]
+
+
+# ---------------------------------------------- Q01 回原文（66号批次5 Task 5.2）
+# GET /wiki/unit-source?unit_id=：unit_id（=retrieval units v2 的
+# representation_id，即 provenance unit_ids 元素）→ 来源单元原文截读（500
+# 字）+ kb_id/snapshot_id/section_ref。双重权限：制品读取（viewer 可读运行
+# 态）+ 源 kb 可读二次校验（66号 §2「能读制品不等于能读整个来源知识库」——
+# kb_readable=KbDB.is_visible 谓词复用）。404 反探测单码：非本制品 unit /
+# 原文退役 / 无源库读权 不区分（unit_not_found）。
+
+def _seed_unit(env, unit_id: str, kb_id: str = "kb-1", revisions: set[int] = {1},
+               content_text: str = "原文片段", section_ref: str = "s-0",
+               snapshot_id: str = "snap-1") -> None:
+    """fake 取材域预置：真身行 + (artifact, unit) 可见 revision 集。"""
+    env.inputs.unit_rows[unit_id] = {
+        "kb_id": kb_id, "snapshot_id": snapshot_id,
+        "content_text": content_text, "section_ref": section_ref}
+    env.inputs.unit_provenance[(WID, unit_id)] = set(revisions)
+
+
+async def _publish_one_page(env, body_md: str = "v1") -> None:
+    """建一页并发布（rev1）——publish 门禁要求非空页集。"""
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('首页')}",
+        json={"title": "首页", "body_md": body_md})
+    await _publish(env)
+
+
+async def test_unit_source_roundtrip_and_truncation(env):
+    """viewer 命中：{unit_id, content_text(截500), kb_id, snapshot_id,
+    section_ref}；600 字原文截前 500；空白 unit_id 缺参 → 422。"""
+    await _publish_one_page(env)
+    _seed_unit(env, "ru-1", content_text="长" * 600)
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-1"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {
+        "unit_id": "ru-1", "content_text": "长" * 500,
+        "kb_id": "kb-1", "snapshot_id": "snap-1", "section_ref": "s-0"}
+
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source")
+    assert r.status_code == 422
+
+
+async def test_unit_source_provenance_gate_404(env):
+    """非本制品 provenance 的 unit（库里存在但未挂账）/ 完全未知 unit →
+    404 unit_not_found（不开放任意 unit 反查）。"""
+    await _publish_one_page(env)
+    _seed_unit(env, "ru-cited", revisions={1})
+    _seed_unit(env, "ru-orphan", revisions={99})   # 挂在别的 revision
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-cited"})
+    assert r.status_code == 200
+    for unit_id in ("ru-orphan", "ru-unknown"):
+        r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                                 params={"unit_id": unit_id})
+        assert r.status_code == 404, unit_id
+        assert r.json()["detail"]["code"] == "unit_not_found"
+
+
+async def test_unit_source_kb_readability_second_gate(env):
+    """源 kb 不可读 → 404 unit_not_found **同码同文案**（不区分暴露 unit
+    存在性）；可读恢复后放行（同一 viewer，制品面不变——独立判定）。"""
+    await _publish_one_page(env)
+    _seed_unit(env, "ru-1", kb_id="kb-secret", revisions={1})
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-1"})
+    assert r.status_code == 404
+    denied = r.json()["detail"]
+
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-none"})
+    assert r.status_code == 404
+    assert r.json()["detail"] == denied   # 同口径：不泄露是权限还是不存在
+
+    env.inputs.readable.add("kb-secret")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-1"})
+    assert r.status_code == 200 and r.json()["kb_id"] == "kb-secret"
+
+
+async def test_unit_source_revision_view_matrix(env):
+    """视图 revision 口径对齐单页读：未发布 runtime=空集 404；draft/显式
+    revision 一律 design 角色（viewer 403）；design 草稿视图命中 rev0；
+    revision=N 精确匹配该版 provenance；非成员 404 反探测。"""
+    # 未发布（rev0 草稿页）：design 视图命中，runtime 不见
+    await env.client.put(
+        f"/api/artifacts/{WID}/wiki/page/{_hex('首页')}",
+        json={"title": "首页", "body_md": "v1"})
+    _seed_unit(env, "ru-2", revisions={0})
+
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-2"})
+    assert r.status_code == 404   # 运行态空集（rev0 对 runtime 不可见）
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-2", "draft": "true"})
+    assert r.status_code == 403
+
+    env.holder["user"] = _user("u-bob")   # editor：design 面
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-2", "draft": "true"})
+    assert r.status_code == 200 and r.json()["unit_id"] == "ru-2"
+
+    # 发布后 rev0 清空：draft 视图（干净态投影 current）与 revision=1 命中、
+    # 显式 revision=0（已清）不再命中。
+    _seed_unit(env, "ru-2", revisions={1})
+    await _publish(env)
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-2"})
+    assert r.status_code == 200
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-2", "revision": 1})
+    assert r.status_code == 200
+    # revision=0 不可请求（ge=1 门）——rev0 经 draft=true 触达
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-2", "revision": 0})
+    assert r.status_code == 422
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-2", "revision": 99})
+    assert r.status_code == 404
+
+    env.holder["user"] = _user("u-stranger")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/unit-source",
+                             params={"unit_id": "ru-2"})
+    assert r.status_code == 404

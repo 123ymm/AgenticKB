@@ -368,6 +368,43 @@ class CompileInputsDB:
             )
             return {str(r["id"]): str(r["name"]) for r in await cur.fetchall()}
 
+    async def unit_source(
+        self, artifact_id: str, unit_id: str, revisions: list[int],
+    ) -> dict[str, Any] | None:
+        """Q01 回原文（66号批次5 Task 5.2）单行查：unit 归属门 = 请求
+        revision 集内**本制品页 provenance 的 unit_ids 数组元素命中**
+        （kb_wiki_pages.provenance JSONB，``e->'unit_ids' ? unit``——
+        不开放任意 unit 反查）→ JOIN units v2 真身行（content_text/
+        section_ref/snapshot_id，原文真身在主表不在投影副本）。
+
+        kb_id 只从 provenance 条目取（编译语料归属账，group_provenance
+        分组键）——unit 行无 kb_id 列（collect_units 的 kb_id 是 Python 侧
+        回填）。多页含同一 unit 取 page_key 序首遇（确定性）；无行 =
+        非本制品 / 原文退役（真身删除）/ revision 不含，调用方一律翻 404
+        反探测，不区分口径。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """WITH pv AS (
+                        SELECT e->>'kb_id' AS kb_id
+                        FROM kb_wiki_pages p
+                        CROSS JOIN LATERAL jsonb_array_elements(
+                            COALESCE(p.provenance, '[]'::jsonb)) AS e
+                        WHERE p.artifact_id = %(a)s
+                          AND p.revision = ANY(%(revs)s)
+                          AND e->'unit_ids' ? %(u)s
+                        ORDER BY p.page_key
+                        LIMIT 1
+                    )
+                    SELECT pv.kb_id, u.snapshot_id, u.content_text, u.section_ref
+                    FROM pv
+                    JOIN asset_retrieval_units_v2 u
+                           ON u.representation_id = %(u)s""",
+                {"a": artifact_id, "u": unit_id,
+                 "revs": [int(r) for r in (revisions or [])]},
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
     # ------------------------------------------------------------ 编译批次
 
     async def update_batch_details(

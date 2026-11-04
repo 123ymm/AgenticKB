@@ -73,6 +73,11 @@ class FakeCompileInputsDB:
         self.batches: list[dict] = []
         # touch 调用记录（乐观锁推进断言用）
         self.touches: list[str] = []
+        # Q01 回原文（66号批次5 Task 5.2）：unit_id -> 真身行（units v2 投影：
+        # kb_id/snapshot_id/content_text/section_ref）；(artifact_id, unit_id)
+        # -> 可见 revision 集（真库=页 provenance 归属门，此处直接预置）
+        self.unit_rows: dict[str, dict] = {}
+        self.unit_provenance: dict[tuple[str, str], set[int]] = {}
 
     def _touch(self, artifact_id: str) -> None:
         self.touches.append(artifact_id)
@@ -177,6 +182,20 @@ class FakeCompileInputsDB:
 
     async def kb_titles(self, kb_ids: list[str]) -> dict[str, str]:
         return {k: self.titles[k] for k in kb_ids if k in self.titles}
+
+    # ---- Q01 回原文（66号批次5 Task 5.2）-------------------------------
+
+    async def unit_source(
+        self, artifact_id: str, unit_id: str, revisions: list[int],
+    ) -> dict | None:
+        """真库契约镜像：provenance 归属门（请求 revision 集与预置可见集
+        相交）+ 真身存在性（unit_rows）；两者都过才有行。"""
+        revs = {int(r) for r in (revisions or [])}
+        if not revs or not (self.unit_provenance.get(
+                (artifact_id, unit_id), set()) & revs):
+            return None
+        row = self.unit_rows.get(unit_id)
+        return dict(row) if row is not None else None
 
     # ---- 编译批次 --------------------------------------------------------
 

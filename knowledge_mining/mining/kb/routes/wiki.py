@@ -7,7 +7,8 @@ ROLE_RUNTIME_READ 前置 → httpx 转发 serving internal
 /artifact-wiki-search，响应原样透传）/ sources 来源绑定三端点（批次3：
 GET/PUT/DELETE——绑定 kb 目录 + 脏标记观测）/ compile 编译四端点（批次3
 Task 3：启动/进度/目录确认/取消——业务在 CompileService，见
-services/wiki_compile_service.py）。
+services/wiki_compile_service.py）+ unit-source 回原文薄端点（66号批次5
+Task 5.2 Q01：unit_id → 原文截读 500 字，双重权限在服务层）。
 业务与权限全部在服务层。
 
 网关铁律：page_key 走 URL path 一律 UTF-8 hex 传输（raw path 含 % 即 400）——
@@ -149,6 +150,9 @@ _WIKI_HTTP_STATUS: dict[str, int] = {
     # invalid_frontmatter）。
     "toc_not_found": 404,
     "revision_not_found": 404,
+    # Q01 回原文（66号批次5 Task 5.2）：非本制品 provenance / 原文退役 /
+    # 源库无读权单码 404 反探测（不区分暴露存在性）。
+    "unit_not_found": 404,
     "invalid_toc_shape": 422,
     "toc_unknown_page_keys": 422,
     "stale_artifact": 409,
@@ -188,6 +192,8 @@ _WIKI_MESSAGES: dict[str, str] = {
     # 同面）；带细节后缀的 422 码（invalid_toc_shape/toc_unknown_page_keys）
     # 维持裸 detail 透传（先例=invalid_frontmatter）。
     "revision_not_found": "该版本不存在（无对应发布快照）",
+    # Q01：与「不存在」同面——不向无源库读权者泄露 unit 存在性。
+    "unit_not_found": "来源单元不存在或无权限访问",
     "no_sources": "未绑定任何知识库来源，请先在来源面板绑定",
     # 上限数从服务常量派生（审查 Minor：文案与 MAX_UNITS 不双源漂移）。
     "too_many_units": f"绑定范围内检索单元超上限（{MAX_UNITS}），"
@@ -407,6 +413,32 @@ async def wiki_search(
         return await svc.search(
             user=user, artifact_id=artifact_id, q=q, mode=mode,
             top_k=top_k, forward=forward)
+    except (ArtifactError, WikiError) as exc:
+        raise _map_error(exc) from None
+
+
+# ------------------------------------------------- Q01 回原文（66号批次5 Task 5.2）
+# 阅读器点 [[src:unit_id]] 引用 → 来源单元原文截读（前 500 字）。薄端点：
+# 视图 revision 口径对齐单页读（draft/显式 revision → design；缺省 runtime），
+# 业务与双重权限（制品读取 + 源 kb 可读二次校验）在 WikiService.unit_source。
+
+@router.get("/{artifact_id}/wiki/unit-source")
+async def unit_source(
+    artifact_id: str,
+    unit_id: str = Query(min_length=1, max_length=200),
+    draft: bool = Query(default=False),
+    revision: int | None = Query(default=None, ge=1),
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_wiki_service),
+):
+    """Q01 回原文：unit_id（=retrieval units v2 representation_id，即页
+    provenance unit_ids 元素）→ {unit_id, content_text(截500字), kb_id,
+    snapshot_id, section_ref}。404 反探测单码：非本制品 provenance / 原文
+    退役 / 无源库读权不区分（unit_not_found）。"""
+    try:
+        return await svc.unit_source(
+            user=user, artifact_id=artifact_id, unit_id=unit_id,
+            draft=draft, revision=revision)
     except (ArtifactError, WikiError) as exc:
         raise _map_error(exc) from None
 
