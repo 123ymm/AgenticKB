@@ -149,9 +149,14 @@ export const HELP_PARTS: HelpPart[] = [
         "id": "42",
         "file": "42-故障排查历史坑汇编.md",
         "title": "故障排查：历史坑汇编"
+      },
+      {
+        "id": "43",
+        "file": "43-知识制品.md",
+        "title": "知识制品"
       }
     ]
   }
 ]
 
-export const HELP_CHAPTER_COUNT = 23
+export const HELP_CHAPTER_COUNT = 24
