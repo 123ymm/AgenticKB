@@ -37,6 +37,8 @@ interface DetailVm {
   runtimeColumns: Array<{ column_id: string; column_name: string }>
   runtimeRows: unknown[]
   reloadAll: () => Promise<void>
+  /** 设计态空制品引导（66号 §4）；非空制品为 null。 */
+  emptyGuide: { title: string; description: string } | null
 }
 
 function mountDetail(): VueWrapper {
@@ -228,5 +230,66 @@ describe('artifact detail view', () => {
 
     await (wrapper2.vm as unknown as { deleteArtifact: () => Promise<void> }).deleteArtifact()
     expect(state.api.remove).toHaveBeenCalledWith('art-1')
+  })
+})
+
+describe('artifact detail view — 设计态空制品引导（66号 §4）', () => {
+  const emptyArtifact = {
+    ...artifactDetail, status: 'draft', current_revision: 0, draft_open: false,
+    schema: [], sample_rows: [],
+  }
+
+  beforeEach(() => {
+    state.api.get.mockReset().mockResolvedValue(emptyArtifact)
+  })
+
+  it('空 wiki 制品设计态提示「从知识库生成」', async () => {
+    state.api.get.mockResolvedValue({ ...emptyArtifact, kind: 'wiki' })
+    const wrapper = mountDetail()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as DetailVm
+
+    expect(wrapper.find('[data-test="design-empty-guide"]').exists()).toBe(true)
+    expect(vm.emptyGuide?.title).toContain('从知识库生成')
+  })
+
+  it('空表格制品设计态提示「上传 Excel 或编辑字段」', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as DetailVm
+
+    expect(wrapper.find('[data-test="design-empty-guide"]').exists()).toBe(true)
+    expect(vm.emptyGuide?.title).toContain('上传 Excel')
+    expect(vm.emptyGuide?.title).toContain('编辑字段')
+  })
+
+  it('非空制品（已发布 / 已检出草稿 / 已有列定义）不显示引导', async () => {
+    // 已发布有版本（默认 fixture：rev2 + draft_open）
+    state.api.get.mockResolvedValue(artifactDetail)
+    const published = mountDetail()
+    await flushPromises()
+    expect(published.find('[data-test="design-empty-guide"]').exists()).toBe(false)
+    expect((published.vm as unknown as DetailVm).emptyGuide).toBeNull()
+
+    // rev0 但已检出草稿（导入/编译进行中——用户已知道下一步）
+    state.api.get.mockResolvedValue({ ...emptyArtifact, draft_open: true })
+    const drafting = mountDetail()
+    await flushPromises()
+    expect(drafting.find('[data-test="design-empty-guide"]').exists()).toBe(false)
+
+    // rev0 表格但已有列定义（手工建列起步）
+    state.api.get.mockResolvedValue({ ...emptyArtifact, schema: [column('c1', 'MOP')] })
+    const withColumns = mountDetail()
+    await flushPromises()
+    expect(withColumns.find('[data-test="design-empty-guide"]').exists()).toBe(false)
+  })
+
+  it('viewer 空制品不显示操作引导（设计态写入口对只读者收敛）', async () => {
+    state.api.get.mockResolvedValue({ ...emptyArtifact, kind: 'wiki', my_role: 'viewer' })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="design-empty-guide"]').exists()).toBe(false)
+    expect((wrapper.vm as unknown as DetailVm).emptyGuide).toBeNull()
   })
 })

@@ -30,6 +30,11 @@ import ArtifactsListView from '../ArtifactsListView.vue'
 
 interface ListVm {
   artifacts: unknown[]
+  filteredArtifacts: unknown[]
+  filterKind: string
+  filterStatus: string
+  filterTitle: string
+  emptyText: string
   form: { title: string; description: string; domainId: string; kind: string }
   createVisible: boolean
   openCreate: () => void
@@ -38,9 +43,10 @@ interface ListVm {
   statusLabel: (status: string) => string
 }
 
-// vitest 链路无 unplugin-vue-components：模板里的 el-radio-group 是未解析的
-// 原生元素，v-model 事件无法经组件通道驱动——注册最小具名桩让 resolveComponent
-// 命中（shallowMount 再包自动桩，data-test 随 attrs 透传到桩根元素）。
+// vitest 链路无 unplugin-vue-components：模板里的 el-radio-group / el-select /
+// el-input 是未解析的原生元素，v-model 事件无法经组件通道驱动——注册最小具名桩
+// 让 resolveComponent 命中（shallowMount 再包自动桩，data-test 随 attrs 透传到
+// 桩根元素）。
 const ElRadioGroupStub = {
   name: 'ElRadioGroup',
   props: { modelValue: { type: String, default: '' } },
@@ -48,9 +54,25 @@ const ElRadioGroupStub = {
   template: '<div class="el-radio-group"><slot /></div>',
 }
 
+const ElSelectStub = {
+  name: 'ElSelect',
+  props: { modelValue: { type: [String, Number, Boolean], default: '' } },
+  emits: ['update:modelValue'],
+  template: '<div class="el-select"><slot /></div>',
+}
+
+const ElInputStub = {
+  name: 'ElInput',
+  props: { modelValue: { type: [String, Number], default: '' } },
+  emits: ['update:modelValue'],
+  template: '<input class="el-input-stub" />',
+}
+
 function mountList(): VueWrapper {
   return shallowMount(ArtifactsListView, {
-    global: { components: { ElRadioGroup: ElRadioGroupStub } },
+    global: {
+      components: { ElRadioGroup: ElRadioGroupStub, ElSelect: ElSelectStub, ElInput: ElInputStub },
+    },
   })
 }
 
@@ -76,6 +98,14 @@ const artifacts = [
     created_at: '2026-10-14T08:00:00+00:00', updated_at: '2026-10-14T08:00:00+00:00',
     my_role: 'editor',
   },
+  {
+    // L01 筛选用 wiki 样本：published 的 Wiki 制品（与表格样本错开三筛选维度）
+    artifact_id: 'art-wiki', domain_id: 'plant-a', kind: 'wiki',
+    title: '电源模块规格 Wiki', description: '', usage_note: '',
+    owner_user_id: 'u2', status: 'published', current_revision: 1, draft_open: false,
+    created_at: '2026-10-13T08:00:00+00:00', updated_at: '2026-10-13T08:00:00+00:00',
+    my_role: 'viewer',
+  },
 ]
 
 describe('artifacts list view', () => {
@@ -97,10 +127,12 @@ describe('artifacts list view', () => {
     // el-table 在 shallowMount 下被 stub，行数据断言走 vm（渲染链路由状态驱动）
     expect(wrapper.text()).toContain('我参与的')
     const vm = wrapper.vm as unknown as ListVm
-    expect(vm.artifacts).toHaveLength(3)
+    expect(vm.artifacts).toHaveLength(4)
     expect(vm.artifacts.map(a => (a as { title: string }).title)).toEqual([
-      '割接 MOP 表', '责任域表', '旧表',
+      '割接 MOP 表', '责任域表', '旧表', '电源模块规格 Wiki',
     ])
+    // 默认筛选=全部：过滤视图与原始数据同集
+    expect(vm.filteredArtifacts).toHaveLength(4)
   })
 
   it('maps artifact status to grey/green/red tags with labels', async () => {
@@ -194,5 +226,118 @@ describe('artifacts list view', () => {
     await vm.createArtifact()
     expect(state.router.push).not.toHaveBeenCalled()
     expect(state.ui.error).toHaveBeenCalled()
+  })
+})
+
+describe('artifacts list view — L01 筛选组（66号 §4：类型/状态/标题，本地过滤）', () => {
+  beforeEach(() => {
+    state.router.push.mockReset()
+    state.api.list.mockReset().mockResolvedValue(artifacts)
+  })
+
+  const titlesOf = (rows: unknown[]): string[] => rows.map(a => (a as { title: string }).title)
+
+  it('renders the filter group: kind select + status select + title keyword input', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+
+    expect(wrapper.findComponent('[data-test="filter-kind"]').exists()).toBe(true)
+    expect(wrapper.findComponent('[data-test="filter-status"]').exists()).toBe(true)
+    expect(wrapper.findComponent('[data-test="filter-title"]').exists()).toBe(true)
+  })
+
+  it('filters by kind locally without refetching from the api', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ListVm
+
+    vm.filterKind = 'wiki'
+    await nextTick()
+    expect(titlesOf(vm.filteredArtifacts)).toEqual(['电源模块规格 Wiki'])
+
+    vm.filterKind = 'table'
+    await nextTick()
+    expect(titlesOf(vm.filteredArtifacts)).toEqual(['割接 MOP 表', '责任域表', '旧表'])
+
+    // 前端本地过滤铁律：筛选变更不触发任何后端重取（列表量级 <1000）
+    expect(state.api.list).toHaveBeenCalledTimes(1)
+  })
+
+  it('filters by status across kinds', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ListVm
+
+    vm.filterStatus = 'published'
+    await nextTick()
+    expect(titlesOf(vm.filteredArtifacts)).toEqual(['责任域表', '电源模块规格 Wiki'])
+
+    vm.filterStatus = 'draft'
+    await nextTick()
+    expect(titlesOf(vm.filteredArtifacts)).toEqual(['割接 MOP 表'])
+  })
+
+  it('filters by title keyword case-insensitively with surrounding spaces tolerated', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ListVm
+
+    vm.filterTitle = '  mop '
+    await nextTick()
+    expect(titlesOf(vm.filteredArtifacts)).toEqual(['割接 MOP 表'])
+  })
+
+  it('combines kind + status + keyword filters as AND', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ListVm
+
+    vm.filterKind = 'wiki'
+    vm.filterStatus = 'published'
+    vm.filterTitle = '规格'
+    await nextTick()
+    expect(titlesOf(vm.filteredArtifacts)).toEqual(['电源模块规格 Wiki'])
+
+    // 同 kind 下状态不命中 → 空
+    vm.filterStatus = 'draft'
+    await nextTick()
+    expect(vm.filteredArtifacts).toHaveLength(0)
+  })
+
+  it('switches the empty text between pristine and no-match states', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ListVm
+
+    expect(vm.emptyText).toContain('还没有知识制品')
+
+    vm.filterKind = 'wiki'
+    vm.filterStatus = 'draft'
+    await nextTick()
+    expect(vm.filteredArtifacts).toHaveLength(0)
+    expect(vm.emptyText).toContain('筛选')
+
+    // 清空筛选恢复原始空态文案口径
+    vm.filterKind = 'all'
+    vm.filterStatus = 'all'
+    await nextTick()
+    expect(vm.emptyText).toContain('还没有知识制品')
+  })
+
+  it('wires the kind select and title input through v-model stubs', async () => {
+    const wrapper = mountList()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as ListVm
+
+    const kindSelect = wrapper.findComponent('[data-test="filter-kind"]') as unknown as VueWrapper
+    kindSelect.vm.$emit('update:modelValue', 'wiki')
+    await nextTick()
+    expect(vm.filterKind).toBe('wiki')
+
+    const titleInput = wrapper.findComponent('[data-test="filter-title"]') as unknown as VueWrapper
+    titleInput.vm.$emit('update:modelValue', '电源')
+    await nextTick()
+    expect(vm.filterTitle).toBe('电源')
+    expect(titlesOf(vm.filteredArtifacts)).toEqual(['电源模块规格 Wiki'])
   })
 })

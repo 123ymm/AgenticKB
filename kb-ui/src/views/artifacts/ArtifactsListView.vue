@@ -7,7 +7,29 @@
       <el-button type="primary" data-test="create-artifact" @click="openCreate">新建制品</el-button>
     </header>
 
-    <el-table v-loading="loading" :data="artifacts">
+    <!-- L01 筛选组（66号 §4）：类型/状态/标题关键字，三项组合本地过滤 -->
+    <div class="artifact-list__filters">
+      <el-select v-model="filterKind" class="artifact-list__filter" data-test="filter-kind">
+        <el-option value="all" label="类型：全部" />
+        <el-option value="table" label="表格" />
+        <el-option value="wiki" label="Wiki" />
+      </el-select>
+      <el-select v-model="filterStatus" class="artifact-list__filter" data-test="filter-status">
+        <el-option value="all" label="状态：全部" />
+        <el-option value="draft" label="草稿" />
+        <el-option value="published" label="已发布" />
+        <el-option value="deprecated" label="已停用" />
+      </el-select>
+      <el-input
+        v-model="filterTitle"
+        class="artifact-list__filter artifact-list__filter-title"
+        data-test="filter-title"
+        placeholder="标题关键字"
+        clearable
+      />
+    </div>
+
+    <el-table v-loading="loading" :data="filteredArtifacts">
       <el-table-column prop="title" label="标题" min-width="200">
         <template #default="{ row }">
           <button class="artifact-list__link" type="button" @click="open(row.artifact_id)">{{ row.title }}</button>
@@ -45,7 +67,7 @@
         </template>
       </el-table-column>
       <template #empty>
-        <EmptyState text="还没有知识制品，点右上角「新建制品」从上传 Excel 开始" />
+        <EmptyState :text="emptyText" />
       </template>
     </el-table>
 
@@ -90,14 +112,14 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import { useDomainStore } from '@/stores/domain'
 import EmptyState from '@/components/common/EmptyState.vue'
-import type { Artifact, ArtifactKind } from '@/types/artifacts'
+import type { Artifact, ArtifactKind, ArtifactStatus } from '@/types/artifacts'
 
 const api = useArtifactsApi()
 const router = useRouter()
@@ -112,6 +134,30 @@ const form = ref({
   /** 60号四形态：创建时选类型（默认 table；wiki 详情页暂为占位守卫）。 */
   kind: 'table' as ArtifactKind,
 })
+
+// ── L01 筛选组（66号 §4）──────────────────────────────────────────────
+// 三项组合对当前页数据做本地过滤——列表量级 <1000 前端过滤足够，不加后端
+// 筛选参数（YAGNI；66号原型同口径，筛选变更不触发任何重取）。
+const filterKind = ref<'all' | ArtifactKind>('all')
+const filterStatus = ref<'all' | ArtifactStatus>('all')
+const filterTitle = ref('')
+
+const filteredArtifacts = computed(() => {
+  const keyword = filterTitle.value.trim().toLowerCase()
+  return artifacts.value.filter(a =>
+    (filterKind.value === 'all' || a.kind === filterKind.value)
+    && (filterStatus.value === 'all' || a.status === filterStatus.value)
+    && (keyword === '' || a.title.toLowerCase().includes(keyword)),
+  )
+})
+
+const hasActiveFilter = computed(() =>
+  filterKind.value !== 'all' || filterStatus.value !== 'all' || filterTitle.value.trim() !== '')
+
+/** 空态双口径：无筛选=真没有制品（指路新建入口）；有筛选无命中=让用户调条件。 */
+const emptyText = computed(() => hasActiveFilter.value
+  ? '无符合筛选条件的制品——试试调整类型/状态或清空标题关键字'
+  : '还没有知识制品，点右上角「新建制品」从上传 Excel 开始')
 
 /** 创建对话框底部流程提示（Record 键钉死 ArtifactKind 全集——四形态路线
  *  下新增 kind 时 TS 强制补齐文案）。 */
@@ -201,4 +247,7 @@ onMounted(load)
 .artifact-list__link { border: 0; background: none; padding: 0; color: var(--kb-accent, #2563eb); font-weight: 650; cursor: pointer; }
 .artifact-list__hint { margin: -5px 0 0 70px; color: var(--kb-text-tertiary); font-size: 12px; }
 .artifact-list__domain-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; }
+.artifact-list__filters { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.artifact-list__filter { width: 140px; }
+.artifact-list__filter-title { width: 220px; }
 </style>

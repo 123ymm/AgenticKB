@@ -77,6 +77,17 @@
     <el-tabs v-if="artifact" v-model="activeTab" class="artifact-detail__tabs">
       <!-- ── 设计态：导入向导 / 列定义 / 行编辑三面板（owner+editor；viewer 无设计态）── -->
       <el-tab-pane label="设计态" name="design">
+        <!-- L01 空制品引导（66号 §4）：刚创建的空制品给「下一步做什么」指路
+             ——空 Wiki 提示从知识库生成；空表格提示上传 Excel 或编辑字段。 -->
+        <el-alert
+          v-if="emptyGuide"
+          type="info"
+          :closable="false"
+          class="artifact-detail__empty-guide"
+          data-test="design-empty-guide"
+          :title="emptyGuide.title"
+          :description="emptyGuide.description"
+        />
         <!-- wiki 分支（63号批次2/3）：编译面板（来源绑定+目录确认+进度轮询）
              在上、页面编辑面板在下；viewer 也可读（面板内部按 canWrite 收敛写入口） -->
         <template v-if="artifact.kind === 'wiki'">
@@ -270,7 +281,7 @@ import WikiCompilePanel from '@/components/artifacts/WikiCompilePanel.vue'
 import WikiEditorPanel from '@/components/artifacts/WikiEditorPanel.vue'
 import WikiReaderPanel from '@/components/artifacts/WikiReaderPanel.vue'
 import { decodeRowKey } from '@/utils/rowKey'
-import type { ArtifactColumn, ArtifactDetail, ArtifactRow } from '@/types/artifacts'
+import type { ArtifactColumn, ArtifactDetail, ArtifactKind, ArtifactRow } from '@/types/artifacts'
 
 const props = defineProps<{ artifactId: string }>()
 
@@ -310,6 +321,31 @@ const isOwner = computed(() => artifact.value?.my_role === 'owner')
 /** 干净态 = draft 关闭且已有发布版 → 无待发布变更（后端 409 门禁镜像）。 */
 const hasPendingChanges = computed(() =>
   !!artifact.value && (artifact.value.draft_open || artifact.value.current_revision === 0))
+
+// ── L01 空制品引导（66号 §4）──────────────────────────────────────────
+
+/** 引导文案（Record 键钉死 ArtifactKind 全集——四形态路线下新增 kind 时
+ *  TS 强制补齐文案，与列表 KIND_CREATE_HINTS 同风格）。 */
+const EMPTY_GUIDES: Record<ArtifactKind, { title: string; description: string }> = {
+  wiki: {
+    title: '空 Wiki——从知识库生成第一版内容',
+    description: '在下方「来源绑定」选择可访问的知识库目录并开始编译，生成页面后可人工修订，填写使用说明再发布。',
+  },
+  table: {
+    title: '空表格——上传 Excel 或编辑字段',
+    description: '在下方上传 Excel 走导入向导（列映射 → 预览确认 → 导入草稿），或先在「列定义」手工建列再录数据。',
+  },
+}
+
+/** 空制品判定：从未发布（rev0）且无未发布改动（draft_open=false——导入/
+ *  编译完成/建列/建页都会检出草稿，首次实质操作后引导自然消失）；表格
+ *  再要求无列定义。viewer 无操作入口，不显示操作引导。 */
+const emptyGuide = computed(() => {
+  const a = artifact.value
+  if (!a || !canWrite.value || a.current_revision > 0 || a.draft_open) return null
+  if (a.kind !== 'wiki' && a.schema.length > 0) return null
+  return EMPTY_GUIDES[a.kind]
+})
 
 async function reload() {
   loading.value = true
@@ -544,5 +580,6 @@ defineExpose({ reloadAll })
 .artifact-detail__desc-card { flex: 1; max-width: 720px; }
 .artifact-detail__usage-missing { color: var(--el-color-warning); }
 .artifact-detail__visibility-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; line-height: 1.5; }
+.artifact-detail__empty-guide { margin-bottom: 14px; }
 .artifact-detail__pager { margin-top: 12px; justify-content: flex-end; }
 </style>
