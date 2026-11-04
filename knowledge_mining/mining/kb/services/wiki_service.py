@@ -58,6 +58,13 @@ logger = logging.getLogger(__name__)
 #: 页面类型全集（63号 §4.3）。
 PAGE_TYPES = ("topic", "contradiction", "open_question", "glossary")
 
+#: serving ref 协议前缀（同 Java ArtifactWikiSearchService.REF_PREFIX="art_"
+#: / routes/artifacts._REF_PREFIX，各自定义不 import——routes 反向 import 即环）。
+#: ref = 前缀 + artifact_id：DB id 本身已含 art_（db_artifacts._new_artifact_id
+#: = f"art_{hex}"），故 ref 真形态 art_art_<hex>；serving parseRef 单剥一个
+#: 前缀还原 DB id——检索转发必须拼装，直传 DB id 会被剥成裸 hex → 404。
+REF_PREFIX = "art_"
+
 #: embedding 批大小 / 重试次数（对齐挖掘 infra/embedding.py：32 条/批 +
 #: 3 次退避——llm_service worker 对一个任务一次 embed 整批 texts）。
 _EMBED_BATCH = 32
@@ -713,7 +720,10 @@ class WikiService:
             # 不触达本方法——真到此分支按 serving 不可用口径，不裸抛异常
             raise WikiError("serving_unavailable")
         return await forward.search(
-            artifact_ref=artifact_id, q=q, mode=mode, top_k=top_k,
+            # ref 拼装见模块头 REF_PREFIX 注释（art_art_<hex>）——直传 DB id
+            # 会被 serving parseRef 剥成裸 hex → artifact_not_found 404。
+            artifact_ref=REF_PREFIX + artifact_id, q=q, mode=mode,
+            top_k=top_k,
             domain=str(artifact["domain_id"]),
             username=str(user.get("username") or _uid(user)),
         )

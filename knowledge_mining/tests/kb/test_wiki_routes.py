@@ -412,11 +412,15 @@ async def test_search_viewer_passthrough_and_forward_body(env):
     r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
                              params={"q": "核心网"})
     assert r.status_code == 200
+    # 契约钉死：转发 artifact_ref = "art_" + DB id（真形态 art_art_<hex>）——
+    # serving ArtifactWikiSearchService.parseRef 单剥一个前缀还原 DB id；
+    # 直传 DB id（自带 art_）会被剥成裸 hex → artifact_not_found 404
+    # （Task 1.6 实施中协议核实的存量缺陷，防再犯）。
     assert fake.calls == [
-        {"artifact_ref": WID, "q": "核心网", "mode": "dense", "top_k": 5,
-         "domain": DOMAIN, "username": "u-viewer"},
-        {"artifact_ref": WID, "q": "核心网", "mode": "fusion", "top_k": 10,
-         "domain": DOMAIN, "username": "u-viewer"},
+        {"artifact_ref": f"art_{WID}", "q": "核心网", "mode": "dense",
+         "top_k": 5, "domain": DOMAIN, "username": "u-viewer"},
+        {"artifact_ref": f"art_{WID}", "q": "核心网", "mode": "fusion",
+         "top_k": 10, "domain": DOMAIN, "username": "u-viewer"},
     ]
 
 
