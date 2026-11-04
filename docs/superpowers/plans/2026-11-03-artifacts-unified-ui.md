@@ -246,6 +246,8 @@ COMMENT ON TABLE kb_wiki_tocs IS 'wiki 制品设计态目录（page_key 级）�
 
 `npm test` 全绿 + `npm run build` 通过；六提交；原型走查 §18 第 1/4/6 条路径人工核对一遍（对照 artifacts-1115.html）。
 
+> **✅ 批次3 完成（2026-11-04）**：Task 3.1-3.6 全过双职审查。提交链 38ff92c→0bdc62d→a4f2cd4→7ad989c→e2ae5a0→a790988。收口=**npm test 666/666（95 文件）+ build 过**。§18 走查第 1/4/6 条归批次6 E2E（需运行中的应用人工核对）。审查 Minor 记录：筛选选项硬编码（复用时抽常量）、statusTagType 双文件重复（既有债）、新 kind 需穷举映射（四形态时）、WikiTocDesignPanel 索引 key/竞态守卫预留。Task 3.3 遗留措辞已在 3.6 顺手修（deprecated+draft 边角同源化）。
+
 ## 批次4：D03.1 Wiki 图谱视图（全新前端组件）
 
 **依据 66号 §7 D03.1**：节点=本制品页面，箭头=正文引用方向；设计态读草稿、运行态读正式 revision；viewer 不能借图谱读草稿；断链虚线节点；标题搜索+一跳关联；不是全局本体/工作区画布。
@@ -271,6 +273,8 @@ COMMENT ON TABLE kb_wiki_tocs IS 'wiki 制品设计态目录（page_key 级）�
 - [ ] **Step 3: npm test + npm run build**
 - [ ] **Step 4: Commit** `feat(kb-ui): D03.1 Wiki图谱视图——vue-flow只读图/断链虚线/一跳过滤/混版防护`
 - [ ] **Step 5: 原型对照**：§18 第 7 条走查（3 页 6 引用、点「资源池管理特性」返回该页、草稿断链不进运行态）。
+
+> **✅ 批次4 完成（2026-11-04）**：提交 03e2069（主体，16 文件）+ ba7f4a1（双审修复：并发 loadEpoch 守卫/links revision 断言勘正/fitView 优化）。收口=npm test **683/683**（96 文件）+ build 过 + 后端 test_wiki_routes 21/21。viewer 隔离=前端 :draft=canWrite 不发请求+后端 ROLE_DESIGN 双保险（双审逐路径核实）。§18 第 7 条走查归批次6。遗留 Minor：后端 resolve+list 双角色断言开销（可折叠单次读）、draft rev0 恒 0 混版盲区（API 口径固有）、平行边重叠渲染、WIKI_PAGE_TYPE_LABELS 三处重复维护。
 
 ## 批次5：C01 说明卡/Agent 区 + Q01 来源回查/检索状态 + M01 引导 + 帮助章
 
