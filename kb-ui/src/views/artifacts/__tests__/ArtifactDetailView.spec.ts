@@ -46,12 +46,14 @@ function mountDetail(): VueWrapper {
     props: { artifactId: 'art-1' },
     global: {
       // el-tabs/el-tab-pane 桩渲染插槽——版本面板（回滚事件源）得以挂载；
-      // el-table/-column 桩不渲染作用域插槽（行作用域 props 缺省会炸渲染）
+      // el-table/-column 桩不渲染作用域插槽（行作用域 props 缺省会炸渲染）；
+      // el-tag 桩渲染插槽——D01 头部「服务中/待发布」并存表述按文本断言
       stubs: {
         ElTabs: { template: '<div class="el-tabs"><slot /></div>' },
         ElTabPane: { template: '<div class="el-tab-pane"><slot /></div>' },
         ElTable: { template: '<div class="el-table-stub" />' },
         ElTableColumn: { template: '<div class="el-table-column-stub" />' },
+        ElTag: { template: '<span class="el-tag-stub"><slot /></span>' },
         RouterLink: true,
       },
     },
@@ -291,5 +293,55 @@ describe('artifact detail view — 设计态空制品引导（66号 §4）', () 
 
     expect(wrapper.find('[data-test="design-empty-guide"]').exists()).toBe(false)
     expect((wrapper.vm as unknown as DetailVm).emptyGuide).toBeNull()
+  })
+})
+
+describe('artifact detail view — D01 头部服务版本与待发布并存表述（66号 §5）', () => {
+  /** 头部 tag 区文本（标题不含版本语义，tag 区是并存表述的落点）。 */
+  const headerTags = (wrapper: VueWrapper): string =>
+    wrapper.find('.artifact-detail__head-left').text()
+
+  it('已发布 r1 同时有草稿：头部双信息「r1 正在服务」+「另有待发布内容」', async () => {
+    state.api.get.mockReset().mockResolvedValue(
+      { ...artifactDetail, current_revision: 1, draft_open: true })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(headerTags(wrapper)).toContain('r1 正在服务')
+    expect(headerTags(wrapper)).toContain('另有待发布内容')
+  })
+
+  it('已发布且无草稿：只显示「rN 正在服务」，不出现待发布/草稿措辞', async () => {
+    state.api.get.mockReset().mockResolvedValue(
+      { ...artifactDetail, current_revision: 3, draft_open: false })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(headerTags(wrapper)).toContain('r3 正在服务')
+    expect(headerTags(wrapper)).not.toContain('另有待发布内容')
+    expect(headerTags(wrapper)).not.toContain('draft 开放中')
+  })
+
+  it('rev0 未发布：只显示草稿态，无「正在服务」表述', async () => {
+    state.api.get.mockReset().mockResolvedValue({
+      ...artifactDetail, status: 'draft', current_revision: 0,
+      draft_open: true, schema: [], sample_rows: [],
+    })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(headerTags(wrapper)).not.toContain('正在服务')
+    expect(headerTags(wrapper)).toContain('draft 开放中')
+    expect(headerTags(wrapper)).not.toContain('另有待发布内容')
+  })
+
+  it('已停用制品不再宣称「正在服务」（deprecate 后 Agent 侧不可见）', async () => {
+    state.api.get.mockReset().mockResolvedValue(
+      { ...artifactDetail, status: 'deprecated', current_revision: 2, draft_open: false })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(headerTags(wrapper)).not.toContain('正在服务')
+    expect(headerTags(wrapper)).toContain('已停用')
   })
 })

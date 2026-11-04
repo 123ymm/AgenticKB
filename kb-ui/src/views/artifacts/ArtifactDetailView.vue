@@ -14,8 +14,13 @@
         <el-tag v-if="artifact" size="small" effect="plain">
           {{ artifact.kind === 'wiki' ? 'Wiki' : '表格' }}
         </el-tag>
-        <el-tag v-if="artifact?.draft_open" size="small" type="warning" effect="plain">
-          draft 开放中
+        <!-- D01（66号 §5）：服务版本 tag——rev>0 且非停用时点明「rN 正在服务」，
+             与下方草稿 tag 并列，让「正式版在服务 + 另有待发布草稿」的并存一眼可读。 -->
+        <el-tag v-if="servingRevisionLabel" size="small" type="success" effect="plain">
+          {{ servingRevisionLabel }}
+        </el-tag>
+        <el-tag v-if="artifact && artifact.draft_open" size="small" type="warning" effect="plain">
+          {{ artifact.current_revision > 0 ? '另有待发布内容' : 'draft 开放中' }}
         </el-tag>
         <el-tag v-if="artifact" size="small" :type="artifact.visibility === 'public' ? 'success' : 'info'">
           {{ artifact.visibility === 'public' ? '公开' : '私有' }}
@@ -321,6 +326,13 @@ const isOwner = computed(() => artifact.value?.my_role === 'owner')
 /** 干净态 = draft 关闭且已有发布版 → 无待发布变更（后端 409 门禁镜像）。 */
 const hasPendingChanges = computed(() =>
   !!artifact.value && (artifact.value.draft_open || artifact.value.current_revision === 0))
+/** D01（66号 §5）：服务版本表述——有发布版且未停用时点明「rN 正在服务」；
+ *  停用后 Agent 侧不可见，不再宣称「正在服务」（rev0 无发布版，返回 null）。 */
+const servingRevisionLabel = computed(() => {
+  const a = artifact.value
+  if (!a || a.current_revision === 0 || a.status === 'deprecated') return null
+  return `r${a.current_revision} 正在服务`
+})
 
 // ── L01 空制品引导（66号 §4）──────────────────────────────────────────
 
