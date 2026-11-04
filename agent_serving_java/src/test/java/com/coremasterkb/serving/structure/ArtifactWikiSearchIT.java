@@ -561,6 +561,9 @@ class ArtifactWikiSearchIT {
         assertThat(card.kind()).isEqualTo("wiki");
         assertThat(card.artifactRef()).isEqualTo(REF);
         assertThat(card.title()).isEqualTo("切片运维 wiki");
+        // 卡片透传 kb_artifacts.description/usage_note 真库值（Task 2.1 补断言）
+        assertThat(card.description()).isEqualTo("IT 描述-核心网切片运维知识");
+        assertThat(card.usageNote()).isEqualTo("IT 用法-检索前先读口径");
         assertThat(card.status()).isEqualTo("published");
         assertThat(card.revision()).isEqualTo(REVISION);
         // 页数取发布定格快照（row_count=3），不是现存物理页数（5）
@@ -584,9 +587,10 @@ class ArtifactWikiSearchIT {
         jdbc.update("INSERT INTO user_domains (user_id, domain) VALUES (?,?)",
                 OUTSIDER_USER_ID, "other-domain");
         jdbc.update("INSERT INTO kb_artifacts (artifact_id, domain_id, kind, title, "
-                        + "owner_user_id, visibility, status, current_revision) "
-                        + "VALUES (?,?,?,?,?,'private','published',?)",
-                ARTIFACT_ID, DOMAIN, "wiki", "切片运维 wiki", MEMBER_USER_ID, REVISION);
+                        + "description, usage_note, owner_user_id, visibility, status, current_revision) "
+                        + "VALUES (?,?,?,?,?,?,?,'private','published',?)",
+                ARTIFACT_ID, DOMAIN, "wiki", "切片运维 wiki",
+                "IT 描述-核心网切片运维知识", "IT 用法-检索前先读口径", MEMBER_USER_ID, REVISION);
         jdbc.update("INSERT INTO kb_artifact_revisions (artifact_id, revision, schema_json, "
                         + "row_count, change_summary, published_by) VALUES (?,?,'{}'::jsonb,?,?,?)",
                 ARTIFACT_ID, REVISION, 3, "IT 发布", MEMBER_USER_ID);
