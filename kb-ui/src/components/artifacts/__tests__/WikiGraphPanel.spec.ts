@@ -21,7 +21,12 @@ import {
   restrictToOneHop,
 } from '@/utils/wikiGraph'
 import type { Node, Edge } from '@vue-flow/core'
-import type { WikiLink, WikiPageMeta } from '@/types/artifacts'
+import type {
+  WikiLink,
+  WikiLinksEnvelope,
+  WikiPageMeta,
+  WikiPagesEnvelope,
+} from '@/types/artifacts'
 
 interface GraphVm {
   searchQuery: string
@@ -278,6 +283,40 @@ describe('WikiGraphPanel', () => {
     expect(wrapper.findComponent(EmptyState).props('text'))
       .toContain('版本切换中，请重试')
     expect(wrapper.findComponent(VueFlow).exists()).toBe(false)
+  })
+
+  it('并发守卫（审查 #2）：artifactId 快切时旧响应晚到被丢，不串台', async () => {
+    const newPages: WikiPageMeta[] = [{
+      page_key: 'new-page', title: '新制品页', page_type: 'topic',
+      origin: 'manual', ordinal: 1, flags: null, aliases: [],
+      updated_at: '2026-11-02T08:00:00+00:00', updated_by: 'u9',
+    }]
+    let resolveOldPages!: (value: WikiPagesEnvelope) => void
+    let resolveOldLinks!: (value: WikiLinksEnvelope) => void
+    state.api.listWikiPages.mockReset()
+      .mockImplementationOnce(() => new Promise<WikiPagesEnvelope>(resolve => {
+        resolveOldPages = resolve
+      }))   // 旧制品请求挂起（慢）
+      .mockResolvedValue({ revision: 5, pages: newPages })
+    state.api.listWikiLinks.mockReset()
+      .mockImplementationOnce(() => new Promise<WikiLinksEnvelope>(resolve => {
+        resolveOldLinks = resolve
+      }))
+      .mockResolvedValue({ revision: 5, links: [] })
+
+    const wrapper = mountGraph()
+    await flushPromises()   // 首次请求在飞（未落地）
+
+    await wrapper.setProps({ artifactId: 'art-2' })   // 快切 → watch 触发第二次 reload
+    await flushPromises()
+    expect(flowProps(wrapper).nodes.map(n => n.id)).toEqual(['new-page'])
+
+    resolveOldPages({ revision: 1, pages: pagesFixture })   // 旧制品慢响应迟到
+    resolveOldLinks({ revision: 1, links: linksFixture })
+    await flushPromises()
+
+    expect(flowProps(wrapper).nodes.map(n => n.id)).toEqual(['new-page'])   // 旧数据不落地
+    expect(state.api.listWikiPages).toHaveBeenCalledTimes(2)
   })
 
   it('边界：空 Wiki（0 页）→ 空态提示，不渲染画布', async () => {

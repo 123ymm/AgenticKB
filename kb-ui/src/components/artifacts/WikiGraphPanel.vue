@@ -107,8 +107,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
-import { Handle, Position, VueFlow, type Edge, type Node } from '@vue-flow/core'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { Handle, Position, VueFlow, useVueFlow, type Edge, type Node } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import '@vue-flow/core/dist/style.css'
@@ -177,9 +177,11 @@ const errorText = computed(() => {
   return ''
 })
 
-/** 过滤/选中变化即重建画布（fitViewOnInit 只在挂载时生效——重挂保证收窄后视图适配）。 */
+/** 结构性变化（版本/选中/一跳开关）才重建画布（fitViewOnInit 重适配）；
+ * 搜索只收窄节点集、不重挂——保留用户缩放/平移（审查 #3），视图适配由
+ * watch(searchQuery) 的 fitView 补位。 */
 const flowKey = computed(() => (
-  `${revision.value}:${selectedKey.value}:${oneHopOnly.value}:${searchQuery.value.trim()}`))
+  `${revision.value}:${selectedKey.value}:${oneHopOnly.value}`))
 
 const flowNodes = computed<Node[]>(() => visible.value.nodes.map(node => ({
   id: node.id,
@@ -206,7 +208,17 @@ const flowEdges = computed<Edge[]>(() => visible.value.edges.map(edge => ({
   },
 })))
 
+/** 与模板 <VueFlow> 共享同一 flow store（useVueFlow 先建后 provide，子组件
+ * inject 复用）——父层驱动视图适配，搜索收窄不整幅重挂。 */
+const { fitView } = useVueFlow()
+
 onMounted(reload)
+
+/** 搜索过滤后节点集变化 → 重适配视图一次（nextTick 等节点 props 落画布）。
+ * fitView 对未测量节点（含桩环境无画布）安全早退，不抛错。 */
+watch(searchQuery, () => {
+  void nextTick(() => { void fitView({ padding: 0.12, duration: 200 }) })
+})
 
 /** 制品切换（路由复用组件不重挂）→ 整体重置。 */
 watch(() => props.artifactId, () => {
@@ -227,15 +239,24 @@ watch(() => visible.value.nodes, nodes => {
  * 加载 pages/links 两信封 + 混版防护（66号 D03.1：两请求之间发生发布/
  * 回滚须可检出）：revision 不一致 → 整对重拉一次；仍不一致 → 错误态
  * （不用半新半旧数据拼图）。
+ *
+ * 请求序号守卫（审查 #2）：reload 并发（artifactId 快切/重试双击）时，
+ * 迟到的旧响应在任一落地前被丢弃，不串台覆盖新制品数据——先例=
+ * Reader 的 selectedKey 竞态守卫。
  */
+let loadEpoch = 0
+
 async function reload(): Promise<void> {
+  const epoch = ++loadEpoch
   loading.value = true
   loadError.value = ''
   revisionMismatch.value = false
   try {
     let [pagesEnv, linksEnv] = await fetchPair()
+    if (epoch !== loadEpoch) return
     if (pagesEnv.revision !== linksEnv.revision) {
       [pagesEnv, linksEnv] = await fetchPair()
+      if (epoch !== loadEpoch) return
       if (pagesEnv.revision !== linksEnv.revision) {
         revisionMismatch.value = true
         return
@@ -248,11 +269,13 @@ async function reload(): Promise<void> {
       selectedKey.value = ''
     }
   } catch (error) {
+    const message = await apiErrorDetail(error)
+    if (epoch !== loadEpoch) return
     pages.value = []
     links.value = []
-    loadError.value = await apiErrorDetail(error)
+    loadError.value = message
   } finally {
-    loading.value = false
+    if (epoch === loadEpoch) loading.value = false
   }
 }
 

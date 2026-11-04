@@ -376,13 +376,13 @@ async def test_pages_links_revision_envelope(env):
         f"/api/artifacts/{WID}/wiki/links", params={"draft": "true"})
     assert r.json()["revision"] == 0
 
-    # 显式历史 revision 原样回填（design 角色）
+    # 显式历史 revision 原样回填（design 角色）——仅 pages 端点：links 路由
+    # 不收 revision 查询参数（FastAPI 静默丢弃后走 runtime，恰与 1 同值是
+    # 巧合而非契约，审查 #4 勘正删除——links 信封 revision 只随 draft/缺省
+    # 视图口径，见路由 docstring）。
     r = await env.client.get(
         f"/api/artifacts/{WID}/wiki/pages", params={"revision": 1})
     assert r.status_code == 200 and r.json()["revision"] == 1
-    r = await env.client.get(
-        f"/api/artifacts/{WID}/wiki/links", params={"revision": 1})
-    assert r.json()["revision"] == 1
 
 
 async def test_status_endpoint(env):
