@@ -1,18 +1,36 @@
 <template>
   <div class="wiki-editor">
-    <!-- 左栏：页面清单（ordinal 排序；徽标=页型色 + origin） -->
+    <!-- 左栏：页面清单（ordinal 排序；徽标=页型色 + origin）｜目录编辑入口（D03） -->
     <aside class="wiki-editor__list">
       <div class="wiki-editor__list-head">
+        <el-button-group v-if="canWrite" size="small" class="wiki-editor__views">
+          <el-button
+            :type="leftView === 'pages' ? 'primary' : ''"
+            data-test="wiki-left-pages"
+            @click="switchLeftView('pages')"
+          >页面清单</el-button>
+          <el-button
+            :type="leftView === 'toc' ? 'primary' : ''"
+            data-test="wiki-left-toc"
+            @click="switchLeftView('toc')"
+          >目录</el-button>
+        </el-button-group>
         <span class="wiki-editor__count">共 {{ sortedPages.length }} 页</span>
-        <el-button v-if="canWrite" size="small" data-test="wiki-new-page" @click="startNewPage">新建页</el-button>
       </div>
+      <el-button
+        v-if="canWrite && leftView === 'pages'"
+        size="small"
+        class="wiki-editor__new"
+        data-test="wiki-new-page"
+        @click="startNewPage"
+      >新建页</el-button>
       <div v-loading="loading" class="wiki-editor__list-body">
         <button
           v-for="page in sortedPages"
           :key="page.page_key"
           type="button"
           class="wiki-editor__item"
-          :class="{ 'is-active': !isNew && selectedKey === page.page_key }"
+          :class="{ 'is-active': leftView === 'pages' && !isNew && selectedKey === page.page_key }"
           data-test="wiki-page-item"
           @click="selectPage(page.page_key)"
         >
@@ -32,9 +50,15 @@
       </div>
     </aside>
 
-    <!-- 右栏：编辑表单（viewer 全禁用但可预览） -->
+    <!-- 右栏：目录编辑（D03，左栏切到「目录」时占据）｜编辑表单（viewer 全禁用但可预览） -->
     <section class="wiki-editor__main">
-      <template v-if="formVisible">
+      <WikiTocDesignPanel
+        v-if="leftView === 'toc'"
+        :artifact-id="artifactId"
+        :pages="sortedPages"
+        @dirty="onTocDirty"
+      />
+      <template v-else-if="formVisible">
         <div class="wiki-editor__toolbar">
           <span class="wiki-editor__addr">
             {{ isNew ? '新建页（保存后按后端归一定稿 page_key）' : `page_key：${selectedKey}` }}
@@ -130,6 +154,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
+import WikiTocDesignPanel from './WikiTocDesignPanel.vue'
 import { renderMarkdown } from '@/utils/markdown'
 import type { WikiPage, WikiPageMeta, WikiPageType } from '@/types/artifacts'
 
@@ -176,6 +201,10 @@ const pages = ref<WikiPageMeta[]>([])
 const selectedKey = ref('')
 const isNew = ref(false)
 const preview = ref(false)
+/** 左栏视图（D03）：页面清单｜目录编辑（目录编辑=editor+ 能力，viewer 无入口）。 */
+const leftView = ref<'pages' | 'toc'>('pages')
+/** 目录面板是否有未保存修改（子组件 dirty 事件维护）——离开目录视图的守卫依据。 */
+const tocDirty = ref(false)
 
 const emptyForm = (): WikiForm => ({ title: '', pageType: 'topic', pageKey: '', aliases: '', tags: '', ordinal: 1, bodyMd: '' })
 const form = ref<WikiForm>(emptyForm())
@@ -223,7 +252,36 @@ async function loadPages(): Promise<void> {
   }
 }
 
+/** 切换左栏视图（D03）。目录有未保存修改时离开需用户明确放弃（66号 §6：
+ * 未完成的编辑在切换前必须保存或由用户明确放弃）。返回是否完成切换。 */
+async function switchLeftView(view: 'pages' | 'toc'): Promise<boolean> {
+  if (view === leftView.value) return true
+  if (view === 'pages' && tocDirty.value) {
+    try {
+      await ElMessageBox.confirm(
+        '目录有未保存的修改，离开将放弃这些修改——确定离开吗？',
+        '未保存的目录修改',
+        { type: 'warning', confirmButtonText: '放弃修改并离开', cancelButtonText: '继续编辑目录' })
+    } catch {
+      return false   // 用户选择继续编辑——视图不动，编辑不丢
+    }
+    tocDirty.value = false
+  }
+  leftView.value = view
+  return true
+}
+
+/** 目录面板 dirty 事件落地（保存成功也会发 false 复位）。 */
+function onTocDirty(isDirty: boolean): void {
+  tocDirty.value = isDirty
+}
+
 async function selectPage(pageKey: string): Promise<void> {
+  // 目录视图下点左栏页项=离开目录编辑——同走放弃确认守卫
+  if (leftView.value === 'toc') {
+    const switched = await switchLeftView('pages')
+    if (!switched) return
+  }
   isNew.value = false
   selectedKey.value = pageKey
   try {
@@ -366,7 +424,8 @@ defineExpose({ loadPages })
 <style scoped>
 .wiki-editor { display: flex; gap: 14px; min-height: 420px; }
 .wiki-editor__list { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
-.wiki-editor__list-head { display: flex; align-items: center; justify-content: space-between; }
+.wiki-editor__list-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+.wiki-editor__new { align-self: flex-start; }
 .wiki-editor__count { font-size: 12.5px; color: var(--kb-text-tertiary); }
 .wiki-editor__list-body { display: flex; flex-direction: column; gap: 4px; }
 .wiki-editor__item {

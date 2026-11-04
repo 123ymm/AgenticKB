@@ -23,6 +23,7 @@ vi.mock('element-plus', () => ({
 }))
 
 import WikiEditorPanel from '../WikiEditorPanel.vue'
+import WikiTocDesignPanel from '../WikiTocDesignPanel.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import type { WikiPage, WikiPageMeta } from '@/types/artifacts'
 
@@ -31,6 +32,9 @@ interface EditorVm {
   selectedKey: string
   isNew: boolean
   preview: boolean
+  leftView: 'pages' | 'toc'
+  tocDirty: boolean
+  switchLeftView: (view: 'pages' | 'toc') => Promise<boolean>
   form: {
     title: string
     pageType: string
@@ -287,5 +291,86 @@ describe('WikiEditorPanel', () => {
     const empty = wrapper.findComponent(EmptyState)
     expect(empty.exists()).toBe(true)
     expect(empty.props('text')).toBe('暂无页面，点击新建开始')
+  })
+})
+
+// ── 目录编辑入口（66号 D03：设计态左栏「页面清单｜目录」切换）──
+
+describe('WikiEditorPanel 目录编辑入口（D03）', () => {
+  it('切到目录视图：挂载 WikiTocDesignPanel 并传排序后页清单；页表单让位', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as EditorVm
+    expect(wrapper.findComponent(WikiTocDesignPanel).exists()).toBe(false)
+
+    await wrapper.find('[data-test="wiki-left-toc"]').trigger('click')
+    await flushPromises()
+
+    expect(vm.leftView).toBe('toc')
+    const panel = wrapper.findComponent(WikiTocDesignPanel)
+    expect(panel.exists()).toBe(true)
+    expect(panel.props('artifactId')).toBe('art-1')
+    // pages=sortedPages（ordinal 排序口径与页清单一致）
+    expect((panel.props('pages') as WikiPageMeta[]).map(p => p.page_key))
+      .toEqual(['home', 'glossary-mop', 'conflict-1'])
+    // 右栏被目录编辑占据——页编辑表单隐藏
+    expect(wrapper.find('[data-test="wiki-save"]').exists()).toBe(false)
+
+    // 切回页面清单：目录面板卸载、表单恢复
+    await wrapper.find('[data-test="wiki-left-pages"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent(WikiTocDesignPanel).exists()).toBe(false)
+  })
+
+  it('viewer 无目录编辑入口（目录编辑是 editor+ 能力）', async () => {
+    const wrapper = mountPanel(false)
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="wiki-left-toc"]').exists()).toBe(false)
+  })
+
+  it('未保存切换守卫：目录 dirty 时离开需确认——取消留在目录视图，确认后离开（66号 §6）', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as EditorVm
+
+    await vm.switchLeftView('toc')
+    wrapper.findComponent(WikiTocDesignPanel).vm.$emit('dirty', true)
+    await flushPromises()
+    expect(vm.tocDirty).toBe(true)
+
+    // 用户取消 → 留在目录视图（编辑不丢）
+    state.ui.confirm.mockRejectedValueOnce('cancel')
+    await expect(vm.switchLeftView('pages')).resolves.toBe(false)
+    expect(vm.leftView).toBe('toc')
+    expect(state.ui.confirm).toHaveBeenCalledTimes(1)
+
+    // 用户确认 → 放弃修改离开
+    state.ui.confirm.mockResolvedValueOnce('confirm')
+    await expect(vm.switchLeftView('pages')).resolves.toBe(true)
+    expect(vm.leftView).toBe('pages')
+    expect(vm.tocDirty).toBe(false)
+  })
+
+  it('目录视图下点击左栏页项：dirty 时取消确认则不选页；确认后选页', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as EditorVm
+
+    await vm.switchLeftView('toc')
+    wrapper.findComponent(WikiTocDesignPanel).vm.$emit('dirty', true)
+    await flushPromises()
+
+    state.ui.confirm.mockRejectedValueOnce('cancel')
+    await vm.selectPage('home')
+    await flushPromises()
+    expect(vm.leftView).toBe('toc')
+    expect(state.api.getWikiPage).not.toHaveBeenCalled()
+
+    state.ui.confirm.mockResolvedValueOnce('confirm')
+    await vm.selectPage('home')
+    await flushPromises()
+    expect(vm.leftView).toBe('pages')
+    expect(state.api.getWikiPage).toHaveBeenCalledWith('art-1', 'home', { draft: true })
   })
 })

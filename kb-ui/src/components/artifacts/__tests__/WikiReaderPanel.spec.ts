@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
     getWikiPage: vi.fn(),
     listWikiLinks: vi.fn(),
     searchWiki: vi.fn(),
+    getWikiToc: vi.fn(),
   },
   ui: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
   clipboard: { writeText: vi.fn() },
@@ -92,6 +93,8 @@ beforeEach(() => {
       Promise.resolve(params?.direction === 'out' ? outLinks : inLinks))
   state.api.searchWiki.mockReset().mockResolvedValue(
     { revision: 1, degraded_dense: false, results: [] })
+  // 运行态目录缺省平铺（无 toc 行/空目录——D03 分节渲染不触发）
+  state.api.getWikiToc.mockReset().mockResolvedValue({ sections: [], flat: true, revision: 1 })
   state.ui.success.mockReset()
   state.ui.error.mockReset()
   state.ui.warning.mockReset()
@@ -361,5 +364,75 @@ describe('WikiReaderPanel 检索（批次4）', () => {
     expect(state.ui.error).toHaveBeenCalledWith(expect.stringContaining('检索失败'))
     expect(wrapper.findAll('[data-test="wiki-reader-search-hit"]')).toHaveLength(0)
     expect(wrapper.find('[data-test="wiki-reader-search-none"]').exists()).toBe(false)
+  })
+})
+
+// ── 运行态分节目录（66号 D03：目录栏按 runtime toc 分节渲染）──
+
+describe('WikiReaderPanel 分节目录（D03）', () => {
+  it('runtime toc 两节 → 节标题分组渲染；节序/节内键序优先于 ordinal；点击页键切页', async () => {
+    // home（ordinal 2）排在第一节——目录声明的节序+页键序是唯一顺序口径
+    state.api.getWikiToc.mockResolvedValueOnce({
+      sections: [
+        { section_title: '进阶', page_keys: ['ghost-page', 'home'] },   // ghost 不在已发布页中 → 滤除
+        { section_title: '基础', page_keys: ['glossary-mop'] },
+      ],
+      flat: false, revision: 3,
+    })
+    const wrapper = mountReader()
+    await flushPromises()
+
+    // 运行态缺省口径（不带 draft/revision 参数）
+    expect(state.api.getWikiToc).toHaveBeenCalledWith('art-1')
+
+    const titles = wrapper.findAll('[data-test="wiki-reader-toc-section"]')
+    expect(titles).toHaveLength(2)
+    expect(titles[0].text()).toContain('进阶')
+    expect(titles[1].text()).toContain('基础')
+
+    const items = wrapper.findAll('[data-test="wiki-reader-toc-item"]')
+    expect(items).toHaveLength(2)
+    expect(items[0].text()).toContain('首页')          // 节序优先，非 ordinal 首页在前
+    expect(items[1].text()).toContain('MOP 术语')
+    expect(items[0].classes()).toContain('is-active')  // 仍自动选中第一页
+
+    // 页键点击切页（沿用 selectPage）
+    await items[1].trigger('click')
+    await flushPromises()
+    expect(state.api.getWikiPage).toHaveBeenLastCalledWith('art-1', 'glossary-mop', { draft: false })
+  })
+
+  it('页不在任何节 → 归「其他」尾节', async () => {
+    state.api.getWikiToc.mockResolvedValueOnce({
+      sections: [{ section_title: '基础', page_keys: ['glossary-mop'] }],
+      flat: false, revision: 3,
+    })
+    const wrapper = mountReader()
+    await flushPromises()
+
+    const titles = wrapper.findAll('[data-test="wiki-reader-toc-section"]')
+    expect(titles).toHaveLength(2)
+    expect(titles[1].text()).toContain('其他')
+    expect(titles[1].text()).toContain('首页')   // home 未入节 → 其他节内
+  })
+
+  it('flat:true → 平铺渲染（无节标题），保持 ordinal 排序', async () => {
+    const wrapper = mountReader()   // beforeEach 默认 mock：{sections:[], flat:true}
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test="wiki-reader-toc-section"]')).toHaveLength(0)
+    const items = wrapper.findAll('[data-test="wiki-reader-toc-item"]')
+    expect(items).toHaveLength(2)
+    expect(items[0].text()).toContain('MOP 术语')   // ordinal 1 在前（平铺口径不变）
+  })
+
+  it('toc 404（rev0 反探测等）→ 回落平铺且不报错', async () => {
+    state.api.getWikiToc.mockRejectedValueOnce({ response: { status: 404 } })
+    const wrapper = mountReader()
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test="wiki-reader-toc-section"]')).toHaveLength(0)
+    expect(wrapper.findAll('[data-test="wiki-reader-toc-item"]')).toHaveLength(2)
+    expect(state.ui.error).not.toHaveBeenCalled()
   })
 })

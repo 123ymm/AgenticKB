@@ -54,20 +54,30 @@
         </div>
         <div class="wiki-reader__toc-head">目录 · 共 {{ sortedPages.length }} 页</div>
         <div class="wiki-reader__toc-body">
-          <button
-            v-for="item in sortedPages"
-            :key="item.page_key"
-            type="button"
-            class="wiki-reader__toc-item"
-            :class="{ 'is-active': item.page_key === selectedKey }"
-            data-test="wiki-reader-toc-item"
-            @click="selectPage(item.page_key)"
+          <!-- D03 分节目录：runtime toc 有节 → 节序+节内键序分组（组容器=节锚点）；
+               flat/无 toc → 单组无标题（title=null 不渲染组头）=原平铺口径 -->
+          <section
+            v-for="(group, gi) in tocGroups"
+            :key="gi"
+            class="wiki-reader__toc-group"
+            :data-test="group.title !== null ? 'wiki-reader-toc-section' : undefined"
           >
-            <el-tag size="small" effect="plain" :type="pageTypeMeta(item.page_type)?.tag ?? 'info'">
-              {{ pageTypeMeta(item.page_type)?.label ?? item.page_type }}
-            </el-tag>
-            <span class="wiki-reader__toc-title">{{ item.title }}</span>
-          </button>
+            <div v-if="group.title" class="wiki-reader__toc-group-title">{{ group.title }}（{{ group.pages.length }}）</div>
+            <button
+              v-for="item in group.pages"
+              :key="item.page_key"
+              type="button"
+              class="wiki-reader__toc-item"
+              :class="{ 'is-active': item.page_key === selectedKey }"
+              data-test="wiki-reader-toc-item"
+              @click="selectPage(item.page_key)"
+            >
+              <el-tag size="small" effect="plain" :type="pageTypeMeta(item.page_type)?.tag ?? 'info'">
+                {{ pageTypeMeta(item.page_type)?.label ?? item.page_type }}
+              </el-tag>
+              <span class="wiki-reader__toc-title">{{ item.title }}</span>
+            </button>
+          </section>
         </div>
       </aside>
 
@@ -163,7 +173,14 @@ import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { extractWikiNavTarget, extractWikiSrcUnit, renderWikiMarkdown } from '@/utils/markdown'
-import type { WikiLink, WikiPage, WikiPageMeta, WikiPageType, WikiSearchHit } from '@/types/artifacts'
+import type {
+  WikiLink,
+  WikiPage,
+  WikiPageMeta,
+  WikiPageType,
+  WikiSearchHit,
+  WikiTocSnapshotResolved,
+} from '@/types/artifacts'
 
 /** 四页型徽标表（63号 §4.3）——与 WikiEditorPanel 同表（纯展示映射，两处独立维护）。 */
 const PAGE_TYPES = [
@@ -193,6 +210,8 @@ const selectedKey = ref('')
 const page = ref<WikiPage | null>(null)
 const outLinks = ref<WikiLink[]>([])
 const inLinks = ref<WikiLink[]>([])
+/** 运行态分节目录（D03）：null=平铺（无 toc 行/flat/拉取失败一律回落）。 */
+const tocSections = ref<WikiTocSnapshotResolved[] | null>(null)
 
 // ── 检索（63号批次4：搜索框 → mining 转发 serving 三通道，fusion 默认）──
 const searchQuery = ref('')
@@ -206,6 +225,31 @@ let searchEpoch = 0
 
 const sortedPages = computed(() =>
   [...pages.value].sort((a, b) => a.ordinal - b.ordinal || a.page_key.localeCompare(b.page_key)))
+
+/** 目录分组视图（D03）：有节→节序+节内键序（页键不在已发布页滤除、跨节重复
+ * 只取首见），未入节页归「其他」尾节；平铺→单组无标题=原 ordinal 口径。 */
+interface TocGroup { title: string | null; pages: WikiPageMeta[] }
+const tocGroups = computed<TocGroup[]>(() => {
+  const secs = tocSections.value
+  if (!secs || secs.length === 0) return [{ title: null, pages: sortedPages.value }]
+  const byKey = new Map(sortedPages.value.map(p => [p.page_key, p]))
+  const seen = new Set<string>()
+  const groups: TocGroup[] = []
+  for (const sec of secs) {
+    const groupPages: WikiPageMeta[] = []
+    for (const key of sec.page_keys) {
+      const meta = byKey.get(key)
+      if (meta && !seen.has(key)) {
+        seen.add(key)
+        groupPages.push(meta)
+      }
+    }
+    groups.push({ title: sec.section_title, pages: groupPages })
+  }
+  const rest = sortedPages.value.filter(p => !seen.has(p.page_key))
+  if (rest.length > 0) groups.push({ title: '其他', pages: rest })
+  return groups
+})
 
 /** 正文 HTML（renderWikiMarkdown：站内双链/溯源角标标记 → marked → DOMPurify）。 */
 const pageHtml = computed(() => (page.value ? renderWikiMarkdown(page.value.body_md ?? '') : ''))
@@ -226,12 +270,15 @@ async function loadPages(): Promise<void> {
   loadFailedText.value = ''
   try {
     pages.value = await api.listWikiPages(props.artifactId, { draft: false })
+    // 分节目录先于首选页落地（失败静默回落平铺）——目录序决定初始选中页，
+    // 保证打开阅读器时目录首项高亮与正文一致（分节下≠ordinal 首页）。
+    await loadToc()
     const keepKey = selectedKey.value &&
       pages.value.some(p => p.page_key === selectedKey.value)
     if (keepKey) {
       await selectPage(selectedKey.value)
-    } else if (sortedPages.value[0]) {
-      await selectPage(sortedPages.value[0].page_key)
+    } else if (tocGroups.value[0]?.pages[0]) {
+      await selectPage(tocGroups.value[0].pages[0].page_key)
     } else {
       selectedKey.value = ''
       page.value = null
@@ -244,6 +291,19 @@ async function loadPages(): Promise<void> {
     loadFailedText.value = await apiErrorDetail(error)
   } finally {
     loading.value = false
+  }
+}
+
+/** 运行态目录（缺省口径）：有节分节渲染；无行/flat/404（rev0 反探测）等
+ * 一切失败形态一律回落平铺且不报错（Reader 已有的 rev0 容错口径）。 */
+async function loadToc(): Promise<void> {
+  try {
+    const snap = await api.getWikiToc(props.artifactId)
+    tocSections.value = snap.flat === true || (snap.sections ?? []).length === 0
+      ? null
+      : snap.sections
+  } catch {
+    tocSections.value = null
   }
 }
 
@@ -329,6 +389,7 @@ watch(searchQuery, (value) => {
 watch(() => props.artifactId, () => {
   searchQuery.value = ''
   resetSearch()
+  tocSections.value = null   // 旧制品目录不残留（loadPages 会重拉）
 })
 
 /** 正文点击委托：双链 → 切页；溯源角标 → 复制切片 ID；其余点击不拦截。 */
@@ -441,6 +502,13 @@ defineExpose({ reload: loadPages })
   font-size: 12.5px; color: var(--kb-text-tertiary); margin-bottom: 8px;
 }
 .wiki-reader__toc-body { display: flex; flex-direction: column; gap: 4px; }
+/* D03 分节目录：组间留白，组标题弱化（页项仍是主交互面） */
+.wiki-reader__toc-group { display: flex; flex-direction: column; gap: 4px; }
+.wiki-reader__toc-group + .wiki-reader__toc-group { margin-top: 8px; }
+.wiki-reader__toc-group-title {
+  font-size: 12px; font-weight: 600; color: var(--kb-text-tertiary);
+  padding: 2px 8px; border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5);
+}
 .wiki-reader__toc-item {
   display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px;
   border: 1px solid transparent; border-radius: 6px; background: none;
