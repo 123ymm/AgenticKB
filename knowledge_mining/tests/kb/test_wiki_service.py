@@ -16,7 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from knowledge_mining.mining.kb.db_wiki import WikiError, chunk_page_for_units
+from knowledge_mining.mining.kb.db_wiki import (
+    WikiError,
+    _build_page_changes,
+    chunk_page_for_units,
+)
 from knowledge_mining.mining.infra.llm_task_client import LlmTaskError
 from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactForbidden,
@@ -215,7 +219,13 @@ class FakeWikiDB:
                 if draft[key].get(f) != current[key].get(f)
             ]
             if fields:
-                changed.append({"page_key": key, "fields": fields})
+                # Task 1.5 审查 I-2：changed 元素复用真装配（changes 键），
+                # 替身契约与真库锁定（照 chunk_page_for_units 导入先例）。
+                changed.append({
+                    "page_key": key, "fields": fields,
+                    "changes": _build_page_changes(
+                        draft[key], current[key], fields),
+                })
         return {"added": added, "removed": removed, "changed": changed,
                 "added_count": len(added), "removed_count": len(removed),
                 "changed_count": len(changed)}
@@ -964,3 +974,79 @@ async def test_lifecycle_rollback_and_discard_and_diff():
     # 非法 revision 回滚 → InvalidOperation（WikiError 翻译）
     with pytest.raises(InvalidOperation, match="invalid_revision"):
         await env.lifecycle.rollback_to(_user("u-owner"), art, 99)
+
+
+# ------------------- _build_page_changes 纯函数直测（Task 1.5 审查 M-3）
+
+async def test_build_page_changes_preview_and_line_clip():
+    """直测（毫秒级无 PG，落位本文件=纯 fake 文件永跑不被 PG 门控跳过）：
+    preview 200 字符精确边界；超长行截前 500 字符加可辨识后缀（审查 I-1：
+    body_md 无写入侧封顶，2MB 单行正文只产 5 行 hunks 却带 4MB 字符量，
+    行数与 preview 两上限全被穿透）。"""
+    old_body = "甲" * 200 + "甲尾"
+    new_body = "乙" * 200 + "乙尾"
+    changes = _build_page_changes(          # (draft, current)——old 取自 current
+        {"body_md": new_body}, {"body_md": old_body}, ["body_md"])
+    body = changes["body_md"]
+    assert body["old_preview"] == "甲" * 200   # 恰 200：第 201 字符起丢
+    assert body["new_preview"] == "乙" * 200
+    assert len(body["old_preview"]) == len(body["new_preview"]) == 200
+    # 单行替换 → 5 行 hunks（---/+++/@@/-行/+行）；203 字符行 < 500 不截
+    assert body["diff_hunks"] == [
+        "--- ", "+++ ", "@@ -1 +1 @@",
+        "-" + old_body, "+" + new_body,
+    ]
+    assert "truncated" not in body
+
+    # 审查 I-1：600 字符超长行 → 整行（含 +/- 前缀）截前 500 + 后缀标记
+    # （行长上界恰 500+后缀；行级自含可辨识）
+    clipped = _build_page_changes(
+        {"body_md": "y" * 600}, {"body_md": "x" * 600}, ["body_md"])
+    hunks = clipped["body_md"]["diff_hunks"]
+    assert hunks[3] == "-" + "x" * 499 + "…[行超长已截断]"
+    assert hunks[4] == "+" + "y" * 499 + "…[行超长已截断]"
+    suffix_len = len("…[行超长已截断]")
+    assert all(len(line) <= 500 + suffix_len for line in hunks)
+
+
+async def test_build_page_changes_hunks_boundary():
+    """直测（审查 M-3）：hunks 100 行边界——恰 100 行不带 truncated 键；
+    超过（103 行）截前 100 行 + truncated=true（islice 早停取
+    LIMIT+1 行，len>100 即截断，语义与全量物化等价）。"""
+    # 恰 100：2 文件头 + 1 @@ + 48 删 + 48 增 + 1 相同尾行（空格前缀上下文）
+    old_body = "\n".join(["a"] * 48 + ["tail"])
+    new_body = "\n".join(["b"] * 48 + ["tail"])
+    exact = _build_page_changes(
+        {"body_md": old_body}, {"body_md": new_body}, ["body_md"])["body_md"]
+    assert len(exact["diff_hunks"]) == 100
+    assert "truncated" not in exact
+    assert exact["diff_hunks"][-1] == " tail"
+
+    # 50 删 + 50 增 + 3 头 = 103 行 → 截前 100 + truncated
+    old_big = "\n".join(f"旧{i}" for i in range(50))
+    new_big = "\n".join(f"新{i}" for i in range(50))
+    over = _build_page_changes(
+        {"body_md": old_big}, {"body_md": new_big}, ["body_md"])["body_md"]
+    assert len(over["diff_hunks"]) == 100
+    assert over["truncated"] is True
+    assert over["diff_hunks"][0] == "--- " and over["diff_hunks"][1] == "+++ "
+
+
+async def test_fake_diff_changed_matches_real_shape():
+    """审查 I-2：FakeWikiDB.diff 的 changed 元素与真库同构（changes 键由
+    _build_page_changes 装配——fake 复用真实现，契约漂移即红）。"""
+    env = _wiki_env()
+    await _put_page(env, title="首页", body="v1")
+    art = env.adb.artifacts[WID]
+    await env.lifecycle.publish(_user("u-owner"), art, change_summary="rev1")
+    await _drain_background()
+    await _put_page(env, title="首页", body="v1 改")
+
+    diff = await env.wdb.diff_draft_vs_current(WID)
+    assert diff["changed_count"] == 1
+    [elem] = diff["changed"]
+    assert set(elem) == {"page_key", "fields", "changes"}
+    assert elem["fields"] == ["body_md"]
+    assert elem["changes"]["body_md"]["old_preview"] == "v1"
+    assert elem["changes"]["body_md"]["new_preview"] == "v1 改"
+    assert "truncated" not in elem["changes"]["body_md"]

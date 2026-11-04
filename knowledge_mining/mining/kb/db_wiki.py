@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import binascii
 import difflib
+import itertools
 import json
 import logging
 import re
@@ -34,6 +35,16 @@ _DIFF_SAMPLE_LIMIT = 100
 #: diff changed 元素 body_md 预览长度（old/new_preview 各截前 N 字符——
 #: 长正文不全量进载荷，弹窗用 hunks 看差异、preview 看上下文）。
 _DIFF_BODY_PREVIEW_LIMIT = 200
+
+#: diff hunks 单行字符上界（Task 1.5 审查 I-1）：body_md 无写入侧长度
+#: 封顶，2MB 单行正文只产 5 行 hunks 却带 4MB 字符量——行数与 preview
+#: 两上限全被穿透；超长行截前 N 字符并加后缀标记（行级自含，前端渲染
+#: 即见，无需额外字段）。写入侧 WikiPagePut.max_length 封顶影响面大，
+#: 属另议（审查裁定遗留建议，不在本改动动）。
+_DIFF_HUNK_LINE_LIMIT = 500
+
+#: hunks 超长行截断标记（追加在截断行尾——可辨识且行长界恒定）。
+_DIFF_HUNK_LINE_SUFFIX = "…[行超长已截断]"
 
 #: 检索单元分块上限（63号 §5.3：≤2000 字单块；超长按 H2 分节/段落硬切）。
 _UNITS_CHUNK_LIMIT = 2000
@@ -244,6 +255,15 @@ def chunk_page_for_units(
     return [(f"{page_key}#s{i}", text) for i, text in enumerate(contents, start=1)]
 
 
+def _clip_hunk_line(line: str) -> str:
+    """hunks 单行字符上界（审查 I-1）：超长行截前 _DIFF_HUNK_LINE_LIMIT
+    字符并追加截断标记（difflib 输出行含 +/-/空格 前缀，整行左截保留
+    前缀与行首内容，标记加行尾）。"""
+    if len(line) <= _DIFF_HUNK_LINE_LIMIT:
+        return line
+    return line[:_DIFF_HUNK_LINE_LIMIT] + _DIFF_HUNK_LINE_SUFFIX
+
+
 def _build_page_changes(
     draft_page: dict[str, Any], current_page: dict[str, Any],
     fields: list[str],
@@ -254,7 +274,10 @@ def _build_page_changes(
     body_md 长正文不全量进载荷——old/new_preview 各截前 200 字符 +
     ``difflib.unified_diff`` 行级 hunks（stdlib 零依赖）截前
     _DIFF_SAMPLE_LIMIT 行，超限携带 ``truncated: true``（对齐样例截 100
-    先例；未超限不携带该键）。"""
+    先例；未超限不携带该键）；单行再截 _DIFF_HUNK_LINE_LIMIT 字符加
+    截断标记（审查 I-1——防单行超长正文穿透行数上限）。hunks 取数走
+    islice 早停（审查 M-1：多产 1 行仅供 truncated 判定，超长正文不
+    物化全量 diff 生成器）。"""
     changes: dict[str, Any] = {}
     for field in fields:
         if field != "body_md":
@@ -265,12 +288,16 @@ def _build_page_changes(
             continue
         old_body = str(current_page.get("body_md") or "")
         new_body = str(draft_page.get("body_md") or "")
-        hunks = list(difflib.unified_diff(
-            old_body.splitlines(), new_body.splitlines(), lineterm=""))
+        hunks = list(itertools.islice(
+            difflib.unified_diff(
+                old_body.splitlines(), new_body.splitlines(), lineterm=""),
+            _DIFF_SAMPLE_LIMIT + 1))
         entry: dict[str, Any] = {
             "old_preview": old_body[:_DIFF_BODY_PREVIEW_LIMIT],
             "new_preview": new_body[:_DIFF_BODY_PREVIEW_LIMIT],
-            "diff_hunks": hunks[:_DIFF_SAMPLE_LIMIT],
+            "diff_hunks": [
+                _clip_hunk_line(line)
+                for line in hunks[:_DIFF_SAMPLE_LIMIT]],
         }
         if len(hunks) > _DIFF_SAMPLE_LIMIT:
             entry["truncated"] = True
