@@ -735,6 +735,13 @@ class WikiService:
         if units.get("total", 0) > 0 and units.get("failed", 0) <= 0:
             return {"artifact_id": artifact_id, "revision": rev,
                     "reprojected": False}
+        # 运维审计（5.3 双审 Minor-1）：谁在何时触发了重建（含触发面计数）——
+        # 重建幂等无害，但频繁触发常意味着投影持续落地失败，需追因。
+        logger.warning(
+            "wiki 检索投影重建: artifact=%s revision=%s by=%s "
+            "(units total=%s failed=%s)",
+            artifact_id, rev, user.get("username") or _uid(user),
+            units.get("total", 0), units.get("failed", 0))
         await self._wdb.project_units(artifact_id, rev)
         self._lifecycle._spawn_embed(artifact_id, rev)
         return {"artifact_id": artifact_id, "revision": rev,
