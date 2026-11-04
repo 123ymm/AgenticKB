@@ -279,6 +279,25 @@ export interface WikiStatus {
   units: WikiUnitsStatus
 }
 
+// ── Q01 溯源回原文 / 投影修复（66号批次5 Task 5.2/5.3）──
+
+/** GET /wiki/unit-source 返回体：来源单元原文截读（后端截前 500 字）+
+ * kb/快照定位。404 反探测单码 unit_not_found（无权与不存在同面）。 */
+export interface WikiUnitSource {
+  unit_id: string
+  content_text: string
+  kb_id: string
+  snapshot_id: string
+  section_ref: string | null
+}
+
+/** POST /wiki/reproject 返回体：reprojected=false 即健康 no-op（连调幂等）。 */
+export interface WikiReprojectResult {
+  artifact_id: string
+  revision: number
+  reprojected: boolean
+}
+
 // ── Wiki 检索（63号批次4：web 搜索框 → mining 转发 serving 三通道）──
 
 /** 三通道检索单条命中（serving wiki_search 视图 results 项，snake_case 透传）。 */

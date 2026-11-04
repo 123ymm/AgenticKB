@@ -153,8 +153,17 @@
             <p class="wiki-reader__prov-line">kb：{{ item.kbId }}</p>
             <p class="wiki-reader__prov-line">快照：{{ item.snapshotId }}</p>
             <p class="wiki-reader__prov-line">切片 {{ item.unitIds.length }} 条</p>
+            <!-- Q01（66号批次5 Task 5.3）：切片可点 → unit-source 原文截读弹层 -->
             <ul v-if="item.unitIds.length" class="wiki-reader__prov-units">
-              <li v-for="unitId in item.unitIds" :key="unitId">{{ unitId }}</li>
+              <li v-for="unitId in item.unitIds" :key="unitId">
+                <button
+                  type="button"
+                  class="wiki-reader__prov-unit"
+                  data-test="wiki-reader-prov-unit"
+                  :title="`查看切片 ${unitId} 原文`"
+                  @click="openUnitSource(unitId)"
+                >{{ unitId }}</button>
+              </li>
             </ul>
             <!-- 结构未知字段：容错为 k=v 一行展示 -->
             <p v-for="extra in item.extra" :key="extra" class="wiki-reader__prov-line">{{ extra }}</p>
@@ -163,11 +172,42 @@
         </section>
       </aside>
     </template>
+
+    <!-- Q01 溯源回原文弹层：unit-source 原文截读（≤500 字）+ kb/快照定位 +
+         「在知识库中查看」跳 kb 详情（66号批次5 Task 5.3） -->
+    <el-dialog v-model="unitSourceVisible" title="来源切片原文" width="540px">
+      <div v-loading="unitSourceLoading" class="wiki-reader__src-body">
+        <template v-if="unitSource">
+          <p class="wiki-reader__src-meta">
+            切片 {{ unitSource.unit_id }} · 知识库 {{ unitSource.kb_id }} · 快照
+            {{ unitSource.snapshot_id }}<template v-if="unitSource.section_ref">
+              · 定位 {{ unitSource.section_ref }}</template>
+          </p>
+          <p class="wiki-reader__src-text">{{ unitSource.content_text }}</p>
+          <p class="wiki-reader__src-hint">原文截读（前 500 字），完整内容请进入来源知识库查看。</p>
+        </template>
+        <p
+          v-else-if="unitSourceError"
+          class="wiki-reader__src-error"
+          data-test="wiki-unit-source-error"
+        >{{ unitSourceError }}</p>
+        <p v-else class="wiki-reader__src-hint">加载中…</p>
+      </div>
+      <template #footer>
+        <el-button
+          v-if="unitSource?.kb_id"
+          data-test="wiki-unit-source-kb-link"
+          @click="goKb"
+        >在知识库中查看</el-button>
+        <el-button @click="unitSourceVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
@@ -180,6 +220,7 @@ import type {
   WikiPageType,
   WikiSearchHit,
   WikiTocSnapshotResolved,
+  WikiUnitSource,
 } from '@/types/artifacts'
 
 /** 四页型徽标表（63号 §4.3）——与 WikiEditorPanel 同表（纯展示映射，两处独立维护）。 */
@@ -201,6 +242,7 @@ interface ProvenanceView {
 const props = defineProps<{ artifactId: string }>()
 
 const api = useArtifactsApi()
+const router = useRouter()
 
 const loading = ref(false)
 const pageLoading = ref(false)
@@ -442,6 +484,41 @@ async function copyUnitId(unitId: string): Promise<void> {
   }
 }
 
+// ── Q01 溯源回原文（66号批次5 Task 5.3）：溯源切片点击 → unit-source 弹层 ──
+
+const unitSourceVisible = ref(false)
+const unitSourceLoading = ref(false)
+const unitSource = ref<WikiUnitSource | null>(null)
+/** 无权/失效（404 反探测单码）：直接透出后端 message，弹层内展示不崩。 */
+const unitSourceError = ref('')
+/** 请求序号防护：切换切片时迟到的旧响应不覆盖新内容（搜索 epoch 同款）。 */
+let unitSourceEpoch = 0
+
+async function openUnitSource(unitId: string): Promise<void> {
+  const epoch = ++unitSourceEpoch
+  unitSourceVisible.value = true
+  unitSourceLoading.value = true
+  unitSource.value = null
+  unitSourceError.value = ''
+  try {
+    const loaded = await api.getWikiUnitSource(props.artifactId, unitId)
+    if (epoch !== unitSourceEpoch) return
+    unitSource.value = loaded
+  } catch (error) {
+    if (epoch !== unitSourceEpoch) return
+    unitSourceError.value = await apiErrorDetail(error)
+  } finally {
+    if (epoch === unitSourceEpoch) unitSourceLoading.value = false
+  }
+}
+
+/** 「在知识库中查看」：跳 kb 详情（router 先例 push(`/kb/${kbId}`)）。 */
+function goKb(): void {
+  const kbId = unitSource.value?.kb_id
+  if (!kbId) return
+  void router.push(`/kb/${kbId}`)
+}
+
 /** provenance 宽松归一：对象条目取 kb_id/snapshot_id/unit_ids，其余原始值键值行。 */
 function toProvenanceViews(provenance: unknown): ProvenanceView[] {
   if (!Array.isArray(provenance)) return []
@@ -558,6 +635,25 @@ defineExpose({ reload: loadPages, selectPage })
 }
 .wiki-reader__prov-line { margin: 0 0 2px; overflow-wrap: anywhere; }
 .wiki-reader__prov-units { margin: 4px 0 0; padding-left: 18px; color: var(--kb-text-tertiary); }
+/* Q01 溯源切片可点（回原文弹层） */
+.wiki-reader__prov-unit {
+  border: none; padding: 0; background: none; cursor: pointer;
+  color: var(--kb-accent, #2563eb); font-size: 12px;
+  overflow-wrap: anywhere; text-align: left;
+  text-decoration: underline dotted;
+}
+.wiki-reader__prov-unit:hover { opacity: 0.8; }
+.wiki-reader__src-body { min-height: 80px; }
+.wiki-reader__src-meta {
+  margin: 0 0 8px; font-size: 12px; color: var(--kb-text-tertiary);
+  overflow-wrap: anywhere;
+}
+.wiki-reader__src-text {
+  margin: 0; font-size: 13.5px; line-height: 1.7; overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.wiki-reader__src-hint { margin: 8px 0 0; font-size: 12px; color: var(--kb-text-tertiary); }
+.wiki-reader__src-error { margin: 0; font-size: 13px; color: var(--el-color-danger, #f56c6c); }
 /* 窄屏：三栏纵向堆叠（简单折叠，不引新依赖） */
 @media (max-width: 1100px) {
   .wiki-reader { flex-direction: column; }

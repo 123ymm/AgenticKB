@@ -9,13 +9,20 @@ const state = vi.hoisted(() => ({
     listWikiLinks: vi.fn(),
     searchWiki: vi.fn(),
     getWikiToc: vi.fn(),
+    getWikiUnitSource: vi.fn(),
   },
   ui: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
   clipboard: { writeText: vi.fn() },
+  /** 可覆写的错误文案提取（Q01 弹层「透出后端 message」断言用）。 */
+  apiErrorDetail: vi.fn(async (_error?: unknown) => 'mock-error'),
+  routerPush: vi.fn(),
 }))
 
 vi.mock('@/api/artifacts', () => ({ useArtifactsApi: () => state.api }))
-vi.mock('@/api/proxyClient', () => ({ apiErrorDetail: async () => 'mock-error' }))
+vi.mock('@/api/proxyClient', () => ({
+  apiErrorDetail: (error: unknown) => state.apiErrorDetail(error),
+}))
+vi.mock('vue-router', () => ({ useRouter: () => ({ push: state.routerPush }) }))
 vi.mock('element-plus', () => ({
   ElMessage: {
     success: state.ui.success, error: state.ui.error,
@@ -31,6 +38,7 @@ import type {
   WikiPageMeta,
   WikiSearchHit,
   WikiSearchResult,
+  WikiUnitSource,
 } from '@/types/artifacts'
 
 interface ReaderVm {
@@ -81,7 +89,17 @@ const inLinks: WikiLink[] = [
 ]
 
 function mountReader(): VueWrapper {
-  return shallowMount(WikiReaderPanel, { props: { artifactId: 'art-1' } })
+  return shallowMount(WikiReaderPanel, {
+    props: { artifactId: 'art-1' },
+    global: {
+      // el-dialog 桩渲染默认+footer 插槽（Q01 溯源弹层内容可达）
+      stubs: {
+        ElDialog: {
+          template: '<div class="el-dialog-stub" data-test="wiki-unit-source-dialog"><slot /><slot name="footer" /></div>',
+        },
+      },
+    },
+  })
 }
 
 beforeEach(() => {
@@ -99,6 +117,10 @@ beforeEach(() => {
     { revision: 1, degraded_dense: false, results: [] })
   // 运行态目录缺省平铺（无 toc 行/空目录——D03 分节渲染不触发）
   state.api.getWikiToc.mockReset().mockResolvedValue({ sections: [], flat: true, revision: 1 })
+  // Q01 溯源回原文：默认拒绝态由各用例覆写
+  state.api.getWikiUnitSource.mockReset()
+  state.apiErrorDetail.mockReset().mockResolvedValue('mock-error')
+  state.routerPush.mockReset()
   state.ui.success.mockReset()
   state.ui.error.mockReset()
   state.ui.warning.mockReset()
@@ -438,5 +460,83 @@ describe('WikiReaderPanel 分节目录（D03）', () => {
     expect(wrapper.findAll('[data-test="wiki-reader-toc-section"]')).toHaveLength(0)
     expect(wrapper.findAll('[data-test="wiki-reader-toc-item"]')).toHaveLength(2)
     expect(state.ui.error).not.toHaveBeenCalled()
+  })
+})
+
+// ── Q01 溯源回原文（66号批次5 Task 5.3）：溯源切片点击 → unit-source 原文
+// 截读弹层 + 「在知识库中查看」跳转；无权/失效（404 反探测单码）显示后端
+// 文案不崩。
+
+describe('WikiReaderPanel 溯源回原文（Q01）', () => {
+  const unitSource: WikiUnitSource = {
+    unit_id: 'unit-9', content_text: 'MOP 是移动对外门户……（原文片段，后端截 500 字）',
+    kb_id: 'kb-1', snapshot_id: 'snap-1', section_ref: 's-0',
+  }
+
+  it('点击溯源切片 → 调 unit-source 并在弹层渲染原文与 kb/快照定位 + 「在知识库中查看」跳 kb 详情', async () => {
+    state.api.getWikiUnitSource.mockResolvedValueOnce(unitSource)
+    const wrapper = mountReader()
+    await flushPromises()
+
+    const units = wrapper.findAll('[data-test="wiki-reader-prov-unit"]')
+    expect(units).toHaveLength(2)   // unit-9 / unit-10
+    expect(units[0].text()).toContain('unit-9')
+
+    await units[0].trigger('click')
+    await flushPromises()
+
+    // 阅读器运行态口径：只带 unit_id（draft=false 缺省）
+    expect(state.api.getWikiUnitSource).toHaveBeenCalledWith('art-1', 'unit-9')
+    const dialog = wrapper.find('[data-test="wiki-unit-source-dialog"]')
+    expect(dialog.exists()).toBe(true)
+    expect(dialog.text()).toContain('MOP 是移动对外门户')
+    expect(dialog.text()).toContain('kb-1')
+    expect(dialog.text()).toContain('snap-1')
+
+    // 「在知识库中查看」→ /kb/{kb_id}（KB 详情路由先例）
+    await dialog.find('[data-test="wiki-unit-source-kb-link"]').trigger('click')
+    expect(state.routerPush).toHaveBeenCalledWith('/kb/kb-1')
+  })
+
+  it('无权/失效（404 unit_not_found 同面）→ 弹层显示后端文案，不崩不白屏', async () => {
+    state.apiErrorDetail.mockResolvedValueOnce('来源单元不存在或无权限访问')
+    state.api.getWikiUnitSource.mockRejectedValueOnce({
+      response: {
+        status: 404,
+        data: { detail: { code: 'unit_not_found', message: '来源单元不存在或无权限访问' } },
+      },
+    })
+    const wrapper = mountReader()
+    await flushPromises()
+
+    await wrapper.findAll('[data-test="wiki-reader-prov-unit"]')[0].trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('[data-test="wiki-unit-source-dialog"]')
+    expect(dialog.exists()).toBe(true)
+    expect(dialog.find('[data-test="wiki-unit-source-error"]').text())
+      .toContain('来源单元不存在或无权限访问')
+    // 不崩：三栏照常渲染（目录/正文仍在）
+    expect(wrapper.findAll('[data-test="wiki-reader-toc-item"]')).toHaveLength(2)
+    expect(wrapper.find('[data-test="wiki-reader-body"]').exists()).toBe(true)
+  })
+
+  it('切换点击另一切片 → 重新拉取并覆盖弹层内容（迟到的旧响应不残留）', async () => {
+    state.api.getWikiUnitSource
+      .mockResolvedValueOnce(unitSource)
+      .mockResolvedValueOnce({ ...unitSource, unit_id: 'unit-10', content_text: '第二条切片的原文' })
+    const wrapper = mountReader()
+    await flushPromises()
+
+    const units = wrapper.findAll('[data-test="wiki-reader-prov-unit"]')
+    await units[0].trigger('click')
+    await flushPromises()
+    await units[1].trigger('click')
+    await flushPromises()
+
+    expect(state.api.getWikiUnitSource).toHaveBeenNthCalledWith(2, 'art-1', 'unit-10')
+    const dialog = wrapper.find('[data-test="wiki-unit-source-dialog"]')
+    expect(dialog.text()).toContain('第二条切片的原文')
+    expect(dialog.text()).not.toContain('MOP 是移动对外门户')   // 旧内容被覆盖
   })
 })

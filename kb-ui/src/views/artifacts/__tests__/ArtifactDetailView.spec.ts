@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({
     listRows: vi.fn(),
     listColumns: vi.fn(),
     remove: vi.fn(),
+    getWikiStatus: vi.fn(),
+    reprojectWiki: vi.fn(),
   },
   ui: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }))
@@ -39,6 +41,8 @@ interface DetailVm {
   reloadAll: () => Promise<void>
   /** 设计态空制品引导（66号 §4）；非空制品为 null。 */
   emptyGuide: { title: string; description: string } | null
+  /** Q01 投影修复（66号批次5）：修复按钮行为入口。 */
+  repairProjection: () => Promise<void>
 }
 
 function mountDetail(): VueWrapper {
@@ -84,6 +88,11 @@ beforeEach(() => {
   state.api.listColumns.mockReset().mockResolvedValue(runtimeSchema)
   state.api.listRows.mockReset().mockResolvedValue(
     { rows: [{ row_key: '16:NC-1', data: { MOP: 'NC-1' }, provenance: [], conflicts: {}, ordinal: 1 }], total: 1, page: 1, size: 20 })
+  // Q01 状态条缺省：wiki 制品健康态（各用例覆写）；表格制品不触达
+  state.api.getWikiStatus.mockReset().mockResolvedValue(
+    { revision: 2, units: { total: 4, done: 4, failed: 0, pending: 0 } })
+  state.api.reprojectWiki.mockReset().mockResolvedValue(
+    { artifact_id: 'art-1', revision: 2, reprojected: true })
   state.ui.success.mockReset()
   state.ui.error.mockReset()
   state.ui.warning.mockReset()
@@ -440,5 +449,109 @@ describe('artifact detail view — C01 运行态说明卡子组件（ArtifactUsa
     const wikiPassed = wikiDetail.findComponent({ name: 'ArtifactUsagePanel' })
       .props('artifact') as Record<string, unknown>
     expect(wikiPassed.kind).toBe('wiki')
+  })
+})
+
+describe('artifact detail view — Q01 wiki 检索状态条与投影修复（66号批次5）', () => {
+  /** 状态条 DOM 断言入口（运行态 wiki 区域顶部）。 */
+  const bar = (wrapper: VueWrapper) =>
+    wrapper.find('[data-test="wiki-search-status-bar"]')
+
+  function mountWiki(status: Record<string, unknown> | null): VueWrapper {
+    if (status !== undefined && status !== null) {
+      state.api.getWikiStatus.mockReset().mockResolvedValue(status)
+    }
+    state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, kind: 'wiki' })
+    return mountDetail()
+  }
+
+  it('全 done → 「检索就绪」+ done/total + 100%，无修复按钮', async () => {
+    const wrapper = mountWiki({ revision: 2, units: { total: 4, done: 4, failed: 0, pending: 0 } })
+    await flushPromises()
+
+    expect(state.api.getWikiStatus).toHaveBeenCalledWith('art-1')
+    expect(bar(wrapper).exists()).toBe(true)
+    const text = bar(wrapper).text()
+    expect(text).toContain('检索就绪')
+    expect(text).toContain('4/4')
+    expect(text).toContain('100%')
+    expect(wrapper.find('[data-test="wiki-status-repair-btn"]').exists()).toBe(false)
+  })
+
+  it('pending>0 → 「向量处理中」+ 完成百分比（done/total）', async () => {
+    const wrapper = mountWiki({ revision: 2, units: { total: 4, done: 1, failed: 0, pending: 3 } })
+    await flushPromises()
+
+    const text = bar(wrapper).text()
+    expect(text).toContain('向量处理中')
+    expect(text).toContain('1/4')
+    expect(text).toContain('25%')
+    expect(text).not.toContain('检索就绪')
+    expect(wrapper.find('[data-test="wiki-status-repair-btn"]').exists()).toBe(false)
+  })
+
+  it('failed>0 → 黄色警示 + 修复按钮（editor+）→ 调 reproject 并刷新状态', async () => {
+    state.api.getWikiStatus.mockReset()
+      .mockResolvedValueOnce({ revision: 2, units: { total: 2, done: 1, failed: 1, pending: 0 } })
+      .mockResolvedValueOnce({ revision: 2, units: { total: 2, done: 0, failed: 0, pending: 2 } })
+    state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, kind: 'wiki' })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const text = bar(wrapper).text()
+    expect(text).toContain('1/2')            // failed 计数入文案（1 失败/2 总）
+    expect(text).toContain('失败')
+    expect(bar(wrapper).classes()).toContain('is-warning')
+    expect(wrapper.find('[data-test="wiki-status-repair-btn"]').exists()).toBe(true)
+
+    // 修复行为：reproject → 刷新状态（重置后 pending 态文案）
+    const vm = wrapper.vm as unknown as DetailVm
+    await vm.repairProjection()
+    await flushPromises()
+    expect(state.api.reprojectWiki).toHaveBeenCalledWith('art-1')
+    expect(state.api.getWikiStatus).toHaveBeenCalledTimes(2)
+    expect(bar(wrapper).text()).toContain('向量处理中')
+  })
+
+  it('投影缺失（revision>0 且 total=0）→ 警示 + 修复入口（发布后置失败存量面）', async () => {
+    const wrapper = mountWiki({ revision: 2, units: { total: 0, done: 0, failed: 0, pending: 0 } })
+    await flushPromises()
+
+    expect(bar(wrapper).exists()).toBe(true)
+    expect(bar(wrapper).classes()).toContain('is-warning')
+    expect(bar(wrapper).text()).toContain('投影缺失')
+    expect(wrapper.find('[data-test="wiki-status-repair-btn"]').exists()).toBe(true)
+  })
+
+  it('viewer：状态条渲染但修复按钮不渲染（修复 editor+ 专属）', async () => {
+    state.api.get.mockReset().mockResolvedValue(
+      { ...artifactDetail, kind: 'wiki', my_role: 'viewer' })
+    state.api.getWikiStatus.mockReset().mockResolvedValue(
+      { revision: 2, units: { total: 2, done: 1, failed: 1, pending: 0 } })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(bar(wrapper).exists()).toBe(true)
+    expect(bar(wrapper).classes()).toContain('is-warning')
+    expect(wrapper.find('[data-test="wiki-status-repair-btn"]').exists()).toBe(false)
+  })
+
+  it('未发布（revision=0）→ 状态条不渲染且不调 getWikiStatus；表格制品不触达', async () => {
+    // wiki 未发布
+    state.api.get.mockReset().mockResolvedValue({
+      ...artifactDetail, kind: 'wiki', status: 'draft', current_revision: 0,
+      draft_open: true, schema: [], sample_rows: [],
+    })
+    const wikiDraft = mountDetail()
+    await flushPromises()
+    expect(bar(wikiDraft).exists()).toBe(false)
+    expect(state.api.getWikiStatus).not.toHaveBeenCalled()
+
+    // 表格制品（默认 fixture）：无状态条、无 status 调用
+    state.api.get.mockReset().mockResolvedValue(artifactDetail)
+    const table = mountDetail()
+    await flushPromises()
+    expect(bar(table).exists()).toBe(false)
+    expect(state.api.getWikiStatus).not.toHaveBeenCalled()
   })
 })

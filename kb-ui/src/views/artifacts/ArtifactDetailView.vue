@@ -179,6 +179,30 @@
              current_revision 投影；「页面｜图谱」内容区切换（只读——图谱
              draft=false 读正式版）。表格制品走下方只读行表（互斥）。 -->
         <template v-if="artifact.kind === 'wiki'">
+          <!-- Q01 检索状态条（66号批次5 Task 5.3）：说明卡下方、内容区切换
+               上方——切片向量四计数（done/total 百分比），failed>0/投影缺失
+               黄色警示 + 修复投影入口（editor+；修复=幂等重入投影不动正文）。 -->
+          <div
+            v-if="wikiStatus && wikiStatus.revision > 0"
+            class="artifact-detail__search-status"
+            :class="{ 'is-warning': wikiUnits.failed > 0 || wikiUnits.total === 0 }"
+            data-test="wiki-search-status-bar"
+          >
+            <el-tag
+              v-if="wikiUnits.failed > 0 || wikiUnits.total === 0"
+              type="warning" size="small"
+            >检索异常</el-tag>
+            <el-tag v-else-if="wikiUnits.pending > 0" size="small">向量处理中</el-tag>
+            <el-tag v-else type="success" size="small">检索就绪</el-tag>
+            <span class="artifact-detail__search-status-text">{{ wikiStatusText }}</span>
+            <el-button
+              v-if="canWrite && (wikiUnits.failed > 0 || wikiUnits.total === 0)"
+              size="small" type="warning" plain
+              :loading="wikiRepairing"
+              data-test="wiki-status-repair-btn"
+              @click="repairProjection"
+            >修复投影</el-button>
+          </div>
           <el-button-group size="small" class="artifact-detail__wiki-views">
             <el-button
               :type="runtimeWikiView === 'pages' ? 'primary' : ''"
@@ -331,7 +355,14 @@ import WikiEditorPanel from '@/components/artifacts/WikiEditorPanel.vue'
 import WikiGraphPanel from '@/components/artifacts/WikiGraphPanel.vue'
 import WikiReaderPanel from '@/components/artifacts/WikiReaderPanel.vue'
 import { decodeRowKey } from '@/utils/rowKey'
-import type { ArtifactColumn, ArtifactDetail, ArtifactKind, ArtifactRow } from '@/types/artifacts'
+import type {
+  ArtifactColumn,
+  ArtifactDetail,
+  ArtifactKind,
+  ArtifactRow,
+  WikiStatus,
+  WikiUnitsStatus,
+} from '@/types/artifacts'
 
 const props = defineProps<{ artifactId: string }>()
 
@@ -396,6 +427,64 @@ function openWikiPageFromRuntime(pageKey: string): void {
   runtimeWikiView.value = 'pages'
   void wikiReaderRef.value?.selectPage?.(pageKey)
 }
+
+// ── Q01 wiki 检索状态条 + 投影修复（66号批次5 Task 5.3）──
+
+const wikiStatus = ref<WikiStatus | null>(null)
+const wikiRepairing = ref(false)
+
+const EMPTY_UNITS: WikiUnitsStatus = { total: 0, done: 0, failed: 0, pending: 0 }
+const wikiUnits = computed<WikiUnitsStatus>(() => wikiStatus.value?.units ?? EMPTY_UNITS)
+
+/** done/total 百分比（total=0 无意义——投影缺失走警示文案）。 */
+const wikiStatusPercent = computed(() => {
+  const u = wikiUnits.value
+  return u.total > 0 ? Math.round((u.done / u.total) * 100) : 0
+})
+
+const wikiStatusText = computed(() => {
+  const u = wikiUnits.value
+  if (u.total === 0) {
+    return '检索投影缺失（0 个切片）——发布后置投影未落地，可修复重建'
+  }
+  if (u.failed > 0) {
+    return `切片向量 ${u.done}/${u.total}（${wikiStatusPercent.value}%），`
+      + `${u.failed} 个失败——向量检索可能不完整`
+  }
+  if (u.pending > 0) {
+    return `向量处理中 ${u.done}/${u.total}（${wikiStatusPercent.value}%）`
+  }
+  return `检索就绪 ${u.done}/${u.total}（100%）`
+})
+
+/** 状态条是增强信息：拉取失败静默隐藏（不扰运行态主内容）。 */
+async function loadWikiStatus(): Promise<void> {
+  try {
+    wikiStatus.value = await api.getWikiStatus(props.artifactId)
+  } catch {
+    wikiStatus.value = null
+  }
+}
+
+/** 修复投影（editor+）：幂等重入——健康 no-op 后端自答；完成后刷新状态条。 */
+async function repairProjection(): Promise<void> {
+  wikiRepairing.value = true
+  try {
+    const result = await api.reprojectWiki(props.artifactId)
+    ElMessage.success(result.reprojected ? '投影已重建，向量处理中' : '投影状态健康，无需修复')
+    await loadWikiStatus()
+  } catch (error) {
+    ElMessage.error(`修复失败：${await apiErrorDetail(error)}`)
+  } finally {
+    wikiRepairing.value = false
+  }
+}
+
+// 制品（重新）加载后：wiki 已发布 → 拉检索状态；否则隐藏（rev0 无投影语义）
+watch(() => artifact.value, (a) => {
+  if (a?.kind === 'wiki' && a.current_revision > 0) void loadWikiStatus()
+  else wikiStatus.value = null
+})
 
 /** canWrite = my_role ∈ {owner, editor}（详情响应附带；admin 后端归一 owner）。 */
 const canWrite = computed(() => artifact.value?.my_role === 'owner' || artifact.value?.my_role === 'editor')
@@ -673,5 +762,16 @@ defineExpose({ reloadAll })
 .artifact-detail__empty-guide { margin-bottom: 14px; }
 /* wiki 内容区「页面｜图谱」切换（D03.1）：运行态入口组与面板间距 */
 .artifact-detail__wiki-views { margin-bottom: 10px; }
+/* Q01 检索状态条（66号批次5）：运行态 wiki 顶部一行；警示=黄边淡底 */
+.artifact-detail__search-status {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px; padding: 6px 10px; border-radius: 6px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+}
+.artifact-detail__search-status.is-warning {
+  border-color: var(--el-color-warning-light-5, #f3d19e);
+  background: var(--el-color-warning-light-9, #fdf6ec);
+}
+.artifact-detail__search-status-text { font-size: 12.5px; color: var(--kb-text-secondary, #606266); }
 .artifact-detail__pager { margin-top: 12px; justify-content: flex-end; }
 </style>

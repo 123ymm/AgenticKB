@@ -28,6 +28,7 @@ import type {
   WikiPage,
   WikiPageType,
   WikiPagesEnvelope,
+  WikiReprojectResult,
   WikiSearchResult,
   WikiSource,
   WikiStatus,
@@ -35,6 +36,7 @@ import type {
   WikiTocSection,
   WikiTocSnapshot,
   WikiTocSnapshotResolved,
+  WikiUnitSource,
 } from '@/types/artifacts'
 
 export interface ArtifactCreateRequest {
@@ -398,6 +400,29 @@ export function useArtifactsApi() {
     /** units embedding 进度（运行态信息，viewer+ 可读）。 */
     async getWikiStatus(artifactId: string): Promise<WikiStatus> {
       const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/status`)
+      return data
+    },
+
+    /** Q01 溯源回原文（66号批次5 Task 5.2）：unit_id（=provenance unit_ids
+     * 元素）→ 原文截读 500 字 + kb/快照定位；404 反探测单码 unit_not_found
+     * （无权与不存在同面——错误文案直接透出后端 message）。 */
+    async getWikiUnitSource(
+      artifactId: string, unitId: string,
+      opts?: { draft?: boolean; revision?: number },
+    ): Promise<WikiUnitSource> {
+      const { data } = await client.get(
+        `/api/artifacts/${artifactId}/wiki/unit-source`,
+        { params: { unit_id: unitId, ...opts } })
+      return data
+    },
+
+    /** Q01 投影修复（66号批次5 Task 5.3）：editor+，对 current_revision 幂等
+     * 重入投影——failed>0/投影缺失才重建（reprojected=true），健康 no-op；
+     * 不改正文、不产伪发布版本。 */
+    async reprojectWiki(
+      artifactId: string,
+    ): Promise<WikiReprojectResult> {
+      const { data } = await client.post(`/api/artifacts/${artifactId}/wiki/reproject`)
       return data
     },
 
