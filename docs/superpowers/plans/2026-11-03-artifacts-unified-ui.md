@@ -140,6 +140,10 @@ COMMENT ON TABLE kb_wiki_tocs IS 'wiki 制品设计态目录（page_key 级）�
 
 `python -m pytest knowledge_mining/tests/kb/ -q` 全绿（PG 门控项在批次6 真跑）；迁移 011 双路径验证过；六提交。
 
+> **✅ 批次1 完成（2026-11-04）**：Task 1.1-1.6 全过两阶段审查+修复闭环。提交链 089bbe7→83ad3d0→ff361bf→3dba130→f2faa4a→348b556→950183c→c6513a1→b596e2b→6ce934a→252a3bb（+计划文档 0989c88）。收口门禁=**289 passed**（14 制品/Wiki 测试文件全量，unified-pg 真库含 PG 门控与验收链；test_artifacts_db.py py3.12 语法留批次6/内网——先例口径）。
+> 审查捕获并修复：硬删级联漏清 kb_wiki_tocs（I-1）、toc PUT TOCTOU（锁内强制令牌）、diff 载荷行级截断、fake 契约漂移两处。**额外揪出存量跨服务 bug**：wiki 检索转发少拼 ref 前缀（真 serving 下网页检索必 404，批次5 留给部署冒烟未暴露）——已修+契约钉死（252a3bb）。
+> 遗留记录：WikiPagePut.body_md 无 max_length（写入侧封顶另议）；kb/ 目录无关测试文件有环境性噪音（全目录跑法不可用，收口按触碰面清单跑）；镜像 DDL 同文守卫测试建议（Task 1.1 质量审查）批次6 顺手落。
+
 ## 批次2：serving——wiki 说明卡补 description/usage_note（Java，TDD）
 
 **改动面（摸底已定位，3 处 + 测试）**：数据零新增——`selectVisibleArtifact` 已 SELECT 这两列（ArtifactToolMapper.xml:83-84，ArtifactVisibleRow:26-28 携带），只是 wiki 卡片装配没用的。
