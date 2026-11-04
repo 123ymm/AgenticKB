@@ -20,6 +20,7 @@ vi.mock('element-plus', () => ({
 }))
 
 import ArtifactPublishDialog from '../ArtifactPublishDialog.vue'
+import type { WikiDiffResult } from '@/types/artifacts'
 
 interface DialogVm {
   diffResult: {
@@ -36,7 +37,12 @@ interface DialogVm {
 
 function mountDialog(
   usageNote: string,
-  extra: { draftOpen?: boolean; currentRevision?: number } = {},
+  extra: {
+    draftOpen?: boolean
+    currentRevision?: number
+    kind?: 'table' | 'wiki'
+    unitLabel?: string
+  } = {},
 ): VueWrapper {
   return shallowMount(ArtifactPublishDialog, {
     props: {
@@ -46,6 +52,8 @@ function mountDialog(
       usageNote,
       draftOpen: extra.draftOpen,
       currentRevision: extra.currentRevision,
+      kind: extra.kind,
+      unitLabel: extra.unitLabel,
     },
     global: {
       // 折叠面板渲染 title 插槽——三段计数文本断言需要
@@ -73,6 +81,51 @@ const diffResult = {
 const publishResult = {
   revision: 2, row_count: 9,
   diff: { added_count: 2, removed_count: 1, changed_count: 1 },
+}
+
+/** wiki 页级差异形态（66号 Task 1.5 契约）：changed=页卡（字段 old/new
+ * 直给 + body_md 走 old/new_preview/diff_hunks/truncated）。 */
+const wikiDiffResult: WikiDiffResult = {
+  added: ['intro.md', 'guide/install.md'],
+  removed: ['old-page.md'],
+  changed: [
+    {
+      page_key: 'guide/quickstart.md',
+      fields: ['title', 'page_type', 'body_md'],
+      changes: {
+        title: { old: '快速开始', new: '快速上手' },
+        page_type: { old: 'doc', new: 'concept' },
+        body_md: {
+          old_preview: '旧正文预览',
+          new_preview: '新正文预览',
+          // 头两行 ---/+++ 带尾随空格——按原始行文本判断前缀（不 trim）
+          diff_hunks: [
+            '--- current ',
+            '+++ draft ',
+            '@@ -1,3 +1,4 @@',
+            ' 上下文行保持不变',
+            '-旧正文第一段',
+            '+新正文第一段',
+          ],
+          truncated: true,
+        },
+      },
+    },
+    {
+      page_key: 'glossary.md',
+      fields: ['body_md'],
+      changes: {
+        body_md: {
+          old_preview: '术语旧预览',
+          new_preview: '术语新预览',
+          diff_hunks: ['@@ -1,1 +1,1 @@', '-超长旧行内容…[行超长已截断]'],
+        },
+      },
+    },
+  ],
+  added_count: 2,
+  removed_count: 1,
+  changed_count: 2,
 }
 
 beforeEach(() => {
@@ -194,5 +247,65 @@ describe('ArtifactPublishDialog', () => {
 
     expect(vm.noPendingChanges).toBe(false)
     expect(vm.canPublish).toBe(true)
+  })
+
+  it('renders wiki page-level diff (fields old→new + body hunks) instead of table rows/columns', async () => {
+    state.api.diff.mockResolvedValueOnce(wikiDiffResult)
+    const wrapper = mountDialog('查责任域', { kind: 'wiki', unitLabel: '页' })
+    await flushPromises()
+
+    expect(state.api.diff).toHaveBeenCalledWith('art-1')
+    // 三段计数按「页」计数，changed 段走页级口径（不再是列级明细）
+    expect(wrapper.text()).toContain('新增 2 页')
+    expect(wrapper.text()).toContain('修改 2 页')
+    expect(wrapper.text()).toContain('删除 1 页')
+    expect(wrapper.text()).toContain('页级明细')
+    // 新增/删除=页 key tag 列表（无页型映射数据——只显示 page_key，不伪造页型）
+    expect(wrapper.text()).toContain('intro.md')
+    expect(wrapper.text()).toContain('guide/install.md')
+    expect(wrapper.text()).toContain('old-page.md')
+    // 修改=每页折叠卡：page_key + 字段名 + 直显 old→new
+    expect(wrapper.text()).toContain('guide/quickstart.md')
+    expect(wrapper.text()).toContain('glossary.md')
+    expect(wrapper.text()).toContain('title')
+    expect(wrapper.text()).toContain('快速开始')
+    expect(wrapper.text()).toContain('快速上手')
+    expect(wrapper.text()).toContain('page_type')
+    expect(wrapper.text()).toContain('doc')
+    expect(wrapper.text()).toContain('concept')
+    // body_md=后端 hunks 行级渲染（纯文本，含 @@ 头）
+    expect(wrapper.text()).toContain('body_md')
+    expect(wrapper.text()).toContain('@@ -1,3 +1,4 @@')
+    expect(wrapper.text()).toContain('-旧正文第一段')
+    expect(wrapper.text()).toContain('+新正文第一段')
+    // 整体截断提示（body hunks truncated）
+    expect(wrapper.text()).toContain('差异过长已截断')
+    // 不再套表格行/列格式（66号 §10）
+    expect(wrapper.html()).not.toContain('el-table')
+    expect(wrapper.text()).not.toContain('列级明细')
+    expect(wrapper.text()).not.toContain('行键')
+  })
+
+  it('colors hunk lines by raw prefix (no trim) and renders row-truncation suffix verbatim', async () => {
+    state.api.diff.mockResolvedValueOnce(wikiDiffResult)
+    const wrapper = mountDialog('查责任域', { kind: 'wiki', unitLabel: '页' })
+    await flushPromises()
+
+    // 页1 6 行 + 页2 2 行；头两行 ---/+++ 带尾随空格也按首字符判前缀
+    const lines = wrapper.findAll('.publish-diff__hunk-line')
+    expect(lines).toHaveLength(8)
+    const classes = lines.map((line) => line.classes())
+    expect(classes[0]).toContain('is-del') // '--- current '
+    expect(classes[1]).toContain('is-add') // '+++ draft '
+    expect(classes[2]).toContain('is-meta') // '@@ -1,3 +1,4 @@'
+    expect(classes[3]).toEqual(['publish-diff__hunk-line']) // 上下文行不着色
+    expect(classes[4]).toContain('is-del') // '-旧正文第一段'
+    expect(classes[5]).toContain('is-add') // '+新正文第一段'
+    expect(classes[7]).toContain('is-del') // '-超长旧行内容…[行超长已截断]'
+
+    // 行超长截断以行尾后缀文本呈现（不写死 line_truncated 分支）——原样可见
+    expect(wrapper.text()).toContain('超长旧行内容…[行超长已截断]')
+    // 「差异过长已截断」只出现一次（仅 truncated:true 的页1；页2 行级后缀不触发）
+    expect(wrapper.text().match(/差异过长已截断/g)).toHaveLength(1)
   })
 })

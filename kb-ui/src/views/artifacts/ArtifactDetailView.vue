@@ -262,6 +262,7 @@
       :draft-open="artifact?.draft_open"
       :current-revision="artifact?.current_revision ?? 0"
       :unit-label="artifact?.kind === 'wiki' ? '页' : '行'"
+      :kind="artifact?.kind"
       @published="reloadAll"
       @changed="reload"
     />
