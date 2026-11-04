@@ -267,6 +267,7 @@
         <ArtifactMembersPanel
           :artifact-id="artifactId"
           :can-manage="isOwner"
+          :visibility="artifact.visibility"
           @changed="reload"
         />
       </el-tab-pane>

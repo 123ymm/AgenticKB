@@ -18,6 +18,7 @@ declare module 'vue' {
     ArtifactPublishDialog: typeof import('./src/components/artifacts/ArtifactPublishDialog.vue')['default']
     ArtifactRowsPanel: typeof import('./src/components/artifacts/ArtifactRowsPanel.vue')['default']
     ArtifactSchemaPanel: typeof import('./src/components/artifacts/ArtifactSchemaPanel.vue')['default']
+    ArtifactUsagePanel: typeof import('./src/components/artifacts/ArtifactUsagePanel.vue')['default']
     ArtifactVersionsPanel: typeof import('./src/components/artifacts/ArtifactVersionsPanel.vue')['default']
     BarChart: typeof import('./src/components/charts/BarChart.vue')['default']
     BrandAppearanceTab: typeof import('./src/components/settings/BrandAppearanceTab.vue')['default']

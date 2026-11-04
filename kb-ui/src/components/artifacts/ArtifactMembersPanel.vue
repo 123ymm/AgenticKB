@@ -31,6 +31,17 @@
     </div>
     <p v-else class="art-members__hint">仅拥有者（owner）可管理成员。</p>
     <p class="art-members__hint">非成员不可见本制品（404 反探测）；viewer 只见运行态，不见设计态。</p>
+    <!-- M01（66号 §11）：可见性口径——public=本域公开（本域成员可见），不等于
+         互联网匿名公开；修改入口在运行态「编辑元信息」，仅 owner 可改。 -->
+    <p class="art-members__hint" data-test="visibility-hint">
+      可见性：{{ visibility === 'public' ? '本域公开（本域所有用户可读）' : '私有（仅成员可见）' }}
+      ——公开不等于互联网匿名公开，仅 owner 可在「运行态 · 编辑元信息」中修改。
+    </p>
+    <!-- M01（66号 §11）：Agent 钥匙边界——三条件与运行态三条件区同源；本面板
+         不查询钥匙状态（不能显示推测的「已全部开放」），恒为指引 + /mcp 链接。 -->
+    <p class="art-members__hint" data-test="agent-key-hint">
+      制品对 Agent 可用还需 MCP 钥匙明确开放（与正式发布、用户可读三条件齐备）——<router-link to="/mcp">请到 MCP 配置检查</router-link>。
+    </p>
 
     <el-table v-loading="loading" :data="members" size="small">
       <el-table-column label="用户" min-width="200">
@@ -68,12 +79,14 @@ import { useAuthApi } from '@/api/auth'
 import { apiErrorDetail } from '@/api/proxyClient'
 import { useDomainStore } from '@/stores/domain'
 import EmptyState from '@/components/common/EmptyState.vue'
-import type { ArtifactRole, MemberInfo } from '@/types/artifacts'
+import type { ArtifactRole, ArtifactVisibility, MemberInfo } from '@/types/artifacts'
 
 const props = defineProps<{
   artifactId: string
   /** 成员管理后端仅 owner（ROLE_OWNER_ONLY）——editor 传入 false 隐藏入口。 */
   canManage: boolean
+  /** M01 可见性说明（66号 §11）：public=本域公开≠互联网匿名公开；缺省按私有表述。 */
+  visibility?: ArtifactVisibility | string
 }>()
 
 const emit = defineEmits<{ changed: [] }>()
