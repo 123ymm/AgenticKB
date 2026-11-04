@@ -23,6 +23,10 @@ vi.mock('axios', () => ({
         if (url.includes('/wiki/page/')) return { data: { page_key: 'home', body_md: '# x' } }
         if (url.includes('/wiki/links')) return { data: { links: [{ from_page: 'home', to_page: 'a', anchor_text: '', status: 'valid' }] } }
         if (url.includes('/wiki/status')) return { data: { revision: 1, units: { total: 2, done: 1, failed: 0, pending: 1 } } }
+        if (url.endsWith('/wiki/toc')) {
+          if (method === 'put') return { data: { artifact_id: 'a1', toc: { sections: [] }, updated_at: '2026-11-04T00:00:00Z', updated_by: 'u1' } }
+          return { data: { sections: [{ section_title: '网络', page_keys: ['网络集成', '组网'] }], flat: false, revision: 2 } }
+        }
         if (url.endsWith('/wiki/sources')) return { data: { sources: [{ kb_id: 'kb-1' }] } }
         if (url.endsWith('/wiki/compile/status')) return { data: { batch_id: 'b1', state: 'writing', progress: { batch: '1/2', pages_done: 3 } } }
         if (url.includes('/wiki/compile')) return { data: { batch_id: 'b1', state: 'preparing' } }
@@ -298,6 +302,58 @@ describe('artifacts API', () => {
     await expect(api.listWikiSources('a1')).resolves.toEqual([{ kb_id: 'kb-1' }])
     await expect(api.compileStatus('a1')).resolves.toMatchObject({
       batch_id: 'b1', state: 'writing',
+    })
+  })
+
+  it('builds the wiki toc read calls in three modes with revision priority', async () => {
+    const api = useArtifactsApi()
+
+    // 缺省 = runtime current 快照（viewer+ 可读）——不带查询参数
+    await api.getWikiToc('a1')
+    expect(state.requests[0]).toMatchObject({ method: 'get', url: '/api/artifacts/a1/wiki/toc' })
+    expect(state.requests[0].config.params).toBeUndefined()
+
+    // draft=true = toc 行本身 + pages_total（updated_at=目录编辑的锁令牌）
+    await api.getWikiToc('a1', { draft: true })
+    expect(state.requests[1]).toMatchObject({ method: 'get', url: '/api/artifacts/a1/wiki/toc' })
+    expect(state.requests[1].config.params).toEqual({ draft: true })
+
+    // revision=N = 历史快照
+    await api.getWikiToc('a1', { revision: 3 })
+    expect(state.requests[2].config.params).toEqual({ revision: 3 })
+
+    // draft+revision 同传 → revision 优先（后端 M-1 口径，只序列化 revision）
+    await api.getWikiToc('a1', { draft: true, revision: 3 })
+    expect(state.requests[3].config.params).toEqual({ revision: 3 })
+  })
+
+  it('builds the wiki toc save call with full-replace sections and lock token', async () => {
+    const api = useArtifactsApi()
+    const sections = [{ section_title: '网络', page_keys: ['网络集成', '组网'] }]
+
+    await api.saveWikiToc('a1', { sections, expected_updated_at: '2026-11-04T00:00:00Z' })
+    expect(state.requests[0]).toMatchObject({ method: 'put', url: '/api/artifacts/a1/wiki/toc' })
+    expect(state.requests[0].body).toEqual({
+      sections, expected_updated_at: '2026-11-04T00:00:00Z',
+    })
+
+    // 首次创建可省令牌（toc 行已存在时必传——后端锁内 409 强制）
+    await api.saveWikiToc('a1', { sections })
+    expect(state.requests[1].body).toEqual({ sections })
+  })
+
+  it('returns the toc snapshot and put row as-is (no envelope unwrapping)', async () => {
+    const api = useArtifactsApi()
+
+    await expect(api.getWikiToc('a1')).resolves.toEqual({
+      sections: [{ section_title: '网络', page_keys: ['网络集成', '组网'] }],
+      flat: false,
+      revision: 2,
+    })
+    await expect(api.saveWikiToc('a1', { sections: [] })).resolves.toMatchObject({
+      artifact_id: 'a1',
+      updated_at: '2026-11-04T00:00:00Z',
+      updated_by: 'u1',
     })
   })
 })

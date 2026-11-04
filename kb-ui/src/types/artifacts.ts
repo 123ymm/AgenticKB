@@ -30,6 +30,9 @@ export interface Artifact {
   updated_at: string
   /** 列表与详情口径附带（get_artifact 附 my_role；admin 归一 owner）。 */
   my_role?: ArtifactRole | null
+  /** 稳定引用键（66号 Task 1.6：list/get 已返回；与 serving REF_PREFIX
+   * 同源拼法 "art:"+artifact_id——MCP/检索视图的制品寻址口径）。 */
+  artifact_ref?: string
 }
 
 /** GET /{id} = 元信息 + schema + sample_rows（同体展开）。 */
@@ -96,6 +99,43 @@ export interface DiffResult {
   added: string[]
   removed: string[]
   changed: DiffCellChange[]
+  added_count: number
+  removed_count: number
+  changed_count: number
+}
+
+// ── Wiki 页级差异（66号 Task 1.5：wiki 制品 GET /diff 的 changed 元素）──
+
+/** 单字段变化两形态：非 body 字段（title/frontmatter/page_type/origin）
+ * 旧新直给 {old=current, new=draft}；body_md 长正文不全量进载荷——
+ * old/new_preview 各截前 200 字 + unified_diff 行级 hunks（截前 100 行，
+ * 超限带 truncated）。line_truncated 为口径预留键（后端当前以行尾后缀
+ * 「…[行超长已截断]」标记行截断，不携带该键）。 */
+export type WikiPageDiffFieldChange =
+  | { old: unknown; new: unknown }
+  | {
+      old_preview: string
+      new_preview: string
+      diff_hunks: string[]
+      truncated?: boolean
+      line_truncated?: boolean
+    }
+
+/** wiki diff 的 changed 元素：fields=变更字段名清单（diff 参与字段全集
+ * title/body_md/frontmatter/page_type/origin——origin 翻 manual 也算真实
+ * 待发布变更）；changes 键=字段名（样例窗口内的页才装配 changes）。 */
+export interface WikiPageDiffChange {
+  page_key: string
+  fields: string[]
+  changes: Record<string, WikiPageDiffFieldChange>
+}
+
+/** wiki 制品 GET /diff 返回体（六平键与表格 DiffResult 同名同构；
+ * added/removed=page_key 清单，changed=页级形态，counts 恒全量）。 */
+export interface WikiDiffResult {
+  added: string[]
+  removed: string[]
+  changed: WikiPageDiffChange[]
   added_count: number
   removed_count: number
   changed_count: number
@@ -328,4 +368,40 @@ export interface WikiCompileStatus {
   conflicts?: WikiCompileConflict[]
   toc?: WikiTocSection[]
   error?: string | null
+}
+
+// ── Wiki 目录（66号批次1 Task 1.4：toc 行读写，page_key 级定版形态）──
+
+/** 定版目录节（设计态 toc 行与运行态快照共用形态；与编译确认用的
+ * 提示级 WikiTocSection/WikiTocPageHint 是两回事，勿混用）。 */
+export interface WikiTocSnapshotResolved {
+  section_title: string
+  page_keys: string[]
+}
+
+/**
+ * GET /wiki/toc 返回体（三口径共享，字段按口径出现）：
+ * - 缺省（runtime）/ ?revision=N：sections + flat + revision
+ *   （未发布 rev0 → 404 toc_not_found 反探测；旧快照 toc=null 回落空目录）；
+ * - ?draft=true：sections + flat + pages_total，toc 行已存在时附
+ *   updated_at/updated_by——**updated_at 是目录编辑的乐观锁令牌**
+ *   （toc 写不推进 kb_artifacts.updated_at）。
+ * 无 toc 行 / 空目录 → {sections: [], flat: true}（平铺）。
+ */
+export interface WikiTocSnapshot {
+  sections: WikiTocSnapshotResolved[]
+  flat?: boolean
+  revision?: number
+  pages_total?: number
+  updated_at?: string
+  updated_by?: string
+}
+
+/** PUT /wiki/toc 请求体（整体替换草稿目录）。toc 行已存在时
+ * expected_updated_at 必传（缺 → 409 stale_artifact，后端锁内强制）；
+ * 畸形 → 422 invalid_toc_shape；页键不在 rev0 → 422
+ * toc_unknown_page_keys。页键全集唯一（跨节重复 → 422）。 */
+export interface WikiTocPutPayload {
+  sections: WikiTocSnapshotResolved[]
+  expected_updated_at?: string
 }

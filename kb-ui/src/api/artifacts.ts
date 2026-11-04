@@ -23,6 +23,7 @@ import type {
   PublishResult,
   RevisionInfo,
   WikiCompileStatus,
+  WikiDiffResult,
   WikiLink,
   WikiPage,
   WikiPageMeta,
@@ -30,7 +31,10 @@ import type {
   WikiSearchResult,
   WikiSource,
   WikiStatus,
+  WikiTocPutPayload,
   WikiTocSection,
+  WikiTocSnapshot,
+  WikiTocSnapshotResolved,
 } from '@/types/artifacts'
 
 export interface ArtifactCreateRequest {
@@ -190,8 +194,13 @@ export function useArtifactsApi() {
       return data
     },
 
-    /** draft vs current 差异（发布确认页数字口径）。 */
-    async diff(artifactId: string): Promise<DiffResult> {
+    /** draft vs current 差异（发布确认页数字口径）。table 制品 → DiffResult
+     * （默认，行/列级）；wiki 制品 → WikiDiffResult（六平键同构，changed
+     * 为页级 {page_key, fields, changes}——调用方 diff<WikiDiffResult>(id)
+     * 取页级口径，Task 3.5 按 kind 分支渲染）。 */
+    async diff<T extends DiffResult | WikiDiffResult = DiffResult>(
+      artifactId: string,
+    ): Promise<T> {
       const { data } = await client.get(`/api/artifacts/${artifactId}/diff`)
       return data
     },
@@ -398,6 +407,40 @@ export function useArtifactsApi() {
       params: { q: string; mode?: 'fusion' | 'dense' | 'keyword'; top_k?: number },
     ): Promise<WikiSearchResult> {
       const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/search`, { params })
+      return data
+    },
+
+    // ── Wiki 目录（66号批次1 Task 1.4：toc 行读写，page_key 级）──
+
+    /** 目录读三口径：缺省=runtime current 快照（viewer+ 可读；未发布 →
+     * 404 toc_not_found 反探测）；draft=true=toc 行本身+pages_total
+     * （updated_at=目录编辑的乐观锁令牌）；revision=N=历史快照。
+     * draft+revision 同传 → revision 优先（后端 M-1 口径），故只序列化
+     * revision——空目录恒 {sections:[], flat:true} 不伪装成有结构。 */
+    async getWikiToc(
+      artifactId: string, opts?: { draft?: boolean; revision?: number },
+    ): Promise<WikiTocSnapshot> {
+      let params: { draft?: boolean; revision?: number } | undefined
+      if (opts?.revision != null) params = { revision: opts.revision }
+      else if (opts?.draft) params = { draft: true }
+      const { data } = await client.get(`/api/artifacts/${artifactId}/wiki/toc`, { params })
+      return data
+    },
+
+    /** 保存目录草稿（整体替换；返回 toc 行——updated_at 是下次编辑的新
+     * 令牌）。toc 行已存在时 expected_updated_at 必传（缺 → 409
+     * stale_artifact 后端锁内强制；首次创建可省）；畸形 422
+     * invalid_toc_shape；页键不在 rev0 → 422 toc_unknown_page_keys。 */
+    async saveWikiToc(
+      artifactId: string, payload: WikiTocPutPayload,
+    ): Promise<{
+      artifact_id: string
+      updated_at: string
+      updated_by: string
+      /** 后端 RETURNING 附带的归一形态目录（可选消费）。 */
+      toc?: { sections: WikiTocSnapshotResolved[] }
+    }> {
+      const { data } = await client.put(`/api/artifacts/${artifactId}/wiki/toc`, payload)
       return data
     },
 
