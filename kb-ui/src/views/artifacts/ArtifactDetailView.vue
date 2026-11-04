@@ -19,8 +19,11 @@
         <el-tag v-if="servingRevisionLabel" size="small" type="success" effect="plain">
           {{ servingRevisionLabel }}
         </el-tag>
+        <!-- 草稿 tag 与 servingRevisionLabel 同源（Task 3.3 审查 Minor）：有
+             服务版（非停用且 rev>0）才说「另有待发布内容」；停用/rev0 语境一律
+             「draft 开放中」——deprecated+draft 边角不再出现「另有待发布」悬空。 -->
         <el-tag v-if="artifact && artifact.draft_open" size="small" type="warning" effect="plain">
-          {{ artifact.current_revision > 0 ? '另有待发布内容' : 'draft 开放中' }}
+          {{ servingRevisionLabel ? '另有待发布内容' : 'draft 开放中' }}
         </el-tag>
         <el-tag v-if="artifact" size="small" :type="artifact.visibility === 'public' ? 'success' : 'info'">
           {{ artifact.visibility === 'public' ? '公开' : '私有' }}
@@ -214,6 +217,7 @@
           :can-write="canWrite"
           :current-revision="artifact.current_revision"
           :expected-updated-at="artifact.updated_at"
+          :kind="artifact.kind"
           @changed="reloadAll"
         />
       </el-tab-pane>

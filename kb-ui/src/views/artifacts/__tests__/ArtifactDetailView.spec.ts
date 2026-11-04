@@ -112,6 +112,9 @@ describe('artifact detail view', () => {
     expect(wrapper.findComponent({ name: 'WikiEditorPanel' }).exists()).toBe(false)
     expect(wrapper.findComponent({ name: 'WikiReaderPanel' }).exists()).toBe(false)
     expect(wrapper.findComponent({ name: 'ArtifactPublishDialog' }).props('unitLabel')).toBe('行')
+
+    // V01：版本面板计数列头按类型——table 传 kind=table（列头=行数）
+    expect(wrapper.findComponent({ name: 'ArtifactVersionsPanel' }).props('kind')).toBe('table')
   })
 
   it('wiki 制品：设计态/运行态挂 wiki 面板，切运行态不触发表格接口', async () => {
@@ -156,6 +159,9 @@ describe('artifact detail view', () => {
 
     // 发布对话框单位 kind 化：wiki → 页
     expect(wrapper.findComponent({ name: 'ArtifactPublishDialog' }).props('unitLabel')).toBe('页')
+
+    // V01：版本面板计数列头按类型——wiki 传 kind=wiki（列头=页数）
+    expect(wrapper.findComponent({ name: 'ArtifactVersionsPanel' }).props('kind')).toBe('wiki')
   })
 
   it('refetches detail, runtime schema and rows after a rollback (versions panel changed)', async () => {
@@ -343,5 +349,19 @@ describe('artifact detail view — D01 头部服务版本与待发布并存表�
 
     expect(headerTags(wrapper)).not.toContain('正在服务')
     expect(headerTags(wrapper)).toContain('已停用')
+  })
+
+  it('已停用+rev>0+草稿开放：草稿措辞与 servingRevisionLabel 同源回落「draft 开放中」，不悬空「另有待发布内容」', async () => {
+    // Task 3.3 审查 Minor 修复：原以 current_revision>0 判「另有待发布内容」，
+    // deprecated 下无「正在服务」表述，「另有待发布」措辞悬空——改与
+    // servingRevisionLabel 同源（其为 null 的语境一律「draft 开放中」）
+    state.api.get.mockReset().mockResolvedValue(
+      { ...artifactDetail, status: 'deprecated', current_revision: 2, draft_open: true })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(headerTags(wrapper)).not.toContain('正在服务')
+    expect(headerTags(wrapper)).not.toContain('另有待发布内容')
+    expect(headerTags(wrapper)).toContain('draft 开放中')
   })
 })
