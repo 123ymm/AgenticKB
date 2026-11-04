@@ -394,8 +394,12 @@ class ArtifactWikiSearchServiceTest {
     // ---- card -------------------------------------------------------------------
 
     @Test
-    @DisplayName("card：页数=revision 快照 row_count、embedding 进度、status=published、rev 定版")
+    @DisplayName("card：页数=revision 快照 row_count、embedding 进度、status=published、rev 定版；"
+            + "description/usage_note 取自可见性行（66号 C01——卡片不只标题）")
     void cardFields() {
+        when(artifactMapper.selectVisibleArtifact(ID, DOMAIN, "alice", false, null))
+                .thenReturn(new ArtifactVisibleRow(ID, DOMAIN, "wiki", 2, "运维知识 wiki",
+                        "网络设备运维知识库", "检索命中后用 read_page 取整页"));
         when(artifactMapper.selectRevision(ID, 2)).thenReturn(new RevisionRow(null, 128));
 
         ArtifactWikiSearchService.WikiArtifactCard card =
@@ -404,6 +408,8 @@ class ArtifactWikiSearchServiceTest {
         assertThat(card.kind()).isEqualTo("wiki");
         assertThat(card.artifactRef()).isEqualTo(REF);
         assertThat(card.title()).isEqualTo("运维知识 wiki");
+        assertThat(card.description()).isEqualTo("网络设备运维知识库");
+        assertThat(card.usageNote()).isEqualTo("检索命中后用 read_page 取整页");
         // 谓词保证可见即 published（ArtifactVisibleRow 无 status 列——写死即真相）
         assertThat(card.status()).isEqualTo("published");
         assertThat(card.revision()).isEqualTo(2);
@@ -412,6 +418,20 @@ class ArtifactWikiSearchServiceTest {
         assertThat(card.embedding().done()).isEqualTo(28L);
         assertThat(card.embedding().pending()).isEqualTo(1L);
         assertThat(card.embedding().failed()).isEqualTo(1L);
+    }
+
+    @Test
+    @DisplayName("card：可见性行 description/usage_note 为 null → 卡片传空串不传 null"
+            + "（对齐表格卡片口径——键恒在，消费方免判空）")
+    void cardBlankWhenVisibleRowTextNull() {
+        // setUp 默认 stub 即 visibleWiki(2)：description/usage_note = null, null
+        when(artifactMapper.selectRevision(ID, 2)).thenReturn(new RevisionRow(null, 1));
+
+        ArtifactWikiSearchService.WikiArtifactCard card =
+                service.card(REF, DOMAIN, "alice", false, null);
+
+        assertThat(card.description()).isNotNull().isEqualTo("");
+        assertThat(card.usageNote()).isNotNull().isEqualTo("");
     }
 
     @Test

@@ -222,6 +222,9 @@ public class InternalArtifactController {
             out.put("artifact_ref", card.artifactRef());
             out.put("kind", card.kind());
             out.put("title", card.title());
+            // 66号 C01：说明两键对齐表格卡片（键序同 artifact_card 分支；service 已归一非 null）
+            out.put("description", card.description());
+            out.put("usage_note", card.usageNote());
             out.put("status", card.status());
             out.put("revision", card.revision());
             out.put("page_count", card.pageCount());

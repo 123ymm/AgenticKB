@@ -590,7 +590,7 @@ class ArtifactQueryServiceTest {
         void nullQueryRoutesToCard() {
             ArtifactWikiSearchService.WikiArtifactCard card =
                     new ArtifactWikiSearchService.WikiArtifactCard(
-                            "wiki", REF, "运维知识 wiki", "published", 2, 12,
+                            "wiki", REF, "运维知识 wiki", "", "", "published", 2, 12,
                             new ArtifactWikiSearchService.WikiEmbeddingProgress(30, 28, 1, 1));
             when(wikiSvc.card(REF, DOMAIN, "alice", false, null)).thenReturn(card);
 

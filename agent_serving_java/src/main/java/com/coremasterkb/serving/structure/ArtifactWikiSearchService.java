@@ -103,9 +103,11 @@ public class ArtifactWikiSearchService {
      * wiki 卡片（独立 record，不扩展 ArtifactCard——加字段会连坐 table 分支构造点
      * 与既有测试）。status 恒 "published"：可见性谓词含 status='published'，
      * 可见即已发布（ArtifactVisibleRow 不携 status 列，写死即真相）；updated_at
-     * 该行亦无此列，不加列避免为卡片扩大 mapper 面。
+     * 该行亦无此列，不加列避免为卡片扩大 mapper 面。description/usageNote 取自
+     * 可见性行（66号 C01——Agent 卡片不只标题；null 归一空串，对齐表格卡片口径）。
      */
-    public record WikiArtifactCard(String kind, String artifactRef, String title, String status,
+    public record WikiArtifactCard(String kind, String artifactRef, String title,
+                                   String description, String usageNote, String status,
                                    int revision, int pageCount,
                                    WikiEmbeddingProgress embedding) {}
 
@@ -159,7 +161,8 @@ public class ArtifactWikiSearchService {
         }
         WikiUnitStatusRow status = wikiMapper.selectWikiUnitsStatus(
                 ctx.artifactId(), ctx.revision());
-        return new WikiArtifactCard(KIND_WIKI, artifactRef, ctx.title(), "published",
+        return new WikiArtifactCard(KIND_WIKI, artifactRef, ctx.title(),
+                ctx.description(), ctx.usageNote(), "published",
                 ctx.revision(), snapshot.rowCount() == null ? 0 : snapshot.rowCount(),
                 progressOf(status));
     }
@@ -420,10 +423,16 @@ public class ArtifactWikiSearchService {
         return v == null ? 0L : v;
     }
 
+    /** 文本列 null 归一空串（DB 列 NOT NULL DEFAULT ''，此处防御 mock/历史行——键恒在）。 */
+    private static String nvl(String v) {
+        return v == null ? "" : v;
+    }
+
     // ------------------------------------------------------------------ 权限 / 参数校验
 
-    /** 已放行的 wiki 制品上下文（revision 定版 + 卡片用 title）。 */
-    private record WikiContext(String artifactId, String title, int revision) {}
+    /** 已放行的 wiki 制品上下文（revision 定版 + 卡片用 title/description/usageNote）。 */
+    private record WikiContext(String artifactId, String title, String description,
+                               String usageNote, int revision) {}
 
     /** 权限与 kind 收口：可见性谓词（404 反探测）+ 仅 wiki + current_revision 定版。 */
     private WikiContext requireWiki(String artifactRef, String domain, String username,
@@ -446,6 +455,7 @@ public class ArtifactWikiSearchService {
                     Map.of("kind", String.valueOf(artifact.kind())));
         }
         return new WikiContext(artifactId, artifact.title(),
+                nvl(artifact.description()), nvl(artifact.usageNote()),
                 artifact.currentRevision() == null ? 0 : artifact.currentRevision());
     }
 

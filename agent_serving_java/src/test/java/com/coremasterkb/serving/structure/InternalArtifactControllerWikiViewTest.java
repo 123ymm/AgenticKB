@@ -59,12 +59,14 @@ class InternalArtifactControllerWikiViewTest {
     }
 
     @Test
-    @DisplayName("artifact-query + wiki query=null → wiki_artifact_card 装配（embedding 四键）")
+    @DisplayName("artifact-query + wiki query=null → wiki_artifact_card 装配（embedding 四键；"
+            + "description/usage_note snake_case 键透传——66号 C01）")
     void cardViewAssembly() {
         when(artifactService.query(eq(REF), isNull(), eq("odn"), eq("alice"),
                 eq(false), isNull()))
                 .thenReturn(new ArtifactWikiSearchService.WikiArtifactCard(
-                        "wiki", REF, "运维知识 wiki", "published", 2, 12,
+                        "wiki", REF, "运维知识 wiki", "网络设备运维知识库",
+                        "检索命中后用 read_page 取整页", "published", 2, 12,
                         new ArtifactWikiSearchService.WikiEmbeddingProgress(30, 28, 1, 1)));
 
         Map<String, Object> out = ok(controller.artifactQuery(
@@ -75,12 +77,32 @@ class InternalArtifactControllerWikiViewTest {
         assertThat(out.get("artifact_ref")).isEqualTo(REF);
         assertThat(out.get("kind")).isEqualTo("wiki");
         assertThat(out.get("status")).isEqualTo("published");
+        assertThat(out.get("description")).isEqualTo("网络设备运维知识库");
+        assertThat(out.get("usage_note")).isEqualTo("检索命中后用 read_page 取整页");
         assertThat(out.get("page_count")).isEqualTo(12);
         Map<String, Object> embedding = (Map<String, Object>) out.get("embedding");
         assertThat(embedding).containsEntry("total", 30L)
                 .containsEntry("done", 28L)
                 .containsEntry("pending", 1L)
                 .containsEntry("failed", 1L);
+    }
+
+    @Test
+    @DisplayName("wiki_artifact_card：description/usage_note 空值 → 键在、值为空串"
+            + "（service 层已归一，装配层透传不落 null——对齐表格卡片键风格）")
+    void cardViewBlankTextAsEmptyString() {
+        when(artifactService.query(eq(REF), isNull(), eq("odn"), eq("alice"),
+                eq(false), isNull()))
+                .thenReturn(new ArtifactWikiSearchService.WikiArtifactCard(
+                        "wiki", REF, "无说明 wiki", "", "", "published", 1, 3,
+                        new ArtifactWikiSearchService.WikiEmbeddingProgress(0, 0, 0, 0)));
+
+        Map<String, Object> out = ok(controller.artifactQuery(
+                body("{\"artifact_ref\":\"" + REF + "\",\"domain\":\"odn\",\"username\":\"alice\"}"),
+                "s3cret"));
+
+        assertThat(out).containsEntry("description", "")
+                .containsEntry("usage_note", "");
     }
 
     @Test
