@@ -63,6 +63,11 @@ router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
 #: multipart 开销预算（对齐 auth_guard 用户导入预检口径）。
 _UPLOAD_BODY_BUDGET = MAX_UPLOAD_BYTES + 256 * 1024
 
+#: serving ref 协议前缀（同 ArtifactQueryService.REF_PREFIX="art_"）：ref =
+#: 前缀 + artifact_id（DB id 本身含 art_，ref 形如 art_art_<hex>），serving
+#: 剥一个前缀即还原 DB id——66号 §13 C01 前端展示服务返回的 ref，不前端拼装。
+_REF_PREFIX = "art_"
+
 
 # ----------------------------------------------------------------- models
 
@@ -228,6 +233,12 @@ async def _require_editor(
         raise _map_error(exc) from None
 
 
+def _with_ref(artifact: dict[str, Any]) -> dict[str, Any]:
+    """list/get 共用：补 artifact_ref（与 serving REF_PREFIX 同源拼法，
+    不做第二种 ref 形态）。"""
+    return {**artifact, "artifact_ref": _REF_PREFIX + artifact["artifact_id"]}
+
+
 # ------------------------------------------------------------ 制品 CRUD
 
 @router.post("", status_code=201)
@@ -270,8 +281,10 @@ async def list_artifacts(
     svc: ArtifactService = Depends(get_artifact_service),
 ):
     try:
-        return {"artifacts": await svc.list_artifacts(
-            user=user, domain_id=domain_id)}
+        return {"artifacts": [
+            _with_ref(a) for a in await svc.list_artifacts(
+                user=user, domain_id=domain_id)
+        ]}
     except ArtifactError as exc:
         raise _map_error(exc) from None
 
@@ -294,7 +307,8 @@ async def get_artifact(
                 user=user, artifact_id=artifact_id, runtime=True)
             rows = await svc.list_rows(
                 user=user, artifact_id=artifact_id, page=1, size=5)
-        return {**artifact, "schema": schema, "sample_rows": rows["rows"]}
+        return {**_with_ref(artifact), "schema": schema,
+                "sample_rows": rows["rows"]}
     except ArtifactError as exc:
         raise _map_error(exc) from None
 

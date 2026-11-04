@@ -145,6 +145,24 @@ async def test_create_list_detail_patch_delete(env):
     assert r.status_code == 404
 
 
+async def test_list_and_get_expose_artifact_ref(env):
+    """66号 §13 C01：list 与 get 响应均带 artifact_ref，拼法与 serving
+    REF_PREFIX="art_"（ArtifactQueryService 发现端点构造 ref 处）同源——
+    ref = art_ + artifact_id（DB id 本身含 art_ 前缀，ref 形如 art_art_<hex>，
+    serving 侧剥一个前缀即还原 DB id，往返一致）。前端只展示/复制服务
+    返回的 ref，不在前端拼装。"""
+    aid = await _create_artifact(env)
+
+    r = await env.client.get("/api/artifacts")
+    assert r.status_code == 200
+    [item] = r.json()["artifacts"]
+    assert item["artifact_ref"] == f"art_{aid}"
+
+    r = await env.client.get(f"/api/artifacts/{aid}")
+    assert r.status_code == 200
+    assert r.json()["artifact_ref"] == f"art_{aid}"
+
+
 async def test_create_requires_domain_grant(env):
     env.holder["user"] = _user("u-stranger")
     r = await env.client.post("/api/artifacts", json={"title": "无域制品"})
