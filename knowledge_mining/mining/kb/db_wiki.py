@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import binascii
+import difflib
 import json
 import logging
 import re
@@ -26,8 +27,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: diff 样例截断（counts 恒全量，added/removed/changed 各只回前 N 条）。
+#: diff 样例截断（counts 恒全量，added/removed/changed 各只回前 N 条；
+#: changed 的 body_md hunks 同口径截前 100 行）。
 _DIFF_SAMPLE_LIMIT = 100
+
+#: diff changed 元素 body_md 预览长度（old/new_preview 各截前 N 字符——
+#: 长正文不全量进载荷，弹窗用 hunks 看差异、preview 看上下文）。
+_DIFF_BODY_PREVIEW_LIMIT = 200
 
 #: 检索单元分块上限（63号 §5.3：≤2000 字单块；超长按 H2 分节/段落硬切）。
 _UNITS_CHUNK_LIMIT = 2000
@@ -236,6 +242,40 @@ def chunk_page_for_units(
     if not contents:  # 防御：body 超长但分节全空（不可能路径，保底单块）
         contents.append(page_prefix + body)
     return [(f"{page_key}#s{i}", text) for i, text in enumerate(contents, start=1)]
+
+
+def _build_page_changes(
+    draft_page: dict[str, Any], current_page: dict[str, Any],
+    fields: list[str],
+) -> dict[str, Any]:
+    """diff changed 元素的 changes 装配（统一界面 Task 1.5）：非 body 字段
+    旧新直给 ``{old=current, new=draft}``（「发布将产生的变化」口径，与
+    db_artifacts.diff_draft_vs_current 列级 old/new 先例同向，无 hunks）；
+    body_md 长正文不全量进载荷——old/new_preview 各截前 200 字符 +
+    ``difflib.unified_diff`` 行级 hunks（stdlib 零依赖）截前
+    _DIFF_SAMPLE_LIMIT 行，超限携带 ``truncated: true``（对齐样例截 100
+    先例；未超限不携带该键）。"""
+    changes: dict[str, Any] = {}
+    for field in fields:
+        if field != "body_md":
+            changes[field] = {
+                "old": current_page.get(field),
+                "new": draft_page.get(field),
+            }
+            continue
+        old_body = str(current_page.get("body_md") or "")
+        new_body = str(draft_page.get("body_md") or "")
+        hunks = list(difflib.unified_diff(
+            old_body.splitlines(), new_body.splitlines(), lineterm=""))
+        entry: dict[str, Any] = {
+            "old_preview": old_body[:_DIFF_BODY_PREVIEW_LIMIT],
+            "new_preview": new_body[:_DIFF_BODY_PREVIEW_LIMIT],
+            "diff_hunks": hunks[:_DIFF_SAMPLE_LIMIT],
+        }
+        if len(hunks) > _DIFF_SAMPLE_LIMIT:
+            entry["truncated"] = True
+        changes[field] = entry
+    return changes
 
 
 class WikiDB:
@@ -472,7 +512,10 @@ class WikiDB:
         （键名与 db_artifacts.diff_draft_vs_current 完全同名同构）：added/
         removed=page_key 列表；changed=title/body_md/frontmatter/page_type/
         origin 任一不同（origin 翻 manual 也是真实待发布变更），元素形态
-        {page_key, fields:[变更字段名]}；counts 恒全量、样例各截前 100 条。
+        {page_key, fields:[变更字段名], changes:{field: 装配}}——changes 由
+        _build_page_changes 装配（非 body 旧新直给；body_md preview+hunks，
+        统一界面 Task 1.5）；counts 恒全量（changed_count 仍按页数）、样例
+        各截前 100 条（changes 仅对样例窗口内的页装配，超窗页不算 hunks）。
         干净态（draft_open=FALSE 且 current>0）零差异投影；从未发布
         （current=0）→ current 侧空集、全部计新增。"""
         async with self._pool.connection() as conn:
@@ -511,7 +554,7 @@ class WikiDB:
                 current = {}
         added = [k for k in draft if k not in current]
         removed = [k for k in current if k not in draft]
-        changed: list[dict[str, Any]] = []
+        pending: list[tuple[str, list[str]]] = []
         for key in draft:
             if key not in current:
                 continue
@@ -520,13 +563,21 @@ class WikiDB:
                 if draft[key].get(f) != current[key].get(f)
             ]
             if fields:
-                changed.append({"page_key": key, "fields": fields})
+                pending.append((key, fields))
+        changed: list[dict[str, Any]] = [
+            {
+                "page_key": key, "fields": fields,
+                "changes": _build_page_changes(
+                    draft[key], current[key], fields),
+            }
+            for key, fields in pending[:_DIFF_SAMPLE_LIMIT]
+        ]
         return {
             "added": added[:_DIFF_SAMPLE_LIMIT],
             "removed": removed[:_DIFF_SAMPLE_LIMIT],
-            "changed": changed[:_DIFF_SAMPLE_LIMIT],
+            "changed": changed,
             "added_count": len(added), "removed_count": len(removed),
-            "changed_count": len(changed),
+            "changed_count": len(pending),
         }
 
     @staticmethod

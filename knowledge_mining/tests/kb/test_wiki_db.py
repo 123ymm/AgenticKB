@@ -432,6 +432,89 @@ async def test_diff_six_keys(async_pool) -> None:
     assert set(d) == set(_EMPTY_DIFF)  # 六平键同名同构
 
 
+async def test_diff_changed_carries_content(async_pool) -> None:
+    """Task 1.5：changed 元素带 changes——非 body 字段旧新直给（old=current、
+    new=draft，与表格列级 old/new 先例同向）；body_md preview 各截前 200 字 +
+    unified_diff 行级 hunks（未超 100 行不带 truncated）。"""
+    adb, wdb, aid = await _make_wiki(async_pool)
+    await wdb.ensure_draft(aid)
+    old_body = "旧段落一\n旧段落二\n"
+    await _upsert(wdb, aid, _page("改动页", "改动页", old_body, aliases=["旧别名"]))
+    await _upsert(wdb, aid, _page("类型页", "类型页", "同文"))
+    art = await adb.get_artifact(aid)
+    await wdb.publish(
+        aid, expected_updated_at=art["updated_at"],
+        change_summary="v1", published_by="editor-1",
+    )
+
+    # 草稿编辑：一页改 title/body_md/frontmatter，另一页翻 page_type/origin
+    await wdb.ensure_draft(aid)
+    new_body = "新段落一\n旧段落二\n"
+    await _upsert(wdb, aid, _page(
+        "改动页", "改动页v2", new_body, aliases=["新别名"]))
+    await _upsert(wdb, aid, _page(
+        "类型页", "类型页", "同文", page_type="glossary", origin="machine"))
+
+    d = await wdb.diff_draft_vs_current(aid)
+    assert d["changed_count"] == 2
+    assert set(d) == set(_EMPTY_DIFF)  # 顶层仍六平键（计数语义不变）
+    elems = {c["page_key"]: c for c in d["changed"]}
+    assert set(elems["改动页"]) == {"page_key", "fields", "changes"}
+    assert set(elems["改动页"]["changes"]) == {"title", "body_md", "frontmatter"}
+    # 非 body 字段：旧新直给，无 hunks 结构
+    assert elems["改动页"]["changes"]["title"] == {
+        "old": "改动页", "new": "改动页v2"}
+    assert elems["改动页"]["changes"]["frontmatter"] == {
+        "old": {"aliases": ["旧别名"]}, "new": {"aliases": ["新别名"]}}
+    assert elems["类型页"]["changes"] == {
+        "page_type": {"old": "topic", "new": "glossary"},
+        "origin": {"old": "manual", "new": "machine"},
+    }
+    # body_md：preview 上下文 + 行级 hunks（difflib.unified_diff 原生输出——
+    # 未传 fromfile/tofile，---/+++ 头带尾随空格，stdlib 字面行为）
+    body = elems["改动页"]["changes"]["body_md"]
+    assert set(body) == {"old_preview", "new_preview", "diff_hunks"}
+    assert body["old_preview"] == old_body   # 短于 200 字不截
+    assert body["new_preview"] == new_body
+    assert body["diff_hunks"] == [
+        "--- ", "+++ ", "@@ -1,2 +1,2 @@",
+        "-旧段落一", "+新段落一", " 旧段落二",
+    ]
+    assert "truncated" not in body  # 未超样例上限不携带
+
+
+async def test_diff_changed_body_hunks_truncated(async_pool) -> None:
+    """Task 1.5 截断口径：body_md hunks 截前 100 行（对齐 _DIFF_SAMPLE_LIMIT
+    先例）+ truncated=true；preview 各截前 200 字符。"""
+    adb, wdb, aid = await _make_wiki(async_pool)
+    old_body = "\n".join(f"旧{i}" for i in range(150))
+    new_body = "\n".join(f"新{i}" for i in range(150))
+    await wdb.ensure_draft(aid)
+    await _upsert(wdb, aid, _page("长文页", "长文页", old_body))
+    art = await adb.get_artifact(aid)
+    await wdb.publish(
+        aid, expected_updated_at=art["updated_at"],
+        change_summary="v1", published_by="editor-1",
+    )
+    await wdb.ensure_draft(aid)
+    await _upsert(wdb, aid, _page("长文页", "长文页", new_body))
+
+    d = await wdb.diff_draft_vs_current(aid)
+    assert d["changed_count"] == 1
+    [elem] = d["changed"]
+    assert elem["fields"] == ["body_md"]
+    body = elem["changes"]["body_md"]
+    # 3 头（---/+++/@@）+ 150 删 + 150 增 = 303 行 → 截前 100
+    assert len(body["diff_hunks"]) == 100
+    assert body["diff_hunks"][0] == "--- " and body["diff_hunks"][1] == "+++ "
+    assert body["diff_hunks"][2] == "@@ -1,150 +1,150 @@"
+    assert body["diff_hunks"][3] == "-旧0"
+    assert body["truncated"] is True
+    assert body["old_preview"] == old_body[:200]
+    assert body["new_preview"] == new_body[:200]
+    assert len(body["old_preview"]) == len(body["new_preview"]) == 200
+
+
 # --------------------------------------------- 来源绑定（63号批次3 Task 1）
 
 async def _seed_kb(async_pool) -> tuple[KbDB, str]:
