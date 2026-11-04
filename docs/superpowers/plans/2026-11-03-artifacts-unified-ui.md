@@ -344,6 +344,8 @@ grep -rn "source_locator\|locator" knowledge_mining/mining/kb/routes/ | head
 
 后端 kb 测试全绿；npm test + build 过；MCP 侧 wiki 卡片本地冒烟（容器或 Fake serving 响应断言 description/usage_note 透传——server.py 原样透传已有测试模式）。
 
+> **✅ 批次5 完成（2026-11-04）**：Task 5.1-5.4 全过双职审查。提交链 ff1d595→9a146b5→1655c83→1b4c592→ceebb2a→aef4a2d→654d11c。收口=npm test **709/709**（98 文件）+ build 过 + 后端 routes 30/service 20 绿 + 真库 wiki_db 26 绿。A1 locator 探查=不可复用（ev_ HMAC 密钥只在 Java 侧，有据）；unit-source 双重权限+404 单码反探测；reproject 幂等三面钉死；Fake 时钟 flake 已修。**批次6 顺手修清单**：①McpKeyConfigPanel:81 过时文案（表格→制品，与 43 章矛盾）+server.py:805 docstring ②MCP wiki 卡片 docstring 措辞（Task 2.1 Step 6）③镜像 DDL 同文守卫测试（011↔019 先例）④statusTagType 双文件重复（低优）。遗留 Minor 记录：DetailView 777 行（下次触碰抽状态条）、状态条无自动轮询、rev0 复用 revision_not_found 码（裁定接受）。
+
 ## 批次6：真库五闭环验收 + 发版准备（照 wiki 批次5 先例）
 
 ### Task 6.1: 本地真库环境 + Python PG 门控全套
