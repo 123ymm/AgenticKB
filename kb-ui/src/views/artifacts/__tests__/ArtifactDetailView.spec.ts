@@ -414,3 +414,31 @@ describe('artifact detail view — D01 头部服务版本与待发布并存表�
     expect(headerTags(wrapper)).toContain('draft 开放中')
   })
 })
+
+describe('artifact detail view — C01 运行态说明卡子组件（ArtifactUsagePanel）', () => {
+  it('运行态说明区挂载子组件并透传制品（含 artifact_ref），不内联重复渲染', async () => {
+    state.api.get.mockReset().mockResolvedValue({ ...artifactDetail, artifact_ref: 'art:art-1' })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const panel = wrapper.findComponent({ name: 'ArtifactUsagePanel' })
+    expect(panel.exists()).toBe(true)
+    const passed = panel.props('artifact') as Record<string, unknown>
+    expect(passed.artifact_id).toBe('art-1')
+    expect(passed.artifact_ref).toBe('art:art-1')
+    expect(passed.kind).toBe('table')
+    expect(passed.status).toBe('published')
+
+    // 说明卡内容（描述/使用说明/消费方式）整体迁入子组件——详情页不再内联渲染
+    expect(wrapper.text()).not.toContain('查责任域')
+
+    // wiki 制品同样透传（消费方式文案在子组件按 kind 分派）
+    state.api.get.mockReset().mockResolvedValue(
+      { ...artifactDetail, kind: 'wiki', artifact_ref: 'art:art-1' })
+    const wikiDetail = mountDetail()
+    await flushPromises()
+    const wikiPassed = wikiDetail.findComponent({ name: 'ArtifactUsagePanel' })
+      .props('artifact') as Record<string, unknown>
+    expect(wikiPassed.kind).toBe('wiki')
+  })
+})

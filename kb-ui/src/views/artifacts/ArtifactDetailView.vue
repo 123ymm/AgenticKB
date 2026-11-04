@@ -166,21 +166,12 @@
         <EmptyState v-else text="设计态仅 owner / editor 可见（你当前是 viewer——请看运行态）" />
       </el-tab-pane>
 
-      <!-- ── 运行态：说明卡 + 只读行表格（本棒可用）── -->
+      <!-- ── 运行态：说明卡子组件 + 只读行表格（本棒可用）── -->
       <el-tab-pane label="运行态" name="runtime">
         <div class="artifact-detail__meta-bar">
-          <el-descriptions :column="1" border size="small" class="artifact-detail__desc-card">
-            <el-descriptions-item label="标题">{{ artifact.title }}</el-descriptions-item>
-            <el-descriptions-item label="描述">{{ artifact.description || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="使用说明">
-              <span :class="{ 'artifact-detail__usage-missing': !artifact.usage_note }">
-                {{ artifact.usage_note || '未填写（发布前必填）' }}
-              </span>
-            </el-descriptions-item>
-            <el-descriptions-item label="当前版本">
-              {{ artifact.current_revision ? `r${artifact.current_revision}` : '未发布' }}
-            </el-descriptions-item>
-          </el-descriptions>
+          <!-- C01：说明卡（描述/使用说明/版本/消费方式 + artifact_ref 复制 +
+               Agent 三条件区）整体抽入子组件——本视图已被多任务触碰，控行数。 -->
+          <ArtifactUsagePanel :artifact="artifact" class="artifact-detail__desc-card" />
           <el-button data-test="edit-meta" @click="openMetaEdit">编辑元信息</el-button>
         </div>
 
@@ -329,6 +320,7 @@ import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
 import ArtifactImportWizard from '@/components/artifacts/ArtifactImportWizard.vue'
+import ArtifactUsagePanel from '@/components/artifacts/ArtifactUsagePanel.vue'
 import ArtifactSchemaPanel from '@/components/artifacts/ArtifactSchemaPanel.vue'
 import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
 import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
@@ -675,8 +667,8 @@ defineExpose({ reloadAll })
 .artifact-detail__desc { margin: 8px 0 12px; color: var(--kb-text-tertiary); font-size: 13px; }
 .artifact-detail__missing { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .artifact-detail__meta-bar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+/* 说明卡占位（desc-card 名字保留——class 传给子组件根元素继承 flex 占位） */
 .artifact-detail__desc-card { flex: 1; max-width: 720px; }
-.artifact-detail__usage-missing { color: var(--el-color-warning); }
 .artifact-detail__visibility-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; line-height: 1.5; }
 .artifact-detail__empty-guide { margin-bottom: 14px; }
 /* wiki 内容区「页面｜图谱」切换（D03.1）：运行态入口组与面板间距 */
