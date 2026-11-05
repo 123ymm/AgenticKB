@@ -63,7 +63,7 @@
       <div v-if="state === 'preparing'" class="wiki-compile__phase" data-test="wiki-compile-preparing">
         <el-icon class="is-loading"><Loading /></el-icon>
         <span>正在取材与聚类……（大库可能需要数分钟）</span>
-        <el-button v-if="canWrite" size="small" data-test="wiki-compile-cancel" @click="cancelCompile">取消</el-button>
+        <el-button v-if="canWrite" size="small" text type="danger" data-test="wiki-compile-cancel" @click="cancelCompile">取消</el-button>
       </div>
 
       <!-- awaiting_toc：目录确认编辑器（编辑/勾选排除 → 确认进入写作） -->
@@ -86,6 +86,8 @@
         <el-button
           v-if="canWrite"
           size="small"
+          text
+          type="danger"
           :loading="cancelling"
           data-test="wiki-compile-cancel"
           @click="cancelCompile"

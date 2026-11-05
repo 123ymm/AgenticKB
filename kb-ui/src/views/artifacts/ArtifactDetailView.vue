@@ -46,7 +46,7 @@
         </el-tooltip>
         <el-button v-if="artifact.status !== 'deprecated'" @click="deprecateArtifact">停用</el-button>
         <el-button v-if="artifact.status === 'deprecated'" @click="republishArtifact">恢复</el-button>
-        <el-button v-if="artifact.draft_open" @click="discardDraftAction">丢弃 draft</el-button>
+        <el-button v-if="artifact.draft_open" type="warning" plain @click="discardDraftAction">丢弃 draft</el-button>
         <!-- 008 删除门禁：owner 且已停用才可删（级联硬删不可恢复）；未停用时置灰指路 -->
         <el-tooltip
           :content="artifact.status === 'deprecated'
@@ -172,7 +172,7 @@
           <!-- C01：说明卡（描述/使用说明/版本/消费方式 + artifact_ref 复制 +
                Agent 三条件区）整体抽入子组件——本视图已被多任务触碰，控行数。 -->
           <ArtifactUsagePanel :artifact="artifact" class="artifact-detail__desc-card" />
-          <el-button data-test="edit-meta" @click="openMetaEdit">编辑元信息</el-button>
+          <el-button data-test="edit-meta" :icon="Edit" @click="openMetaEdit">编辑元信息</el-button>
         </div>
 
         <!-- wiki 运行态阅读器/图谱（63号批次2 + 66号 D03.1）：面板自加载
@@ -339,7 +339,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft } from '@element-plus/icons-vue'
+import { ArrowLeft, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
