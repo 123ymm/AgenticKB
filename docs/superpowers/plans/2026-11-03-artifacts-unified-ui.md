@@ -381,9 +381,14 @@ grep -rn "source_locator\|locator" knowledge_mining/mining/kb/routes/ | head
 > **6.3 语义修正记录**（测试口径以真实现为准）：域撤销=钥匙直接吊销（非静默收缩）；断链无专门发布 warning（links 视图可辨识）；停用滤除在 serving 侧（Python 侧 deprecate 后仍可读，分工注明）。
 > **待办**：部署冒烟（本地 cmkb 或内网 staging——需用户拍板部署时机）+ 发版清单（**版本号待用户拍板**：66号代号 1.1.15 线但 tag v1.1.15 已占；建议 1.1.16 或 1.1.15-ui）。
 
-- [ ] 部署冒烟（本地 cmkb 栈或内网 staging，按届时环境）：Web 登录→制品中心建两类制品→走查 §18 七条→MCP `get_knowledge(art_…)` wiki 卡片含 description/usage_note→检索三通道
+> **✅ 6.4 部署冒烟完成（2026-11-05，用户拍板本地 cmkb）**：本地栈半死数周的根因=远程开发库无迁移账本→三服务 fail-closed。处置：**克隆远程库→本地 unified-pg（数据零改动远程）→ rebase 迁移（13 条+数据桥接 115KB/582 单元）→ 栈切本地收敛库 → ff 合并 master(e62f55d)+部署 jar/dist → 六服务全 RUNNING**。
+> 冒烟矩阵全通：登录/列表/建两类制品/表格列行→发布 r1/wiki 页→目录定版→发布 r1（toc 快照+409 锁+provenance 警示）/检索转发命中/MCP 两类卡片（wiki 卡含 desc/usage）+wiki 检索命中。
+> **冒烟抓到两缺陷**：①wiki 检索转发 is_admin 硬编码 False→站点管理员网页检索 404（两侧口径断裂）——**已修 648e0d6+复测通过**；②admin 无域绑定时 replace_open_artifacts 静默剔除全部（UI/行为不一致）——存量缺陷非本批引入，数据侧补绑定绕过，**留待后续批次修**。
+> 冒烟环境：本地库 new_db_converged@unified-pg:55442；admin 密码 Smoke-1.1.15!（本地冒烟用）；域配置备份 *.remote-bak。
+
+- [x] 部署冒烟（本地 cmkb 栈或内网 staging，按届时环境）：Web 登录→制品中心建两类制品→走查 §18 七条→MCP `get_knowledge(art_…)` wiki 卡片含 description/usage_note→检索三通道
 - [ ] 完成记录 docs/superpowers/plans/ 伴随文档（偏差/坑/接手清单）
-- [ ] **发版清单（版本号为用户拍板项，不自行决定）**：changelog、迁移 011 apply 前置（真库预演已做）、jar 纯源码、dist、deploy-sync 包、内网 apply 步骤（含级联重启）
+- [ ] **发版清单（用户已拍板：直接用 1.1.15，删旧 tag 重打+发布包替换）**：changelog、迁移 011 apply 前置（真库预演已做=rebase 冒烟）、jar 纯源码、dist、deploy-sync 包、内网 apply 步骤（含级联重启）
 
 ---
 
