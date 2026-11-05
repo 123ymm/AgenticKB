@@ -88,10 +88,15 @@
             <el-tag size="small" effect="plain" :type="pageTypeMeta(page.page_type)?.tag ?? 'info'">
               {{ pageTypeMeta(page.page_type)?.label ?? page.page_type }}
             </el-tag>
-            <el-tag size="small" effect="plain" :type="page.origin === 'manual' ? 'primary' : 'info'">
-              {{ page.origin }}
+            <el-tag
+              size="small"
+              effect="plain"
+              :type="page.origin === 'manual' ? 'primary' : 'info'"
+              :title="`来源：${page.origin}`"
+            >
+              {{ originLabel(page.origin) }}
             </el-tag>
-            <span class="wiki-reader__page-time">更新于 {{ page.updated_at }}</span>
+            <span class="wiki-reader__page-time">更新于 {{ formatTime(page.updated_at) }}</span>
           </header>
           <!-- 点击委托：a[data-wiki-page] 切页 / sup.wiki-src 复制切片 ID（标记见 utils/markdown.ts） -->
           <div
@@ -545,6 +550,18 @@ function toProvenanceViews(provenance: unknown): ProvenanceView[] {
 
 function pageTypeMeta(pageType: WikiPageType | string) {
   return PAGE_TYPES.find(t => t.value === pageType)
+}
+
+/** origin 徽标中文化（原值落 title 提示；与 EditorPanel 同口径）。 */
+function originLabel(origin: string): string {
+  if (origin === 'manual') return '手工'
+  if (origin === 'machine') return '编译'
+  return origin
+}
+
+/** 更新时间：ISO → 「YYYY-MM-DD HH:mm:ss」（原始微秒精度对读者无意义）。 */
+function formatTime(value: string | null | undefined): string {
+  return value ? value.replace('T', ' ').slice(0, 19) : '—'
 }
 
 /** 命令式刷新（发布后父级 reloadAll 可不接线——面板自管理）；selectPage

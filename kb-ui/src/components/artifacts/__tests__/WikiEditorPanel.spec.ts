@@ -119,9 +119,9 @@ describe('WikiEditorPanel', () => {
     expect(rows).toHaveLength(3)
     expect(rows[0].text()).toContain('首页')
     expect(rows[0].text()).toContain('主题')     // page_type 徽标
-    expect(rows[0].text()).toContain('manual')   // origin 徽标
+    expect(rows[0].text()).toContain('手工')     // origin 徽标（manual 中文化）
     expect(rows[1].text()).toContain('术语')
-    expect(rows[1].text()).toContain('machine')
+    expect(rows[1].text()).toContain('编译')     // machine 中文化
     expect(rows[2].text()).toContain('矛盾')
   })
 

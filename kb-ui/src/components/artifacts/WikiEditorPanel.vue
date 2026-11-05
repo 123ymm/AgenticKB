@@ -19,11 +19,15 @@
       </div>
       <el-button
         v-if="canWrite && leftView === 'pages'"
+        type="primary"
+        plain
         size="small"
         class="wiki-editor__new"
         data-test="wiki-new-page"
         @click="startNewPage"
-      >新建页</el-button>
+      >
+        <el-icon class="wiki-editor__new-icon"><Plus /></el-icon>新建页
+      </el-button>
       <div v-loading="loading" class="wiki-editor__list-body">
         <button
           v-for="page in sortedPages"
@@ -38,10 +42,25 @@
             {{ pageTypeMeta(page.page_type)?.label ?? page.page_type }}
           </el-tag>
           <span class="wiki-editor__item-title">{{ page.title }}</span>
-          <el-tag size="small" effect="plain" :type="page.origin === 'manual' ? 'primary' : 'info'">
-            {{ page.origin }}
+          <el-tag
+            size="small"
+            effect="plain"
+            :type="page.origin === 'manual' ? 'primary' : 'info'"
+            :title="`来源：${page.origin}`"
+          >
+            {{ originLabel(page.origin) }}
           </el-tag>
-          <span v-if="canWrite" class="wiki-editor__item-del" data-test="wiki-page-delete" @click.stop="removePage(page)">删</span>
+          <span
+            v-if="canWrite"
+            class="wiki-editor__item-del"
+            role="button"
+            aria-label="删除页面"
+            title="删除页面"
+            data-test="wiki-page-delete"
+            @click.stop="removePage(page)"
+          >
+            <el-icon><Delete /></el-icon>
+          </span>
         </button>
         <EmptyState
           v-if="!loading && sortedPages.length === 0"
@@ -150,6 +169,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { Delete, Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
@@ -411,6 +431,13 @@ function pageTypeMeta(pageType: string) {
   return PAGE_TYPES.find(t => t.value === pageType)
 }
 
+/** origin 徽标中文化（原值落 title 提示，便于排查数据）。 */
+function originLabel(origin: string): string {
+  if (origin === 'manual') return '手工'
+  if (origin === 'machine') return '编译'
+  return origin
+}
+
 function toCsv(value: unknown): string {
   return Array.isArray(value) ? value.map(String).join(', ') : ''
 }
@@ -428,7 +455,8 @@ defineExpose({ loadPages, selectPage })
 .wiki-editor { display: flex; gap: 14px; min-height: 420px; }
 .wiki-editor__list { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
 .wiki-editor__list-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
-.wiki-editor__new { align-self: flex-start; }
+.wiki-editor__new { align-self: stretch; }
+.wiki-editor__new-icon { margin-right: 4px; }
 .wiki-editor__count { font-size: 12.5px; color: var(--kb-text-tertiary); }
 .wiki-editor__list-body { display: flex; flex-direction: column; gap: 4px; }
 .wiki-editor__item {
@@ -445,7 +473,16 @@ defineExpose({ loadPages, selectPage })
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--kb-text-primary, inherit);
 }
-.wiki-editor__item-del { color: var(--el-color-danger, #f56c6c); font-size: 12px; flex-shrink: 0; }
+.wiki-editor__item-del {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; flex-shrink: 0;
+  border-radius: 4px; color: var(--kb-text-tertiary, #94a3b8);
+  cursor: pointer; font-size: 12px;
+}
+.wiki-editor__item-del:hover {
+  color: var(--el-color-danger, #f56c6c);
+  background: var(--el-color-danger-light-9, #fef0f0);
+}
 .wiki-editor__main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .wiki-editor__toolbar { display: flex; align-items: center; gap: 12px; }
 .wiki-editor__addr { flex: 1; font-size: 12.5px; color: var(--kb-text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

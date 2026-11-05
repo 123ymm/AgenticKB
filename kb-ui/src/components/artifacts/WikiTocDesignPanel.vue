@@ -11,7 +11,7 @@
         :disabled="!dirty"
         data-test="toc-save"
         @click="save"
-      >保存目录{{ dirty ? '' : '（无变更）' }}</el-button>
+      >保存目录</el-button>
     </div>
     <!-- 无 toc 行（seed 失败/未编译）→ 平铺回落可见（Task 1.3 审查 M-4） -->
     <div v-if="flat" class="wiki-toc-design__flat" data-test="toc-flat-hint" role="note">
@@ -23,9 +23,21 @@
         <header class="wiki-toc-design__section-head">
           <el-input v-model="sec.sectionTitle" size="small" data-test="toc-section-title" />
           <span class="wiki-toc-design__section-ops">
-            <el-button size="small" text :disabled="si === 0" data-test="toc-section-up" @click="moveSection(si, -1)">上移</el-button>
-            <el-button size="small" text :disabled="si === sections.length - 1" data-test="toc-section-down" @click="moveSection(si, 1)">下移</el-button>
-            <el-button size="small" text type="danger" data-test="toc-section-remove" @click="removeSection(si)">删节</el-button>
+            <el-tooltip content="上移" placement="top" :show-after="400">
+              <el-button size="small" text :disabled="si === 0" data-test="toc-section-up" @click="moveSection(si, -1)">
+                <el-icon><ArrowUp /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="下移" placement="top" :show-after="400">
+              <el-button size="small" text :disabled="si === sections.length - 1" data-test="toc-section-down" @click="moveSection(si, 1)">
+                <el-icon><ArrowDown /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="删除本节（节内页回落未分区）" placement="top" :show-after="400">
+              <el-button size="small" text type="danger" data-test="toc-section-remove" @click="removeSection(si)">
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </el-tooltip>
           </span>
         </header>
         <div v-for="key in sec.pageKeys" :key="key" class="wiki-toc-design__page" data-test="toc-section-page">
@@ -44,7 +56,9 @@
         <p v-if="sec.pageKeys.length === 0" class="wiki-toc-design__empty-sec">（空节——从下方未分区把页归入，或直接删除本节）</p>
       </section>
 
-      <el-button size="small" data-test="toc-add-section" @click="addSection">＋ 新增节</el-button>
+      <el-button size="small" plain class="wiki-toc-design__add" data-test="toc-add-section" @click="addSection">
+        <el-icon class="wiki-toc-design__add-icon"><Plus /></el-icon>新增节
+      </el-button>
 
       <section class="wiki-toc-design__unassigned" data-test="toc-unassigned">
         <h4 class="wiki-toc-design__unassigned-title">未分节（{{ unassignedPages.length }}）</h4>
@@ -69,6 +83,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { ArrowDown, ArrowUp, Delete, Plus } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
@@ -228,7 +243,11 @@ defineExpose({ reload: load })
   border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 6px; padding: 8px 10px;
 }
 .wiki-toc-design__section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.wiki-toc-design__section-ops { display: flex; flex-shrink: 0; }
+.wiki-toc-design__section-ops { display: flex; flex-shrink: 0; margin-left: auto; }
+.wiki-toc-design__section-ops .el-button + .el-button { margin-left: 0; }
+.wiki-toc-design__section-ops .el-button { padding: 5px 7px; }
+.wiki-toc-design__add { align-self: flex-start; }
+.wiki-toc-design__add-icon { margin-right: 4px; }
 .wiki-toc-design__page {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 3px 0; font-size: 13px;

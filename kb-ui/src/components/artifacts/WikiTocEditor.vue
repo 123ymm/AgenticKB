@@ -34,9 +34,9 @@
         :disabled="!canConfirm"
         data-test="wiki-toc-confirm"
         @click="confirm"
-      >确认目录开始写作（{{ pageCount }} 页）</el-button>
+      >确认目录，开始写作</el-button>
       <el-button v-if="canWrite" size="small" data-test="wiki-toc-cancel" @click="emit('cancel')">
-        放弃本次编译
+        放弃编译
       </el-button>
     </div>
   </div>
