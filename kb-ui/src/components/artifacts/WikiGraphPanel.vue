@@ -3,9 +3,7 @@
     <!-- 错误/混版态：非空白（EmptyState 文案 + 重试入口） -->
     <div v-if="errorText" class="wiki-graph__state" data-test="wiki-graph-error">
       <EmptyState :text="errorText" />
-      <button type="button" class="wiki-graph__retry" data-test="wiki-graph-retry" @click="reload">
-        重试
-      </button>
+      <el-button type="primary" data-test="wiki-graph-retry" @click="reload">重试</el-button>
     </div>
 
     <!-- 空态：0 页 Wiki（66号 D03.1 验收明文） -->
@@ -87,17 +85,17 @@
               <h4 :title="selectedNode.label">{{ selectedNode.label }}</h4>
             </div>
             <dl class="wiki-graph__detail-meta">
-              <div><dt>来源</dt><dd>{{ selectedNode.origin || '—' }}</dd></div>
+              <div><dt>来源</dt><dd :title="selectedNode.origin">{{ originLabel(selectedNode.origin) }}</dd></div>
               <div><dt>页键</dt><dd :title="selectedNode.id">{{ selectedNode.id }}</dd></div>
               <div><dt>出链</dt><dd>{{ selectedNode.outCount }}</dd></div>
               <div><dt>被引用</dt><dd>{{ selectedNode.inCount }}</dd></div>
             </dl>
-            <button
-              type="button"
+            <el-button
+              type="primary"
               class="wiki-graph__open"
               data-test="wiki-graph-open"
               @click="emit('open-page', selectedNode.id)"
-            >打开页面</button>
+            >打开页面</el-button>
           </template>
           <p v-else class="wiki-graph__detail-hint">点击节点查看页面详情</p>
         </aside>
@@ -294,21 +292,19 @@ function onNodeClick(event: { node: { id: string } }): void {
   selectedKey.value = node.id
 }
 
+/** 来源中文化（原值落 title 提示；与 Editor/Reader 面板同口径）。 */
+function originLabel(origin: string): string {
+  if (origin === 'manual') return '手工'
+  if (origin === 'machine') return '编译'
+  return origin || '—'
+}
+
 defineExpose({ reload })
 </script>
 
 <style scoped>
 .wiki-graph { display: flex; flex-direction: column; gap: 10px; min-height: 420px; }
 .wiki-graph__state { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.wiki-graph__retry {
-  border: 1px solid var(--kb-border, #dcdfe6);
-  border-radius: 6px;
-  background: var(--kb-bg-card, #fff);
-  padding: 6px 16px;
-  cursor: pointer;
-  font-size: 13px;
-}
-.wiki-graph__retry:hover { color: var(--kb-accent, #2563eb); border-color: var(--kb-accent, #2563eb); }
 .wiki-graph__toolbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .wiki-graph__search { width: min(260px, 60vw); }
 .wiki-graph__stats { margin-left: auto; color: var(--kb-text-tertiary, #909399); font-size: 12px; }
@@ -344,14 +340,23 @@ defineExpose({ reload })
   border-left: 4px solid var(--kb-accent, #2563eb);
   border-radius: 6px;
   background: var(--kb-bg-card, #fff);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
+  box-shadow: var(--kb-shadow-xs, 0 1px 2px rgba(0, 0, 0, .04));
   padding: 8px 10px;
   color: var(--kb-text-primary, #303133);
+  cursor: pointer;
+  transition: box-shadow .15s var(--kb-ease, ease), border-color .15s var(--kb-ease, ease);
+}
+.wiki-graph-node:hover {
+  border-color: var(--kb-accent, #2563eb);
+  box-shadow: var(--kb-shadow-hover, 0 4px 16px rgba(0, 0, 0, .08));
 }
 .wiki-graph-node.is-glossary { border-left-color: var(--el-color-success, #67c23a); }
 .wiki-graph-node.is-contradiction { border-left-color: var(--el-color-danger, #f56c6c); }
 .wiki-graph-node.is-open_question { border-left-color: var(--el-color-warning, #e6a23c); }
-.wiki-graph-node.is-selected { box-shadow: 0 0 0 3px var(--kb-accent-soft, #d9ecff); }
+.wiki-graph-node.is-selected {
+  border-color: var(--kb-accent, #2563eb);
+  box-shadow: 0 0 0 3px var(--kb-accent-medium, #d9ecff);
+}
 /* 断链伪节点：虚线边框 + 弱化（不伪装成有效页面） */
 .wiki-graph-node--broken .wiki-graph-node,
 .wiki-graph-node.is-broken {
@@ -394,18 +399,7 @@ defineExpose({ reload })
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.wiki-graph__open {
-  width: 100%;
-  margin-top: 12px;
-  border: 1px solid var(--kb-accent, #2563eb);
-  border-radius: 6px;
-  background: var(--kb-accent, #2563eb);
-  color: #fff;
-  padding: 7px 0;
-  cursor: pointer;
-  font-size: 13px;
-}
-.wiki-graph__open:hover { opacity: .88; }
+.wiki-graph__open { width: 100%; margin-top: 12px; }
 .wiki-graph__detail-hint { margin: 20px 0; color: var(--kb-text-tertiary, #909399); font-size: 12.5px; text-align: center; }
 :deep(.vue-flow__handle) { width: 7px; height: 7px; border: 2px solid var(--kb-bg-card, #fff); background: var(--kb-text-tertiary, #909399); }
 :deep(.vue-flow__controls) { border: 1px solid var(--kb-border, #dcdfe6); box-shadow: 0 1px 3px rgba(0, 0, 0, .1); }

@@ -230,7 +230,7 @@ describe('WikiGraphPanel', () => {
     const text = detail.text()
     expect(text).toContain('首页')
     expect(text).toContain('主题')     // 页型中文标记
-    expect(text).toContain('manual')   // origin 标记
+    expect(text).toContain('手工')     // origin 标记（manual 中文化）
     expect(text).toContain('3')        // 出链数
     expect(text).toContain('1')        // 被引用数
 
