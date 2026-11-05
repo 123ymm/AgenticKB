@@ -111,7 +111,7 @@ class _StubForward:
         self.calls: list[dict] = []
 
     async def search(self, *, artifact_ref: str, q: str, mode: str, top_k: int,
-                     domain: str, username: str) -> dict:
+                     domain: str, username: str, is_admin: bool = False) -> dict:
         self.calls.append({
             "artifact_ref": artifact_ref, "q": q, "mode": mode,
             "top_k": top_k, "domain": domain, "username": username,

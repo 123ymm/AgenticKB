@@ -70,7 +70,7 @@ def _client(transport: httpx.MockTransport) -> WikiSearchClient:
 # ------------------------------------------------------------ 转发契约
 
 async def test_search_forwards_params_and_auth_header():
-    """POST body 契约（is_admin=False/key_id=None）+ X-Internal-Auth 头 +
+    """POST body 契约（缺省 is_admin=False/key_id=None）+ X-Internal-Auth 头 +
     200 响应 dict 原样透传。"""
     sink: list[httpx.Request] = []
     transport = _capture(httpx.Response(200, json=HITS_PAYLOAD), sink)
@@ -94,6 +94,21 @@ async def test_search_forwards_params_and_auth_header():
         "is_admin": False,
         "key_id": None,
     }
+
+
+async def test_search_forwards_is_admin_true():
+    """is_admin=True 透传（冒烟修复契约：admin 旁路由调用方判定后传入，
+    serving selectVisibleArtifact 据此越过成员谓词）。"""
+    sink: list[httpx.Request] = []
+    transport = _capture(httpx.Response(200, json=HITS_PAYLOAD), sink)
+
+    await _client(transport).search(
+        "art_w1", "核心网", None, None, "cloud_core_network", "u-siteadmin",
+        is_admin=True)
+
+    body = json.loads(sink[0].read())
+    assert body["is_admin"] is True
+    assert body["key_id"] is None
 
 
 async def test_search_omits_optional_mode_top_k_when_none():

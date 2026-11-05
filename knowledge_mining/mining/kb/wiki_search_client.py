@@ -22,8 +22,10 @@ HTTP 状态 + 中文文案）：
 - httpx.TimeoutException → serving_timeout；其余网络异常（连接拒绝等）
   → serving_unavailable；200 非 JSON 体 → serving_error。
 
-web 会话用户按普通成员走 serving 成员谓词（is_admin=False / key_id=None
-——serving 侧统一 404 反探测，任务定稿口径）。模块级单例
+web 会话用户走 serving 成员谓词（key_id=None——serving 侧统一 404 反探测）；
+is_admin 由调用方（wiki_service.search）按 _assert_role 旁路口径透传——
+站点管理员无域绑定/非制品成员时 serving 成员谓词会误 404（冒烟实测缺陷），
+对齐 serving selectVisibleArtifact 的 admin 旁路。模块级单例
 （get_client——httpx.AsyncClient 连接池跨请求复用，避免每请求新建泄漏）；
 测试以 transport= 注入 httpx.MockTransport 桩 serving，不碰网络。
 """
@@ -88,6 +90,7 @@ class WikiSearchClient:
         domain: str,
         username: str,
         *,
+        is_admin: bool = False,
         timeout: float = 15.0,
     ) -> dict[str, Any]:
         """转发三通道检索：成功 → serving 响应 dict 原样透传；失败 → WikiError。"""
@@ -99,7 +102,7 @@ class WikiSearchClient:
             "q": q,
             "domain": domain,
             "username": username,
-            "is_admin": False,
+            "is_admin": is_admin,
             "key_id": None,
         }
         if mode is not None:

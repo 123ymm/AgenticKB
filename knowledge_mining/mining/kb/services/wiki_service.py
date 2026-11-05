@@ -758,13 +758,18 @@ class WikiService:
         （dense ANN/keyword/fusion，业务整段在 Java 侧）响应原样透传。
 
         domain 取 _assert_role 返回的制品行 domain_id（零额外查询）；
-        username 取会话用户名（serving 按普通成员谓词复核——is_admin/key_id
-        由转发客户端定死 False/None，任务定稿口径）；不做缓存（MVP）。
+        username 取会话用户名（serving 复核成员谓词——key_id 由转发客户端
+        定死 None）；is_admin 按 _assert_role 旁路口径透传（返回角色
+        admin/domain_admin → True）：站点管理员无域绑定/非制品成员时
+        serving 成员谓词会误 404（批次6 冒烟实测缺陷），对齐 serving
+        selectVisibleArtifact 的 admin 旁路；domain_admin 仅在其已通过
+        mining 侧域管理员判定的制品域上放行（payload domain=制品自身域，
+        不越权）。不做缓存（MVP）。
         """
         if not isinstance(q, str) or not q.strip():
             # 与 serving isBlank 校验同口径提前拦（省一次网络往返）→ 422
             raise WikiError("invalid_query")
-        artifact, _ = await self._artifacts._assert_role(
+        artifact, role = await self._artifacts._assert_role(
             user, artifact_id, *ROLE_RUNTIME_READ)
         if forward is None:
             # 防御：deps 装配恒注入转发客户端；旧式直造 WikiService 的调用方
@@ -777,6 +782,7 @@ class WikiService:
             top_k=top_k,
             domain=str(artifact["domain_id"]),
             username=str(user.get("username") or _uid(user)),
+            is_admin=role in ("admin", "domain_admin"),
         )
 
     # ------------------------------------------- Q01 回原文（66号批次5 Task 5.2）

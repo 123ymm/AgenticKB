@@ -425,10 +425,12 @@ class FakeForward:
 
     async def search(self, *, artifact_ref: str, q: str, mode: str,
                      top_k: int, domain: str, username: str,
+                     is_admin: bool = False,
                      timeout: float = 15.0) -> dict:
         self.calls.append({
             "artifact_ref": artifact_ref, "q": q, "mode": mode,
             "top_k": top_k, "domain": domain, "username": username,
+            "is_admin": is_admin,
         })
         if self._error is not None:
             raise self._error
@@ -450,7 +452,7 @@ def _search_payload() -> dict:
 
 async def test_search_viewer_passthrough_and_forward_body(env):
     """viewer（runtime read）可搜：转发 body 的 domain=制品行 domain_id /
-    username=会话用户名（is_admin/key_id 由真实客户端定死，路由测试桩不含）；
+    username=会话用户名 / is_admin=False（普通成员走 serving 成员谓词）；
     serving 响应原样透传。"""
     fake = FakeForward(response=_search_payload())
     env.app.dependency_overrides[get_wiki_search_client] = lambda: fake
@@ -473,10 +475,36 @@ async def test_search_viewer_passthrough_and_forward_body(env):
     # （Task 1.6 实施中协议核实的存量缺陷，防再犯）。
     assert fake.calls == [
         {"artifact_ref": f"art_{WID}", "q": "核心网", "mode": "dense",
-         "top_k": 5, "domain": DOMAIN, "username": "u-viewer"},
+         "top_k": 5, "domain": DOMAIN, "username": "u-viewer",
+         "is_admin": False},
         {"artifact_ref": f"art_{WID}", "q": "核心网", "mode": "fusion",
-         "top_k": 10, "domain": DOMAIN, "username": "u-viewer"},
+         "top_k": 10, "domain": DOMAIN, "username": "u-viewer",
+         "is_admin": False},
     ]
+
+
+async def test_search_admin_bypass_forwards_is_admin_true(env):
+    """冒烟修复契约：站点管理员（无域绑定/非制品成员）经 _assert_role admin
+    旁路放行，转发 payload is_admin=True——否则 serving selectVisibleArtifact
+    成员谓词误 404（artifact_not_found）。域管理员（非制品成员）同口径透传。"""
+    fake = FakeForward(response=_search_payload())
+    env.app.dependency_overrides[get_wiki_search_client] = lambda: fake
+
+    # 站点管理员：不在 members、不在 domain_bindings——修复前即冒烟 404 场景
+    env.holder["user"] = _user("u-siteadmin", site_role="admin")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": "核心网"})
+    assert r.status_code == 200, r.text
+    assert fake.calls[-1]["is_admin"] is True
+    assert fake.calls[-1]["username"] == "u-siteadmin"
+
+    # 域管理员（本域、非制品成员）：_assert_role 旁路同样放行 → True
+    env.adb.domain_admins.add(("u-domadmin", DOMAIN))
+    env.holder["user"] = _user("u-domadmin")
+    r = await env.client.get(f"/api/artifacts/{WID}/wiki/search",
+                             params={"q": "核心网"})
+    assert r.status_code == 200, r.text
+    assert fake.calls[-1]["is_admin"] is True
 
 
 async def test_search_non_member_404_no_forward(env):
