@@ -30,7 +30,7 @@
     </div>
 
     <el-table v-loading="loading" :data="filteredArtifacts">
-      <el-table-column prop="title" label="标题" min-width="200">
+      <el-table-column prop="title" label="标题" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">
           <button class="artifact-list__link" type="button" @click="open(row.artifact_id)">{{ row.title }}</button>
         </template>
@@ -52,19 +52,14 @@
           <el-tag size="small" :type="statusTagType(row.status)">{{ statusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="当前版本" width="100">
+      <el-table-column label="当前版本" width="100" align="center">
         <template #default="{ row }">{{ row.current_revision ? `r${row.current_revision}` : '未发布' }}</template>
       </el-table-column>
-      <el-table-column label="我的角色" width="100">
+      <el-table-column label="我的角色" width="100" align="center">
         <template #default="{ row }">{{ row.my_role ? roleLabel(row.my_role) : '—' }}</template>
       </el-table-column>
-      <el-table-column label="更新时间" width="170">
+      <el-table-column label="更新时间" width="160">
         <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="120" fixed="right">
-        <template #default="{ row }">
-          <el-button size="small" text type="primary" @click="open(row.artifact_id)">进入详情</el-button>
-        </template>
       </el-table-column>
       <template #empty>
         <EmptyState :text="emptyText" />

@@ -11,7 +11,7 @@
           >当前</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="row_count" :label="countColumnLabel" width="90" />
+      <el-table-column prop="row_count" :label="countColumnLabel" width="90" align="right" />
       <el-table-column prop="change_summary" label="变更摘要" min-width="200" show-overflow-tooltip />
       <el-table-column prop="published_by" label="发布人" width="140" />
       <el-table-column label="发布时间" width="170">

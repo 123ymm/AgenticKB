@@ -53,7 +53,7 @@
       </el-table-column>
       <el-table-column label="枚举值" min-width="220">
         <template #default="{ row }">
-          <template v-if="row.column_type === 'enum'">
+          <div v-if="row.column_type === 'enum'" class="schema-panel__enum">
             <el-tag
               v-for="v in row.enum_values ?? []"
               :key="String(v)"
@@ -66,12 +66,12 @@
               v-if="canWrite && row.status === 'active'"
               v-model="enumInputs[row.column_id]"
               size="small"
-              style="width: 120px"
+              class="schema-panel__enum-input"
               placeholder="+ 回车追加"
               @keyup.enter="addEnumValue(row)"
             />
             <span v-if="!(row.enum_values ?? []).length" class="schema-panel__muted">（未定义）</span>
-          </template>
+          </div>
           <span v-else class="schema-panel__muted">—</span>
         </template>
       </el-table-column>
@@ -413,6 +413,8 @@ defineExpose({ openAdd, submitAdd, openEdit, submitEdit, submitPk, dropColumn })
 .schema-panel__col-name { font-weight: 600; cursor: default; }
 .schema-panel__alias { margin-left: 6px; }
 .schema-panel__muted { color: var(--kb-text-tertiary); }
+.schema-panel__enum { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.schema-panel__enum-input { width: 120px; }
 .schema-panel__dropped-text { font-size: 12px; color: var(--el-color-danger, #f56c6c); }
 .schema-panel__pk-hint { font-size: 12.5px; color: var(--kb-text-tertiary); margin: 0 0 8px; }
 /* 已删行弱化（scoped 下 el-table 行类需要 :deep） */
