@@ -67,6 +67,7 @@ class GenerationClient(Protocol):
         expected_output_type: str = "text",
         idempotency_key: str | None = None,
         pipeline_stage: str = "mining_enrichment",
+        knowledge_domain: str | None = None,
     ) -> Any: ...
 
 
@@ -95,10 +96,11 @@ class LLMServiceGenerationClient:
         expected_output_type: str = "text",
         idempotency_key: str | None = None,
         pipeline_stage: str = "mining_enrichment",
+        knowledge_domain: str | None = None,
     ) -> Any:
         payload: dict[str, Any] = {
             "caller_service": "mining",
-            "knowledge_domain": self._knowledge_domain or "unknown",
+            "knowledge_domain": knowledge_domain or self._knowledge_domain or "unknown",
             "pipeline_stage": pipeline_stage,
             "messages": messages,
             "expected_output_type": expected_output_type,
@@ -201,6 +203,7 @@ class LLMServiceAsyncGenerationClient:
         expected_output_type: str = "text",
         idempotency_key: str | None = None,
         pipeline_stage: str = "mining_enrichment",
+        knowledge_domain: str | None = None,
     ) -> Any:
         try:
             task_id = self._client.submit_chat(
@@ -209,7 +212,7 @@ class LLMServiceAsyncGenerationClient:
                 idempotency_key=idempotency_key,
                 pipeline_stage=pipeline_stage,
                 max_attempts=self._max_attempts,
-                knowledge_domain=self._knowledge_domain,
+                knowledge_domain=knowledge_domain or self._knowledge_domain,
             )
         except LlmTaskError as e:
             raise RuntimeError(f"llm_service task submit failed: {e}") from e

@@ -375,8 +375,8 @@ class CompileService:
                  "content": "\n".join(payload["clusters"]) + note},
             ]
             try:
-                raw = await asyncio.to_thread(
-                    self._gen.execute, messages,
+                raw = await self._generate(
+                    artifact_id, messages,
                     expected_output_type="json_object",
                     idempotency_key=idem, pipeline_stage="wiki_compile",
                 )
@@ -699,8 +699,8 @@ class CompileService:
         )
         idem = _generation_key(
             "wiki-page", PAGE_PROMPT_VERSION, "text", payload)
-        return str(await asyncio.to_thread(
-            self._gen.execute,
+        return str(await self._generate(
+            artifact_id,
             [{"role": "system", "content": system},
              {"role": "user", "content": user_content}],
             expected_output_type="text",
@@ -722,8 +722,8 @@ class CompileService:
         idem = _generation_key(
             "wiki-quality", QUALITY_PROMPT_VERSION, "json_object", payload)
         try:
-            raw = await asyncio.to_thread(
-                self._gen.execute,
+            raw = await self._generate(
+                artifact_id,
                 [{"role": "system", "content": QUALITY_SYSTEM},
                  {"role": "user",
                   "content": "已写页清单：\n"
@@ -748,6 +748,22 @@ class CompileService:
         }
 
     # ------------------------------------------------------ 内部共用
+
+    async def _generate(self, artifact_id: str, messages: list[dict[str, str]],
+                        **kwargs: Any) -> Any:
+        """从制品权威记录取域；逐调用传入，禁止修改共享客户端的默认域。"""
+        artifact = await self._wiki._artifacts._db.get_artifact(artifact_id)
+        domain = str((artifact or {}).get("domain_id") or "").strip()
+        if not domain:
+            raise WikiError("compile_domain_missing")
+        original_key = kwargs["idempotency_key"]
+        kwargs["idempotency_key"] = _generation_key(
+            original_key.split(":", 1)[0], "wiki-domain-1",
+            kwargs["expected_output_type"],
+            {"knowledge_domain": domain, "generation_key": original_key},
+        )
+        return await asyncio.to_thread(
+            self._gen.execute, messages, knowledge_domain=domain, **kwargs)
 
     async def _gate(
         self, user: dict[str, Any], artifact_id: str,

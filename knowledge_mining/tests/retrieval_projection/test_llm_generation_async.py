@@ -220,3 +220,15 @@ def test_question_key_covers_prompt_version(monkeypatch):
     monkeypatch.setattr(mod, "QUESTION_PROMPT_VERSION", "qe-doc2query-2")
     keys_b = run_question()
     assert keys_a[0] != keys_b[0], "question prompt 版本变化未反映进幂等键"
+
+
+def test_per_call_domain_does_not_mutate_shared_client_default():
+    fake = _FakeLlm(result=_result(text="ok"))
+    client = fake.client(knowledge_domain="default")
+    try:
+        for domain in ("domain_a", "domain_b", None):
+            client.execute([], knowledge_domain=domain)
+    finally:
+        client.close()
+    assert [s["knowledge_domain"] for s in fake.submits] == [
+        "domain_a", "domain_b", "default"]
