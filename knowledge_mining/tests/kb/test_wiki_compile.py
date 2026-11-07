@@ -835,7 +835,7 @@ async def test_start_stale_token_409(env):
 
 # ------------------------------------------------------------ TOC 生成
 
-async def test_toc_over_limit_retries_once(env):
+async def test_toc_over_limit_retries_once(env, caplog):
     """TOC 首版 201 页超限 → 带压缩注记重发一次 → 采用第二版；两次调用幂等键
     不同（payload 含注记）。"""
     titles = ["页A", "页B"]
@@ -853,13 +853,14 @@ async def test_toc_over_limit_retries_once(env):
     assert len(env.gen.calls) >= 2
     assert env.gen.calls[0]["idempotency_key"] != \
         env.gen.calls[1]["idempotency_key"]
+    assert "pages=201 limit=200" in caplog.text
     # 重发版带压缩注记
     assert "压缩" in env.gen.calls[1]["messages"][1]["content"]
     assert env.gen.calls[0]["expected_output_type"] == "json_object"
     assert env.gen.calls[0]["idempotency_key"].startswith("wiki-toc:")
 
 
-async def test_toc_parse_failure_retry_then_failed(env):
+async def test_toc_parse_failure_retry_then_failed(env, caplog):
     """TOC 两次解析失败 → state=failed（error=toc_generation_failed）。"""
     _seed_corpus(env)
     await _bind_all(env)
@@ -868,6 +869,9 @@ async def test_toc_parse_failure_retry_then_failed(env):
     await _start(env)
     batch = await _wait_state(env, "failed")
     assert _details(batch)["error"] == "toc_generation_failed"
+    assert "json parse failed again" in caplog.text
+    assert "attempt=2/2" in caplog.text
+    assert "elapsed_ms=" in caplog.text
 
 
 async def test_toc_retry_recovers_from_parse_failure(env):
@@ -1762,3 +1766,15 @@ async def test_generation_missing_domain_does_not_submit(env):
     with pytest.raises(WikiError, match="compile_domain_missing"):
         await env.compile_svc._generate(WID, [])
     assert env.gen.calls == []
+
+
+async def test_toc_invalid_shape_logs_field_path(env, caplog):
+    _seed_corpus(env)
+    await _bind_all(env)
+    env.gen.queue = [{"toc": [{"section_title": "节", "page_hints": [{}]}]}] * 2
+    await _start(env)
+    batch = await _wait_state(env, "failed")
+    assert _details(batch)["error"] == "toc_generation_failed"
+    assert "toc[0].page_hints[0].title: required" in caplog.text
+    assert "attempt=2/2" in caplog.text
+    assert WID in caplog.text

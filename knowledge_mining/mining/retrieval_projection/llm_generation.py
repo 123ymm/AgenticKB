@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
@@ -205,27 +206,55 @@ class LLMServiceAsyncGenerationClient:
         pipeline_stage: str = "mining_enrichment",
         knowledge_domain: str | None = None,
     ) -> Any:
+        started = time.monotonic()
+        task_id: str | None = None
         try:
-            task_id = self._client.submit_chat(
-                messages,
-                expected_output_type=expected_output_type,
-                idempotency_key=idempotency_key,
-                pipeline_stage=pipeline_stage,
-                max_attempts=self._max_attempts,
-                knowledge_domain=knowledge_domain or self._knowledge_domain,
-            )
-        except LlmTaskError as e:
-            raise RuntimeError(f"llm_service task submit failed: {e}") from e
+            try:
+                task_id = self._client.submit_chat(
+                    messages,
+                    expected_output_type=expected_output_type,
+                    idempotency_key=idempotency_key,
+                    pipeline_stage=pipeline_stage,
+                    max_attempts=self._max_attempts,
+                    knowledge_domain=knowledge_domain or self._knowledge_domain,
+                )
+            except LlmTaskError as e:
+                raise RuntimeError(f"llm_service task submit failed: {e}") from e
 
-        entries = self._client.wait_for_tasks([task_id])
-        entry = entries.get(task_id) or {"task_id": task_id, "status": "timeout"}
-        status = str(entry.get("status"))
-        if status != "succeeded":
-            err = entry.get("error") or {}
-            raise RuntimeError(
-                f"llm_service task {task_id} ended as {status}: "
-                f"{err.get('error_type')}: {err.get('error_message')}"
+            logger.info(
+                "LLM 任务已提交 task_id=%s stage=%s domain=%s generation_key=%s",
+                task_id, pipeline_stage, knowledge_domain or self._knowledge_domain,
+                idempotency_key,
             )
+            entries = self._client.wait_for_tasks([task_id])
+            entry = entries.get(task_id) or {"task_id": task_id, "status": "timeout"}
+            status = str(entry.get("status"))
+            if status != "succeeded":
+                err = entry.get("error") or {}
+                raise RuntimeError(
+                    f"llm_service task {task_id} ended as {status}: "
+                    f"{err.get('error_type')}: {err.get('error_message')}"
+                )
+            result = self._parse_result(entry, task_id, expected_output_type)
+            logger.info(
+                "LLM 任务完成 task_id=%s stage=%s domain=%s generation_key=%s elapsed_ms=%.1f",
+                task_id, pipeline_stage, knowledge_domain or self._knowledge_domain,
+                idempotency_key, (time.monotonic() - started) * 1000,
+            )
+            return result
+        except Exception as exc:
+            logger.exception(
+                "LLM 任务失败 task_id=%s stage=%s domain=%s generation_key=%s "
+                "elapsed_ms=%.1f error_type=%s reason=%s",
+                task_id or "not_submitted", pipeline_stage,
+                knowledge_domain or self._knowledge_domain, idempotency_key,
+                (time.monotonic() - started) * 1000, type(exc).__name__, exc,
+            )
+            raise
+
+    @staticmethod
+    def _parse_result(entry: dict[str, Any], task_id: str,
+                      expected_output_type: str) -> Any:
         payload_result = entry.get("result") or {}
         if expected_output_type in ("json_object", "json_array"):
             parsed = payload_result.get("parsed_output")
@@ -236,11 +265,20 @@ class LLMServiceAsyncGenerationClient:
             if isinstance(text, str):
                 match = _JSON_OBJECT_RE.search(text)
                 if match:
-                    return json.loads(match.group(0))
-            raise RuntimeError("llm_service task: json parse failed")
+                    try:
+                        return json.loads(match.group(0))
+                    except ValueError as exc:
+                        raise RuntimeError(
+                            f"llm_service task {task_id}: json parse failed: {exc}"
+                        ) from exc
+            raise RuntimeError(
+                f"llm_service task {task_id}: json parse failed; "
+                f"parse_status={payload_result.get('parse_status')}; "
+                f"parse_error={payload_result.get('parse_error')}"
+            )
         text = payload_result.get("text_output")
         if not isinstance(text, str) or not text.strip():
-            raise RuntimeError("llm_service task returned empty output")
+            raise RuntimeError(f"llm_service task {task_id} returned empty output")
         return text
 
 

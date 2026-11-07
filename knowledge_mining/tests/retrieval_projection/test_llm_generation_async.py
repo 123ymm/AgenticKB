@@ -232,3 +232,55 @@ def test_per_call_domain_does_not_mutate_shared_client_default():
         client.close()
     assert [s["knowledge_domain"] for s in fake.submits] == [
         "domain_a", "domain_b", "default"]
+
+
+def test_task_success_logs_id_duration_and_correlation(caplog):
+    caplog.set_level("INFO")
+    fake = _FakeLlm(result=_result(text="ok"))
+    client = fake.client()
+    try:
+        assert client.execute([], pipeline_stage="wiki_compile",
+                              knowledge_domain="cloud_core_network",
+                              idempotency_key="wiki-toc:key") == "ok"
+    finally:
+        client.close()
+    assert "LLM 任务已提交 task_id=task-1" in caplog.text
+    assert "LLM 任务完成 task_id=task-1" in caplog.text
+    assert "elapsed_ms=" in caplog.text
+    assert "generation_key=wiki-toc:key" in caplog.text
+    assert "domain=cloud_core_network" in caplog.text
+
+
+@pytest.mark.parametrize("status, result, reason", [
+    ("failed", {}, "rate_limited: 429"),
+    ("timeout", {}, "wait_timeout"),
+    ("succeeded", _result(text="{broken}"), "json parse failed"),
+    ("succeeded", _result(text="no json"), "json parse failed"),
+])
+def test_task_failure_logs_original_reason_and_id(caplog, status, result, reason):
+    fake = _FakeLlm(status=status, result=result)
+    client = fake.client()
+    try:
+        with pytest.raises(RuntimeError):
+            client.execute([], expected_output_type="json_object")
+    finally:
+        client.close()
+    assert "LLM 任务失败 task_id=task-1" in caplog.text
+    assert "elapsed_ms=" in caplog.text
+    assert reason in caplog.text
+    assert any(r.exc_info for r in caplog.records)
+
+
+def test_submit_failure_logs_without_task_id(caplog):
+    def handler(request):
+        return httpx.Response(503, text="unavailable")
+    client = LLMServiceAsyncGenerationClient(
+        base_url="http://fake", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(RuntimeError, match="submit failed"):
+            client.execute([])
+    finally:
+        client.close()
+    assert "task_id=not_submitted" in caplog.text
+    assert "elapsed_ms=" in caplog.text
+    assert "503" in caplog.text
