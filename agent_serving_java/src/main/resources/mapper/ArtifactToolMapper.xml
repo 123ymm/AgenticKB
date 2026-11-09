@@ -94,12 +94,16 @@
           AND a.domain_id = #{domain}
           AND (
                 #{isAdmin}
+                OR (#{keyId} IS NOT NULL AND u.site_role = 'admin')
                 OR (u.id IS NOT NULL
                     AND EXISTS (SELECT 1 FROM user_domains ud
                                 WHERE ud.user_id = u.id
                                   AND ud.domain = a.domain_id)
                     AND (m.role IS NOT NULL OR a.owner_user_id = u.id
-                         OR a.visibility = 'public'))
+                         OR a.visibility = 'public'
+                         OR EXISTS (SELECT 1 FROM user_domains ud
+                                    WHERE ud.user_id = u.id AND ud.domain = a.domain_id
+                                      AND ud.domain_role = 'admin')))
           )
         <if test="keyId != null">
           AND EXISTS (SELECT 1 FROM mcp_key_open_artifacts oa
@@ -369,12 +373,16 @@
           AND a.domain_id = #{domain}
           AND (
                 #{isAdmin}
+                OR (#{keyId} IS NOT NULL AND u.site_role = 'admin')
                 OR (u.id IS NOT NULL
                     AND EXISTS (SELECT 1 FROM user_domains ud
                                 WHERE ud.user_id = u.id
                                   AND ud.domain = a.domain_id)
                     AND (m.role IS NOT NULL OR a.owner_user_id = u.id
-                         OR a.visibility = 'public'))
+                         OR a.visibility = 'public'
+                         OR EXISTS (SELECT 1 FROM user_domains ud
+                                    WHERE ud.user_id = u.id AND ud.domain = a.domain_id
+                                      AND ud.domain_role = 'admin')))
           )
         <if test="keyId != null">
             AND EXISTS (SELECT 1 FROM mcp_key_open_artifacts oa

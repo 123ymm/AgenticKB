@@ -94,9 +94,11 @@ class FakeGenerationClient:
         self._gate.set()
 
     def execute(self, messages, *, expected_output_type: str = "text",
-                idempotency_key=None, pipeline_stage: str = "mining_enrichment"):
+                idempotency_key=None, pipeline_stage: str = "mining_enrichment",
+                knowledge_domain=None):
         self.calls.append({
             "messages": [dict(m) for m in messages],
+            "knowledge_domain": knowledge_domain,
             "expected_output_type": expected_output_type,
             "idempotency_key": idempotency_key,
             "pipeline_stage": pipeline_stage,
@@ -539,6 +541,8 @@ async def test_full_state_machine_happy_path(env):
     det = _details(batch)
     assert det["state"] == "completed"
     assert det["stats"]["pages_written"] == 3
+    assert len(env.gen.calls) == 5
+    assert all(c["knowledge_domain"] == DOMAIN for c in env.gen.calls)
     assert det["stats"]["failed_pages"] == 0
     assert det["stats"]["conflicts_n"] == 0
     assert det["stats"]["broken_links"] >= 1      # [[不存在页]] 断链入账
@@ -831,7 +835,7 @@ async def test_start_stale_token_409(env):
 
 # ------------------------------------------------------------ TOC 生成
 
-async def test_toc_over_limit_retries_once(env):
+async def test_toc_over_limit_retries_once(env, caplog):
     """TOC 首版 201 页超限 → 带压缩注记重发一次 → 采用第二版；两次调用幂等键
     不同（payload 含注记）。"""
     titles = ["页A", "页B"]
@@ -849,13 +853,14 @@ async def test_toc_over_limit_retries_once(env):
     assert len(env.gen.calls) >= 2
     assert env.gen.calls[0]["idempotency_key"] != \
         env.gen.calls[1]["idempotency_key"]
+    assert "pages=201 limit=200" in caplog.text
     # 重发版带压缩注记
     assert "压缩" in env.gen.calls[1]["messages"][1]["content"]
     assert env.gen.calls[0]["expected_output_type"] == "json_object"
     assert env.gen.calls[0]["idempotency_key"].startswith("wiki-toc:")
 
 
-async def test_toc_parse_failure_retry_then_failed(env):
+async def test_toc_parse_failure_retry_then_failed(env, caplog):
     """TOC 两次解析失败 → state=failed（error=toc_generation_failed）。"""
     _seed_corpus(env)
     await _bind_all(env)
@@ -864,6 +869,9 @@ async def test_toc_parse_failure_retry_then_failed(env):
     await _start(env)
     batch = await _wait_state(env, "failed")
     assert _details(batch)["error"] == "toc_generation_failed"
+    assert "json parse failed again" in caplog.text
+    assert "attempt=2/2" in caplog.text
+    assert "elapsed_ms=" in caplog.text
 
 
 async def test_toc_retry_recovers_from_parse_failure(env):
@@ -1736,3 +1744,37 @@ async def test_viewer_cannot_start_compile(env):
     r = await env.client.post(f"/api/artifacts/{WID}/wiki/compile/cancel",
                               json={})
     assert r.status_code == 403
+
+
+async def test_generation_domain_is_per_artifact(env):
+    """同一个服务交错调用不同域，域和幂等键都按制品隔离。"""
+    env.gen.queue = ["ok", "ok", "ok"]
+    env.adb.artifacts["other"] = {"artifact_id": "other", "domain_id": "other_domain"}
+    kwargs = {"expected_output_type": "text", "idempotency_key": "wiki-page:same",
+              "pipeline_stage": "wiki_compile"}
+    await env.compile_svc._generate(WID, [], **kwargs)
+    await env.compile_svc._generate("other", [], **kwargs)
+    await env.compile_svc._generate(WID, [], **kwargs)
+    calls = env.gen.calls
+    assert [c["knowledge_domain"] for c in calls] == [DOMAIN, "other_domain", DOMAIN]
+    assert calls[0]["idempotency_key"] == calls[2]["idempotency_key"]
+    assert calls[0]["idempotency_key"] != calls[1]["idempotency_key"]
+
+
+async def test_generation_missing_domain_does_not_submit(env):
+    env.adb.artifacts[WID]["domain_id"] = ""
+    with pytest.raises(WikiError, match="compile_domain_missing"):
+        await env.compile_svc._generate(WID, [])
+    assert env.gen.calls == []
+
+
+async def test_toc_invalid_shape_logs_field_path(env, caplog):
+    _seed_corpus(env)
+    await _bind_all(env)
+    env.gen.queue = [{"toc": [{"section_title": "节", "page_hints": [{}]}]}] * 2
+    await _start(env)
+    batch = await _wait_state(env, "failed")
+    assert _details(batch)["error"] == "toc_generation_failed"
+    assert "toc[0].page_hints[0].title: required" in caplog.text
+    assert "attempt=2/2" in caplog.text
+    assert WID in caplog.text

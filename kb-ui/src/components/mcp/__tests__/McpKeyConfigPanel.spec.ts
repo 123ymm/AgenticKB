@@ -219,6 +219,17 @@ describe('McpKeyConfigPanel', () => {
     expect(api.putMcpKeyOpenArtifacts).toHaveBeenCalledWith('key-1', ['art-a', 'art-b'])
     expect(wrapper.vm.selectedArtifacts).toEqual(['art-a'])
     expect(wrapper.vm.artifactsDirty).toBe(false)
-    expect(ui.success).toHaveBeenCalled()
+    expect(ui.success).not.toHaveBeenCalled()
+    expect(ui.warning).toHaveBeenCalledWith(expect.stringContaining('MOP 责任域'))
+  })
+
+  it('开放制品全部保存后提示成功', async () => {
+    const wrapper = mountPanel(KEY, [], [{ artifact_id: 'art-a', title: '电源', status: 'published' }])
+    await flushPromises()
+    wrapper.vm.selectedArtifacts = ['art-a']
+    api.putMcpKeyOpenArtifacts.mockResolvedValue({ open_artifact_ids: ['art-a'] })
+    await wrapper.vm.saveOpenArtifacts()
+    expect(ui.success).toHaveBeenCalledWith('开放制品已更新')
+    expect(ui.warning).not.toHaveBeenCalled()
   })
 })

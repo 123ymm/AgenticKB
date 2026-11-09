@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,6 +53,7 @@ from knowledge_mining.mining.kb.services.wiki_compile_pages import (
     tags_from_label,
     toc_digest_text,
     toc_page_count,
+    toc_validation_error,
     validate_pages_for_publish,
     write_derived_pages,
     write_machine_page,
@@ -375,20 +377,30 @@ class CompileService:
                  "content": "\n".join(payload["clusters"]) + note},
             ]
             try:
-                raw = await asyncio.to_thread(
-                    self._gen.execute, messages,
+                raw = await self._generate(
+                    artifact_id, messages,
                     expected_output_type="json_object",
                     idempotency_key=idem, pipeline_stage="wiki_compile",
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "wiki TOC 生成调用失败（attempt=%s/2）artifact=%s",
-                    attempt + 1, artifact_id)
-                raw = None
+                    "wiki TOC 生成调用失败 attempt=%s/2 artifact=%s reason=%s",
+                    attempt + 1, artifact_id, exc, exc_info=True)
+                continue
+            reason = toc_validation_error(raw)
+            if reason is not None:
+                logger.warning(
+                    "wiki TOC 结构校验失败 attempt=%s/2 artifact=%s reason=%s",
+                    attempt + 1, artifact_id, reason)
+                continue
             parsed = normalize_toc(raw)
-            if parsed is not None \
-                    and toc_page_count(parsed["toc"]) <= MAX_PAGES:
-                return parsed
+            page_count = toc_page_count(parsed["toc"])
+            if page_count > MAX_PAGES:
+                logger.warning(
+                    "wiki TOC 页数超限 attempt=%s/2 artifact=%s pages=%s limit=%s",
+                    attempt + 1, artifact_id, page_count, MAX_PAGES)
+                continue
+            return parsed
         return None
 
     @staticmethod
@@ -699,8 +711,8 @@ class CompileService:
         )
         idem = _generation_key(
             "wiki-page", PAGE_PROMPT_VERSION, "text", payload)
-        return str(await asyncio.to_thread(
-            self._gen.execute,
+        return str(await self._generate(
+            artifact_id,
             [{"role": "system", "content": system},
              {"role": "user", "content": user_content}],
             expected_output_type="text",
@@ -722,8 +734,8 @@ class CompileService:
         idem = _generation_key(
             "wiki-quality", QUALITY_PROMPT_VERSION, "json_object", payload)
         try:
-            raw = await asyncio.to_thread(
-                self._gen.execute,
+            raw = await self._generate(
+                artifact_id,
                 [{"role": "system", "content": QUALITY_SYSTEM},
                  {"role": "user",
                   "content": "已写页清单：\n"
@@ -748,6 +760,38 @@ class CompileService:
         }
 
     # ------------------------------------------------------ 内部共用
+
+    async def _generate(self, artifact_id: str, messages: list[dict[str, str]],
+                        **kwargs: Any) -> Any:
+        """从制品权威记录取域；逐调用传入，禁止修改共享客户端的默认域。"""
+        artifact = await self._wiki._artifacts._db.get_artifact(artifact_id)
+        domain = str((artifact or {}).get("domain_id") or "").strip()
+        if not domain:
+            raise WikiError("compile_domain_missing")
+        original_key = kwargs["idempotency_key"]
+        kwargs["idempotency_key"] = _generation_key(
+            original_key.split(":", 1)[0], "wiki-domain-1",
+            kwargs["expected_output_type"],
+            {"knowledge_domain": domain, "generation_key": original_key},
+        )
+        started = time.monotonic()
+        key = kwargs["idempotency_key"]
+        logger.info("wiki 模型调用开始 artifact=%s domain=%s generation_key=%s",
+                    artifact_id, domain, key)
+        try:
+            result = await asyncio.to_thread(
+                self._gen.execute, messages, knowledge_domain=domain, **kwargs)
+        except Exception as exc:
+            logger.exception(
+                "wiki 模型调用失败 artifact=%s domain=%s generation_key=%s "
+                "elapsed_ms=%.1f error_type=%s reason=%s",
+                artifact_id, domain, key, (time.monotonic() - started) * 1000,
+                type(exc).__name__, exc)
+            raise
+        logger.info(
+            "wiki 模型调用完成 artifact=%s domain=%s generation_key=%s elapsed_ms=%.1f",
+            artifact_id, domain, key, (time.monotonic() - started) * 1000)
+        return result
 
     async def _gate(
         self, user: dict[str, Any], artifact_id: str,

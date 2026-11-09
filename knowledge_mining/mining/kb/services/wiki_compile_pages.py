@@ -57,31 +57,44 @@ def density_streak(body_md: str) -> bool:
     return False
 
 
+def toc_validation_error(obj: Any) -> str | None:
+    """返回目录结构错误的字段路径，不记录模型输出全文。"""
+    if not isinstance(obj, dict):
+        return "root: expected object"
+    toc = obj.get("toc")
+    if not isinstance(toc, list) or not toc:
+        return "toc: expected non-empty list"
+    for i, sec in enumerate(toc):
+        path = f"toc[{i}]"
+        if not isinstance(sec, dict):
+            return f"{path}: expected object"
+        if not str(sec.get("section_title") or "").strip():
+            return f"{path}.section_title: required"
+        hints = sec.get("page_hints")
+        if not isinstance(hints, list):
+            return f"{path}.page_hints: expected list"
+        for j, hint in enumerate(hints):
+            hint_path = f"{path}.page_hints[{j}]"
+            if not isinstance(hint, dict):
+                return f"{hint_path}: expected object"
+            if not str(hint.get("title") or "").strip():
+                return f"{hint_path}.title: required"
+    return None
+
+
 def normalize_toc(obj: Any) -> dict[str, Any] | None:
     """LLM 输出 / 用户编辑版 toc 的形状归一：``{"toc": [{section_title,
     page_hints: [{title, cluster_ids, page_type}]}], "glossary": [...],
     "open_questions": [...]}``；任一刚性形状不符 → None（调用方走重试/422）。
     page_type 恒收窄 topic（目录页提示不支持专页类型——专页由质量步生成）。"""
-    if not isinstance(obj, dict):
-        return None
-    toc = obj.get("toc")
-    if not isinstance(toc, list) or not toc:
+    if toc_validation_error(obj) is not None:
         return None
     sections: list[dict[str, Any]] = []
-    for sec in toc:
-        if not isinstance(sec, dict):
-            return None
+    for sec in obj["toc"]:
         title = str(sec.get("section_title") or "").strip()
-        hints = sec.get("page_hints")
-        if not title or not isinstance(hints, list):
-            return None
         pages: list[dict[str, Any]] = []
-        for hint in hints:
-            if not isinstance(hint, dict):
-                return None
+        for hint in sec["page_hints"]:
             page_title = str(hint.get("title") or "").strip()
-            if not page_title:
-                return None
             cids = hint.get("cluster_ids")
             if not isinstance(cids, list):
                 cids = []
