@@ -10,9 +10,12 @@ CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
 # 1.1.15 资产包替换：加 009（v2 向量 HNSW 索引）后刷新。
 # 2026-10-20 三次替换：009 修订（串行建索引，绕开 PG 容器 64MB /dev/shm——
 # 并行建索引的共享排序区按 maintenance_work_mem 申请动态共享内存会 ENOSPC）。
+# 2026-10-26 整库导出：加 010（kb_export_tasks）后刷新。
 # 63号批次1：加 010（wiki 制品底座四表+页面单元 HNSW）后刷新。
 # 66号批次1：加 011（wiki 目录草稿表 kb_wiki_tocs）后刷新。
-CURRENT_SCHEMA_CHECKSUM = "503ef7202bc009242bb9259429b261ecdc3e99e661e1a4577db05e03cf6a6aa0"
+# 2026-11-10 合并 fzl194/master：整库导出与 wiki 两条分支各自用掉 010——
+# 迁移 id 含日期+表名全局唯一（双 010 保留，ledger 按整串 id 记账），合并后刷新。
+CURRENT_SCHEMA_CHECKSUM = "1e954b3dcbc1ff5553ee3b8e3de44c574c37ef144102f7a01b6e601ddbf6dda0"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")
@@ -46,6 +49,7 @@ FORMAL_TABLES: frozenset[str] = frozenset({
     "mcp_key_open_artifacts",
     "kb_document_refs",
     "kb_purge_tasks",
+    "kb_export_tasks",
     "asset_source_batches",
     "asset_storage_objects",
     "asset_documents",
@@ -115,6 +119,7 @@ PREVIOUS_RELEASE_TABLES: frozenset[str] = frozenset(
             "kb_table_columns",
             "kb_table_rows",
             "mcp_key_open_artifacts",
+            "kb_export_tasks",
             "kb_artifact_sources",
             "kb_wiki_pages",
             "kb_wiki_page_links",
@@ -156,5 +161,5 @@ RETIRED_TABLES: tuple[str, ...] = (
 if len(RETIRED_TABLES) != len(set(RETIRED_TABLES)):  # pragma: no cover - import guard
     raise RuntimeError("RETIRED_TABLES contains duplicates")
 
-if EXPECTED_FORMAL_TABLES != 65:  # pragma: no cover - import guard
-    raise RuntimeError("FORMAL_TABLES must contain exactly 65 names")
+if EXPECTED_FORMAL_TABLES != 66:  # pragma: no cover - import guard
+    raise RuntimeError("FORMAL_TABLES must contain exactly 66 names")

@@ -45,6 +45,9 @@ class ObjectStoreConfig:
     secret_key: str = ""
     secure: bool = False
     region: str | None = None
+    # presign 交付地址改写（浏览器可达的入口，如 nginx 反代 /object-store/）。
+    # 空 = 不改写（URL 直接用 endpoint，内网/同网环境适用）。
+    presign_public_base: str = ""
     # Free-form pass-through metadata (never credentials).
     extra: dict = field(default_factory=dict)
 
@@ -85,6 +88,7 @@ class ObjectStoreConfig:
             "secret_key",
             "secure",
             "region",
+            "presign_public_base",
             "extra",
         }
         kwargs: dict[str, Any] = {}

@@ -29,6 +29,18 @@
               保存
             </el-button>
           </div>
+          <div
+            v-if="store.selectedSystemConfigName === 'llm_service'"
+            class="system-config-tab__llm-hint"
+          >
+            本文件是 LLM 的<strong>全局基底</strong>；某域需要差异化模型/密钥时，请前往「LLM 域覆盖」页配置（留空字段自动继承这里）。
+          </div>
+          <div
+            v-if="store.selectedSystemConfigName === 'onenet'"
+            class="system-config-tab__llm-hint"
+          >
+            本文件是知识一张网接入的<strong>全局基底</strong>；某域需要独立凭据/端点时，请前往「一张网域覆盖」页配置（留空字段自动继承这里，保存后约 10 秒内生效）。
+          </div>
           <div class="system-config-tab__editor-wrap">
             <YamlEditor v-model="store.systemConfigText" />
           </div>
@@ -48,8 +60,18 @@ const store = useControlPlaneStore()
 
 async function handleSave() {
   try {
-    await store.saveSystemConfig()
-    ElMessage.success('已保存')
+    const result = await store.saveSystemConfig()
+    const reload = result?.llm_reload
+    if (reload) {
+      // llm_service.yaml 保存即生效：控制面已尽力通知热加载
+      if (reload.ok) {
+        ElMessage.success('已保存，LLM 配置已热加载')
+      } else {
+        ElMessage.warning(`已保存，但热加载失败（${reload.detail ?? '未知原因'}）——重启后台服务后生效`)
+      }
+    } else {
+      ElMessage.success('已保存')
+    }
   } catch {
     ElMessage.error('保存失败')
   }
@@ -111,6 +133,17 @@ onMounted(() => store.loadSystemConfigs())
   font-size: 13px;
   font-weight: 500;
   color: var(--kb-text-primary);
+}
+
+.system-config-tab__llm-hint {
+  margin: 8px 16px 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--kb-text-secondary);
+  background: rgba(64, 158, 255, 0.05);
+  border: 1px solid rgba(64, 158, 255, 0.15);
+  border-radius: 6px;
 }
 
 .system-config-tab__editor-wrap {

@@ -32,6 +32,17 @@ VIEWER = {"id": "u-viewer", "username": "viewer", "site_role": "member"}
 #: d1 的域管理员（RBAC：生命周期管理放宽到本域域管理员；跨域仍拒）
 DOMAIN_ADMIN = {"id": "u-dadmin", "username": "dadmin", "site_role": "member"}
 
+
+@pytest.fixture(autouse=True)
+def _restore_purge_tasks_module():
+    """撤掉 _client 对 purge_tasks 模块属性的打桩——那是模块级全局，不还原
+    会让同进程后续文件（如 test_routes_kb 的 DELETE）拿到内存假任务仓，
+    后台管线永远不跑，库行删不掉（跨文件测试污染实测）。"""
+    import knowledge_mining.mining.kb.services.purge_tasks as pt
+    saved = (pt.PurgeTaskRepo, pt.start_purge_task)
+    yield
+    pt.PurgeTaskRepo, pt.start_purge_task = saved
+
 KB = {"id": "kb-1", "domain": "d1", "name": "交付局知识库", "owner_id": "u-owner",
       "visibility": "private", "status": "active", "deleted_at": None}
 KB_DELETED = {"id": "kb-old", "domain": "d1", "name": "旧公共库", "owner_id": "u-owner",

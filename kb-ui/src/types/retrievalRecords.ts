@@ -52,6 +52,13 @@ export interface RetrievalRecordsPage {
   page_size: number
 }
 
+/** 记录明细导出：与列表同一套筛选，单次拉满上限（truncated=超限截断）。 */
+export interface RetrievalRecordsExport {
+  items: RetrievalRecord[]
+  truncated: boolean
+  row_limit: number
+}
+
 export interface RetrievalSummaryCounts {
   total_calls: number
   calls: number
@@ -91,6 +98,9 @@ export interface RetrievalRecordFilters {
   cursor?: string
   pageSize?: number
   days?: number
+  /** 自定义日期窗口（YYYY-MM-DD，闭区间）；设置后覆盖 days 快捷档 */
+  startDate?: string
+  endDate?: string
   source?: RetrievalSource | ''
   toolName?: string
   operation?: RetrievalOperation | ''

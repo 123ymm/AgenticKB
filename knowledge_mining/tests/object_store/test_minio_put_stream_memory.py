@@ -30,6 +30,7 @@ async def _gen(total: int, chunk: int) -> asyncio.AsyncIterator[bytes]:
 
 def _make_store_with_stubbed_put() -> MinioObjectStore:
     store = object.__new__(MinioObjectStore)
+    store._tmp_dir = None  # __init__ 未走，手动补暂存目录属性
     captured: dict = {}
 
     def _stub_blocking(location, tmp_path, options, size, sha):

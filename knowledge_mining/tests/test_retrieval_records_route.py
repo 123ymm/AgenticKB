@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import pytest
@@ -96,7 +97,8 @@ def test_summary_static_route_is_registered_before_dynamic_detail(monkeypatch: p
             "domain": "cloud_core_network", "days": 30, "kb_id": "kb-1",
             "source": None, "tool_name": None, "operation": None,
             "mcp_key_id": None, "status": None, "paradigm_id": None,
-            "actor_user_id": None, "user": USER,
+            "actor_user_id": None, "start_date": None, "end_date": None,
+            "user": USER,
         },
     )]
 
@@ -169,12 +171,111 @@ def test_list_rejects_days_outside_supported_window(
     assert response.status_code == 422
 
 
+def test_custom_date_window_overrides_the_day_preset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """记录明细自定义日期：start/end 成对传入时直达服务层，与 days 并存时以前者优先。"""
+    service = FakeService()
+    client = _client(monkeypatch, service)
+    for path in ("/api/retrieval-records", "/api/retrieval-records/summary"):
+        response = client.get(path, params={
+            "domain": "cloud_core_network",
+            "start_date": "2026-10-01",
+            "end_date": "2026-10-20",
+        })
+
+        assert response.status_code == 200
+        _, kwargs = service.calls[-1]
+        assert kwargs["start_date"] == date(2026, 10, 1)
+        assert kwargs["end_date"] == date(2026, 10, 20)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"start_date": "2026-10-01"},
+        {"end_date": "2026-10-20"},
+        {"start_date": "2026-10-21", "end_date": "2026-10-20"},
+        {"start_date": "2025-01-01", "end_date": "2026-10-20"},
+    ],
+)
+def test_custom_date_window_rejects_half_open_reversed_or_wide_ranges(
+    monkeypatch: pytest.MonkeyPatch, params: dict[str, str],
+) -> None:
+    client = _client(monkeypatch, FakeService())
+    for path in ("/api/retrieval-records", "/api/retrieval-records/summary"):
+        response = client.get(
+            path, params={"domain": "cloud_core_network", **params},
+        )
+
+        assert response.status_code == 422
+    assert client.get("/api/retrieval-records", params={
+        "domain": "cloud_core_network",
+        "start_date": "2025-10-20", "end_date": "2026-10-20",  # 恰好 365 天，放行边界
+    }).status_code == 200
+
+
 def test_detail_returns_404_for_record_outside_visible_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     response = _client(monkeypatch, FakeService()).get(
         "/api/retrieval-records/missing",
         params={"domain": "cloud_core_network"},
     )
     assert response.status_code == 404
+
+
+def test_export_routes_before_dynamic_detail_and_pulls_up_to_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """导出端点：字面量段先于 /{record_id} 注册；一次拉满上限并复用列表筛选。"""
+    service = FakeService()
+
+    async def fake_list(**kwargs: Any) -> dict[str, Any]:
+        service.calls.append(("list", kwargs))
+        return {
+            "items": [{"id": "call-1", "status": "success"}],
+            "next_cursor": None,
+            "has_more": True,
+            "page_size": kwargs["page_size"],
+        }
+
+    service.list_records = fake_list  # type: ignore[method-assign]
+    response = _client(monkeypatch, service).get(
+        "/api/retrieval-records/export",
+        params={
+            "domain": "cloud_core_network",
+            "status": "failed",
+            "start_date": "2026-10-01",
+            "end_date": "2026-10-20",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == [{"id": "call-1", "status": "success"}]
+    assert body["truncated"] is True
+    assert body["row_limit"] == 10_000
+    name, kwargs = service.calls[0]
+    assert name == "list"
+    assert kwargs["page_size"] == 10_001
+    assert kwargs["cursor"] is None
+    assert kwargs["status"] == "failed"
+    assert kwargs["start_date"] == date(2026, 10, 1)
+    assert kwargs["end_date"] == date(2026, 10, 20)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"start_date": "2026-10-01"}, {"start_date": "2026-10-21", "end_date": "2026-10-20"}],
+)
+def test_export_rejects_invalid_custom_ranges(
+    monkeypatch: pytest.MonkeyPatch, params: dict[str, str],
+) -> None:
+    response = _client(monkeypatch, FakeService()).get(
+        "/api/retrieval-records/export",
+        params={"domain": "cloud_core_network", **params},
+    )
+
+    assert response.status_code == 422
 
 
 def test_internal_write_requires_safe_payload_and_never_accepts_secrets(monkeypatch: pytest.MonkeyPatch) -> None:

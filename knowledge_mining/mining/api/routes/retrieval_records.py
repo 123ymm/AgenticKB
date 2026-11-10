@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -221,6 +221,33 @@ def build_service(pool: Any) -> RetrievalRecordService:
     return RetrievalRecordService(pool)
 
 
+# 自定义日期窗口（记录明细筛选用）最长跨度：与快捷档 days<=90 同源的保护，
+# 只放宽到一年，避免无上界的窗口扫描与趋势载荷爆炸
+_CUSTOM_RANGE_MAX_DAYS = 365
+
+# 记录明细导出的单次行数上限：超限截断并在响应里标记，防止无界拉取
+_EXPORT_ROW_LIMIT = 10_000
+
+
+def _validated_date_range(start_date: date | None, end_date: date | None) -> None:
+    """自定义日期窗口约束：成对出现、起点不晚于终点、跨度有上限。
+
+    与 days 快捷档二选一：两者都缺省时走 days；只传一个属于调用方拼参错误。
+    """
+    if start_date is None and end_date is None:
+        return
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            422, "start_date and end_date must be provided together"
+        )
+    if start_date > end_date:
+        raise HTTPException(422, "start_date must not be after end_date")
+    if (end_date - start_date).days > _CUSTOM_RANGE_MAX_DAYS:
+        raise HTTPException(
+            422, f"date range must not exceed {_CUSTOM_RANGE_MAX_DAYS} days"
+        )
+
+
 async def _service(request: Request, domain: str) -> RetrievalRecordService:
     resolved = require_domain(domain)
     pool = await request.app.state.domain_pools.async_pool(resolved)
@@ -240,9 +267,12 @@ async def retrieval_summary(
     status: RecordStatus | None = None,
     paradigm_id: str | None = Query(default=None, min_length=1),
     actor_user_id: str | None = Query(default=None, min_length=1),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
     resolved = require_domain(domain)
+    _validated_date_range(start_date, end_date)
     service = await _service(request, resolved)
     try:
         return await service.summary(
@@ -257,6 +287,8 @@ async def retrieval_summary(
             paradigm_id=paradigm_id,
             actor_user_id=actor_user_id,
             user=user,
+            start_date=start_date,
+            end_date=end_date,
         )
     except PermissionError as exc:
         raise HTTPException(404, "knowledge base not found") from exc
@@ -275,11 +307,14 @@ async def list_retrieval_records(
     status: RecordStatus | None = None,
     paradigm_id: str | None = Query(default=None, min_length=1),
     actor_user_id: str | None = Query(default=None, min_length=1),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
     cursor: str | None = Query(default=None, min_length=3, max_length=500),
     page_size: int = Query(50, ge=1, le=200),
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
     resolved = require_domain(domain)
+    _validated_date_range(start_date, end_date)
     service = await _service(request, resolved)
     try:
         return await service.list_records(
@@ -293,6 +328,8 @@ async def list_retrieval_records(
             status=status,
             paradigm_id=paradigm_id,
             actor_user_id=actor_user_id,
+            start_date=start_date,
+            end_date=end_date,
             cursor=cursor,
             page_size=page_size,
             user=user,
@@ -301,6 +338,57 @@ async def list_retrieval_records(
         raise HTTPException(404, "knowledge base not found") from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/api/retrieval-records/export")
+async def export_retrieval_records(
+    request: Request,
+    domain: str = Query(..., min_length=1),
+    days: int = Query(7, ge=1, le=90),
+    source: Source | None = None,
+    tool_name: str | None = Query(default=None, min_length=1),
+    operation: Operation | None = None,
+    kb_id: str | None = Query(default=None, min_length=1),
+    mcp_key_id: str | None = Query(default=None, min_length=1),
+    status: RecordStatus | None = None,
+    paradigm_id: str | None = Query(default=None, min_length=1),
+    actor_user_id: str | None = Query(default=None, min_length=1),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    """记录明细导出：与列表同一套筛选，单次拉满上限（名称解析留给前端做 CSV）。
+
+    必须注册在 /{record_id} 动态段之前，否则 "export" 会被当作记录 ID。
+    """
+    resolved = require_domain(domain)
+    _validated_date_range(start_date, end_date)
+    service = await _service(request, resolved)
+    try:
+        result = await service.list_records(
+            domain=resolved,
+            days=days,
+            source=source,
+            tool_name=tool_name,
+            operation=operation,
+            kb_id=kb_id,
+            mcp_key_id=mcp_key_id,
+            status=status,
+            paradigm_id=paradigm_id,
+            actor_user_id=actor_user_id,
+            start_date=start_date,
+            end_date=end_date,
+            cursor=None,
+            page_size=_EXPORT_ROW_LIMIT + 1,
+            user=user,
+        )
+    except PermissionError as exc:
+        raise HTTPException(404, "knowledge base not found") from exc
+    return {
+        "items": result["items"],
+        "truncated": bool(result["has_more"]),
+        "row_limit": _EXPORT_ROW_LIMIT,
+    }
 
 
 @router.get("/api/retrieval-records/{record_id}")

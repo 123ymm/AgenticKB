@@ -198,3 +198,39 @@ def test_async_embedding_generator_close_releases_task_client():
     gen = fake.client()
     gen.close()
     assert gen._client._client is None
+
+
+# ---------------------------------------------------------------------------
+# 行级溯源 describe()（62号二期：model 不再 unknown）
+# ---------------------------------------------------------------------------
+
+def test_describe_captures_model_and_dimension_from_parsed_output():
+    """worker 落库的 parsed_output 含实际 model → describe 冻结真实溯源。"""
+    fake = _FakeLlm()
+    fake._results["task-1"] = {
+        "model": "embedding-3",
+        "data": [{"index": 0, "embedding": [0.1] * 4}],
+    }
+    gen = fake.client()
+    # 未成功调用过：unknown 兜底（facade 跑前冻结用）
+    assert gen.describe() == {
+        "provider": "llm_service", "model": "unknown",
+        "version": "unknown", "dimension": 0,
+    }
+    gen.embed_batch(["x"])
+    assert gen.describe() == {
+        "provider": "llm_service", "model": "embedding-3",
+        "version": "embedding-3", "dimension": 4,
+    }
+
+
+def test_describe_latches_last_successful_batch():
+    """失败批次不回写溯源：describe 保持最后一次成功调用的值。"""
+    fake = _FakeLlm()
+    gen = fake.client()
+    gen.embed_batch(["x"])
+    fake._final_status = "failed"
+    with pytest.raises(RuntimeError, match="embedding task task-2"):
+        gen.embed_batch(["y"])
+    assert gen.describe()["model"] == "fake"
+    assert gen.describe()["dimension"] == 2

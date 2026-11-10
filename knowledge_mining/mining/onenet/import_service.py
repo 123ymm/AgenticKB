@@ -224,7 +224,7 @@ class OnenetImportService:
         kb_service: Any,
         doc_service: Any,
         folder_service: Any,
-        client_factory: Callable[[], Any],
+        client_factory: Callable[[str | None], Any],
         workspace_root: Path,
         auto_miner: Callable[..., Any] | None = None,
     ):
@@ -312,7 +312,8 @@ class OnenetImportService:
         try:
             # ---- fetching（安全审查 H-2：分钟级网络 IO 下放线程池，事件循环不被占死）
             await self._repo.update_import(import_id, status="fetching", error=None)
-            client = self._client_factory()
+            # 域覆盖（62号镜像）：按导入记录的域解析凭据；工厂返回 awaitable。
+            client = await self._client_factory(domain)
             try:
                 outcome = await asyncio.to_thread(
                     fetch_selection, client, source_id, selection, workspace)

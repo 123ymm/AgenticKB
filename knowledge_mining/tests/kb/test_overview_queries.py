@@ -81,7 +81,8 @@ async def test_visible_kb_ids_admin_sees_all_in_domain(async_pool):
         )
     a = await db.create_kb(domain=DOMAIN, name="a", owner_id=bob["id"])
     b = await db.create_kb(domain=DOMAIN, name="b", owner_id=bob["id"])
-    # 别的域不算
+    # 别的域不算（bob 由 upsert 只绑定默认域，先补 generic 绑定才建得了库）
+    await db.bind_domain(user_id=bob["id"], domain="generic")
     await db.create_kb(domain="generic", name="other", owner_id=bob["id"])
 
     ids = set(await db.list_visible_kb_ids(user_id=admin["id"], domain=DOMAIN))
@@ -159,6 +160,12 @@ async def test_last_mined_at_only_counts_completed_runs(async_pool):
 
 
 async def test_awaiting_review_picks_the_latest_run(async_pool):
+    """待人审 run 的取数口径：awaiting_review 里最新的那条。
+
+    010 号唯一索引 uq_mining_runs_one_active_per_kb 后，同一 KB **不可能同时**
+    存在两条 awaiting_review——所以这里先造一条旧的待人审、随审阅流转为
+    completed，再出现新的 awaiting_review，并顺手钉住那个唯一约束本身。
+    """
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("alice")
     kb = await db.create_kb(domain=DOMAIN, name="K", owner_id=owner["id"])
@@ -166,9 +173,21 @@ async def test_awaiting_review_picks_the_latest_run(async_pool):
     await _insert_run(
         async_pool, run_id="old-review", kb_id=kb["id"], status="awaiting_review",
         started_at="2026-05-01T00:00:00+00:00")
+    # 旧的审完放行，给新的腾出「active 名额」
+    async with async_pool.connection() as conn:
+        await conn.execute(
+            "UPDATE mining_runs SET status='completed',"
+            " finished_at='2026-05-02T00:00:00+00:00' WHERE id='old-review'"
+        )
     await _insert_run(
         async_pool, run_id="new-review", kb_id=kb["id"], status="awaiting_review",
         started_at="2026-08-01T00:00:00+00:00")
+
+    # 同一 KB 再排第二条 awaiting_review 已是非法状态（唯一索引保证）
+    with pytest.raises(Exception):
+        await _insert_run(
+            async_pool, run_id="concurrent-review", kb_id=kb["id"],
+            status="awaiting_review", started_at="2026-09-01T00:00:00+00:00")
 
     rollup = await db.overview_run_rollup(kb_ids=[kb["id"]])
     assert rollup[kb["id"]]["awaiting_review_run_id"] == "new-review"

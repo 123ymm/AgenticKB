@@ -1,0 +1,3 @@
+# shell 脚本必须 LF：deploy-sync.sh pack 会把工作区文件原样打进增量包，
+# CRLF 会让远端 bash -n 校验失败（脚本自更新被拒）。Windows 下也强制 LF 检出。
+*.sh text eol=lf

@@ -141,6 +141,10 @@ class _KbDb:
     async def get_document_identity(self, document_id: str) -> dict | None:
         return self._documents.get(document_id)
 
+    async def document_in_kb_or_referenced(self, kb_id: str, document_id: str) -> bool:
+        # 47 号引用：读口径放宽——自有 OR 被本库引用；本文件只测视图选择，恒 True
+        return True
+
     async def get_current_serving_snapshot(self, kb_id: str, document_id: str):
         return self.serving
 

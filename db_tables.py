@@ -35,6 +35,8 @@ EXPORT_TABLES = [
     "mcp_key_open_kbs",
     "kb_document_refs",
     "kb_purge_tasks",
+    # 整库导出任务（018 启动链 / core 010 迁移）
+    "kb_export_tasks",
     # asset_core 核心身份、对象与版本
     "asset_source_batches",
     "asset_storage_objects",

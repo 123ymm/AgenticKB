@@ -154,15 +154,18 @@ export function useOnenetApi() {
 
   return {
     // ── 管理面 ──
-    /** 第一步 · 查询发现（V1.2）：三元组透传 + 文档汇总分页 */
-    async search(conditions: OnenetCondition[], page = 1, pageSize = 20): Promise<OnenetSearchResult> {
+    /** 第一步 · 查询发现（V1.2）：三元组透传 + 文档汇总分页。
+     * domain 可选：带域走该域覆盖凭据，缺省用全局基底（域覆盖）。 */
+    async search(conditions: OnenetCondition[], page = 1, pageSize = 20, domain?: string): Promise<OnenetSearchResult> {
       const { data } = await client.post('/api/onenet/search', {
-        conditions, page, page_size: pageSize,
+        conditions, page, page_size: pageSize, ...(domain ? { domain } : {}),
       })
       return data
     },
-    async probe(sourceId: string): Promise<OnenetProbe> {
-      const { data } = await client.post('/api/onenet/probe', { source_id: sourceId })
+    async probe(sourceId: string, domain?: string): Promise<OnenetProbe> {
+      const { data } = await client.post('/api/onenet/probe', {
+        source_id: sourceId, ...(domain ? { domain } : {}),
+      })
       return data
     },
     async toc(domain: string, sourceId: string, opts: { refresh?: boolean } = {}): Promise<OnenetToc> {

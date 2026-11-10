@@ -182,6 +182,12 @@ _WIKI_TOC_DDL = (
 _KB_PURGE_TASKS_DDL = (
     _REPO_ROOT / "databases" / "kb" / "schemas" / "013_kb_purge_tasks.sql"
 )
+# KB 整库导出任务（020，原 018：与上游 wiki 的 018 撞号让位改号）：打包下载
+# 通道的任务进度表（自包含，链尾安全；存量库同文版本化迁移
+# =core/20261026_010_kb_export_tasks）。
+_KB_EXPORT_TASKS_DDL = (
+    _REPO_ROOT / "databases" / "kb" / "schemas" / "020_kb_export_tasks.sql"
+)
 _WORKFLOW_CONTROL_DDL = _REPO_ROOT / "databases" / "mining_control" / "schemas" / "001_mining_workflow_postgresql.sql"
 
 
@@ -296,6 +302,9 @@ def domain_schema_paths() -> tuple[Path, ...]:
         _WIKI_ARTIFACTS_DDL,
         # 66号批次1：wiki 目录草稿表（自包含，挂链尾）。
         _WIKI_TOC_DDL,
+        # KB 整库导出任务表（020，原 018：与 wiki 的 018 撞号让位改号——启动链
+        # 无 ledger、按文件名无记账，改号安全；存量库迁移 id 不变）：自包含，链尾。
+        _KB_EXPORT_TASKS_DDL,
     )
 
 

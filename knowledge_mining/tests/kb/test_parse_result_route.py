@@ -26,6 +26,12 @@ class _KbDb:
     async def get_document_identity(self, document_id: str) -> dict | None:
         return self._documents.get(document_id)
 
+    async def document_in_kb_or_referenced(self, kb_id: str, document_id: str) -> bool:
+        # 47 号引用：读口径放宽为「自有 OR 被引用」。本文件不建模引用关系，
+        # 按自有判定——another_kb 用例正靠 kb 不匹配走 404。
+        doc = self._documents.get(document_id)
+        return doc is not None and doc.get("kb_id") == kb_id
+
     async def get_current_serving_snapshot(self, kb_id: str, document_id: str):
         # A0-1：路由会查 current_serving 上下文；本文件不构造 build 数据 → None
         #（路由按「无 serving 回落 latest + 标记」处理，断言不受影响）。

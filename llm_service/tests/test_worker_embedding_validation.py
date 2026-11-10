@@ -62,8 +62,10 @@ class _FakeProvider:
     def __init__(self, result=None, error=None):
         self._result = result
         self._error = error
+        self.calls: list[tuple] = []
 
     async def embed(self, texts, *, model=None, dimensions=None):
+        self.calls.append((tuple(texts), model, dimensions))
         if self._error:
             raise self._error
         return self._result
@@ -72,12 +74,13 @@ class _FakeProvider:
         return {"results": []}
 
 
-def _worker(provider, texts, dimensions=None):
+def _worker(provider, texts, dimensions=None, default_dimensions=None):
     db = _FakeDB(texts=texts, dimensions=dimensions)
     mgr = _FakeMgr()
     worker = Worker(
         db=db, task_manager=mgr, event_bus=None, provider=None,
         model_provider=provider,
+        default_embedding_dimensions=default_dimensions,
     )
     return db, mgr, worker
 
@@ -164,3 +167,33 @@ async def test_provider_error_still_fails_with_provider_error_type():
     await worker._execute_embedding("task-1")
     assert mgr.completed == []
     assert mgr.failed[0][1] == "rate_limited"
+
+
+# ── 存量 None 任务兜底：提交侧修复前入库的任务 input 里 dimensions=None ──
+
+async def test_none_dimensions_falls_back_to_default():
+    provider = _FakeProvider(_provider_result([_vec(0, dim=2)]))
+    db, mgr, worker = _worker(provider, ["a"], dimensions=None, default_dimensions=2)
+    await worker._execute_embedding("task-1")
+    assert mgr.completed == ["task-1"]
+    # provider 收到的是解析后的默认维度，而不是 None（None 会让请求不带
+    # dimensions 参数 → 智谱按 2048 维返回 → 入库 expected 1024 报错）
+    assert provider.calls[0][2] == 2
+
+
+async def test_none_dimensions_default_mismatch_fails():
+    # 兜底后校验必须生效：provider 返回维度 ≠ 解析出的默认维度 → 不许 complete
+    provider = _FakeProvider(_provider_result([_vec(0, dim=4)]))
+    db, mgr, worker = _worker(provider, ["a"], dimensions=None, default_dimensions=2)
+    await worker._execute_embedding("task-1")
+    assert mgr.completed == []
+    assert mgr.failed[0][1] == "invalid_response"
+
+
+async def test_none_dimensions_without_default_stays_none():
+    # 未配置默认维度（老配置）：行为与修复前一致，None 直通
+    provider = _FakeProvider(_provider_result([_vec(0, dim=4)]))
+    db, mgr, worker = _worker(provider, ["a"], dimensions=None, default_dimensions=None)
+    await worker._execute_embedding("task-1")
+    assert mgr.completed == ["task-1"]
+    assert provider.calls[0][2] is None

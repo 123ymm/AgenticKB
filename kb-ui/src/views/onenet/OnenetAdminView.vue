@@ -372,7 +372,7 @@ async function doSearch(target?: number) {
   }
   searching.value = true
   try {
-    searchResult.value = await api.search(conds, page.value, pageSize.value)
+    searchResult.value = await api.search(conds, page.value, pageSize.value, domainStore.currentDomain)
     hits.value = searchResult.value.documents
     if (!hits.value.length) ElMessage.info('无命中（注意 fuzzy 封顶 10000，可换更精确的词）')
   } catch (e: unknown) {
@@ -390,7 +390,7 @@ function onPickHit(row: { source_id: string } | null) {
   toc.value = null
   void (async () => {
     try {
-      probe.value = await api.probe(row.source_id)
+      probe.value = await api.probe(row.source_id, domainStore.currentDomain)
     } catch (e) {
       handleError(e)
     }

@@ -133,9 +133,14 @@ async def test_concurrent_admin_demotion_never_removes_all_active_admins(async_p
 
 
 async def test_concurrent_clearance_and_owner_transfer_never_create_deleted_owner(async_pool):
+    """竞态窗口：transfer 已 FOR SHARE 锁定 target 用户行（未提交）时并发清除 target。
+
+    锁序串行化：delete_user_account 的 FOR UPDATE 阻塞在 transfer 的 FOR SHARE 上，
+    transfer 提交（owner 归 target）后 delete 事务内复查发现 owned KB → 拒删。
+    暂停 seam 是 `_lock_transfer_users_on_conn`（transfer_kb_owner 的用户锁循环）。
+    """
     db = KbDB(async_pool)
     user_svc = UserService(db)
-    kb_svc = KbService(db)
     admin = await db.create_user(
         username=_name("transfer_admin"), password_hash="hash", site_role="admin",
     )
@@ -149,12 +154,12 @@ async def test_concurrent_clearance_and_owner_transfer_never_create_deleted_owne
     release_transfer = asyncio.Event()
 
     class _PausingTransferDb(KbDB):
-        async def _lock_active_user_on_conn(self, conn, *, user_id: str) -> bool:
-            result = await super()._lock_active_user_on_conn(conn, user_id=user_id)
-            if user_id == target["id"]:
+        async def _lock_transfer_users_on_conn(self, conn, *, lock_ids):
+            locked = await super()._lock_transfer_users_on_conn(conn, lock_ids=lock_ids)
+            if str(target["id"]) in locked:
                 target_locked.set()
                 await release_transfer.wait()
-            return result
+            return locked
 
     transfer_svc = KbService(_PausingTransferDb(async_pool))
     transfer_task = asyncio.create_task(

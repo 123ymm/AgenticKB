@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, flushPromises, shallowMount } from '@vue/test-utils'
 
-const api = vi.hoisted(() => ({ getSummary: vi.fn(), list: vi.fn(), getOne: vi.fn() }))
+const api = vi.hoisted(() => ({ getSummary: vi.fn(), list: vi.fn(), getOne: vi.fn(), exportAll: vi.fn() }))
 const domain = vi.hoisted(() => ({ currentDomain: 'domain-a' }))
 const kbApi = vi.hoisted(() => ({ listKbs: vi.fn() }))
 const operatorApi = vi.hoisted(() => ({ listParadigms: vi.fn() }))
+const saveBlob = vi.hoisted(() => vi.fn())
 
 vi.mock('@/api/retrievalRecords', () => ({ useRetrievalRecordsApi: () => api }))
 vi.mock('@/stores/domain', () => ({ useDomainStore: () => domain }))
 vi.mock('@/api/kb', () => ({ useKbApi: () => kbApi }))
 vi.mock('@/api/operator', () => ({ useOperatorApi: () => operatorApi }))
+vi.mock('@/utils/download', () => ({ saveBlob }))
 
 import RetrievalRecordsPanel from '@/components/retrieval/RetrievalRecordsPanel.vue'
 import { useRetrievalNames } from '@/components/retrieval/useRetrievalNames'
@@ -112,6 +114,7 @@ describe('RetrievalRecordsPanel', () => {
     })
     api.list.mockResolvedValue({ items: [record], next_cursor: null, has_more: false, page_size: 25 })
     api.getOne.mockResolvedValue(record)
+    api.exportAll.mockResolvedValue({ items: [record, readRecord], truncated: false, row_limit: 10000 })
     kbApi.listKbs.mockResolvedValue([{ id: 'kb-1', name: '云核心网手册' }, { id: 'kb-2', name: '传输手册' }])
     operatorApi.listParadigms.mockResolvedValue([{ id: 'p-1', name: '告警范式' }, { id: 'p-2', name: '配置范式' }])
   })
@@ -164,6 +167,150 @@ describe('RetrievalRecordsPanel', () => {
     }
     expect(api.getSummary).toHaveBeenCalledWith('domain-a', expected)
     expect(api.list).toHaveBeenCalledWith('domain-a', expect.objectContaining(expected))
+  })
+
+  it('applies a custom date range that replaces the day preset', async () => {
+    const wrapper = shallowMount(RetrievalRecordsPanel)
+    await flushPromises()
+    vi.clearAllMocks()
+    api.getSummary.mockResolvedValue({ days: 20, available: true, summary: {}, trend: [], paradigms: [], tools: [], sources: {} })
+    api.list.mockResolvedValue({ items: [], next_cursor: null, has_more: false, page_size: 25 })
+
+    await wrapper.find('[aria-label="时间范围"]').setValue('custom')
+    // 切到自定义时预填近 7 天，再手改成目标区间
+    expect((wrapper.find('[aria-label="开始日期"]').element as HTMLInputElement).value).not.toBe('')
+    await wrapper.find('[aria-label="开始日期"]').setValue('2026-10-01')
+    await wrapper.find('[aria-label="结束日期"]').setValue('2026-10-20')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(api.getSummary).toHaveBeenCalledWith('domain-a', expect.objectContaining({
+      startDate: '2026-10-01', endDate: '2026-10-20',
+    }))
+    expect(api.getSummary.mock.calls[0][1].days).toBeUndefined()
+    expect(api.list).toHaveBeenCalledWith('domain-a', expect.objectContaining({
+      startDate: '2026-10-01', endDate: '2026-10-20',
+    }))
+    expect(api.list.mock.calls[0][1].days).toBeUndefined()
+  })
+
+  it('rejects incomplete or reversed custom ranges without hitting the API', async () => {
+    const wrapper = shallowMount(RetrievalRecordsPanel)
+    await flushPromises()
+    vi.clearAllMocks()
+
+    await wrapper.find('[aria-label="时间范围"]').setValue('custom')
+    await wrapper.find('[aria-label="开始日期"]').setValue('2026-10-01')
+    await wrapper.find('[aria-label="结束日期"]').setValue('')
+    await wrapper.find('form').trigger('submit')
+    expect(wrapper.find('.records-panel__filter-error').text()).toContain('开始与结束日期')
+    expect(api.list).not.toHaveBeenCalled()
+
+    await wrapper.find('[aria-label="结束日期"]').setValue('2026-09-30')
+    await wrapper.find('form').trigger('submit')
+    expect(wrapper.find('.records-panel__filter-error').text()).toContain('开始日期不能晚于结束日期')
+    expect(api.getSummary).not.toHaveBeenCalled()
+    expect(api.list).not.toHaveBeenCalled()
+
+    // 修正区间后错误消除并正常请求
+    api.list.mockResolvedValue({ items: [], next_cursor: null, has_more: false, page_size: 25 })
+    api.getSummary.mockResolvedValue({ days: 2, available: true, summary: {}, trend: [], paradigms: [], tools: [], sources: {} })
+    await wrapper.find('[aria-label="结束日期"]').setValue('2026-10-02')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.find('.records-panel__filter-error').exists()).toBe(false)
+    expect(api.list).toHaveBeenCalledWith('domain-a', expect.objectContaining({
+      startDate: '2026-10-01', endDate: '2026-10-02',
+    }))
+  })
+
+  it('reset returns to the 7-day preset and clears custom dates', async () => {
+    const wrapper = shallowMount(RetrievalRecordsPanel)
+    await flushPromises()
+    vi.clearAllMocks()
+    api.getSummary.mockResolvedValue({ days: 7, available: true, summary: {}, trend: [], paradigms: [], tools: [], sources: {} })
+    api.list.mockResolvedValue({ items: [], next_cursor: null, has_more: false, page_size: 25 })
+
+    await wrapper.find('[aria-label="时间范围"]').setValue('custom')
+    await wrapper.find('[aria-label="开始日期"]').setValue('2026-10-01')
+    await wrapper.find('[aria-label="结束日期"]').setValue('2026-10-20')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    vi.clearAllMocks()
+    api.getSummary.mockResolvedValue({ days: 7, available: true, summary: {}, trend: [], paradigms: [], tools: [], sources: {} })
+    api.list.mockResolvedValue({ items: [], next_cursor: null, has_more: false, page_size: 25 })
+
+    await wrapper.findAll('button').find(b => b.text() === '重置')!.trigger('click')
+    await flushPromises()
+
+    expect(api.list).toHaveBeenCalledWith('domain-a', expect.objectContaining({ days: 7 }))
+    expect(api.list.mock.calls[0][1].startDate).toBeUndefined()
+    expect(wrapper.find('[aria-label="开始日期"]').exists()).toBe(false)
+  })
+
+  it('exports the applied filters as a BOM-prefixed CSV with resolved names', async () => {
+    const wrapper = shallowMount(RetrievalRecordsPanel)
+    await flushPromises()
+    vi.clearAllMocks()
+
+    await wrapper.findAll('button').find(b => b.text() === '导出')!.trigger('click')
+    await flushPromises()
+
+    expect(api.exportAll).toHaveBeenCalledWith('domain-a', expect.objectContaining({ days: 7 }))
+    expect(saveBlob).toHaveBeenCalledTimes(1)
+    const [blob, filename] = saveBlob.mock.calls[0]
+    expect(filename).toMatch(/^检索记录_\d{8}-\d{6}\.csv$/)
+    const text = await blob.text()
+    // BOM 让 Excel 以 UTF-8 打开中文（text() 按 spec 会剥 BOM，从原始字节断言）
+    const head = new Uint8Array(await blob.arrayBuffer()).slice(0, 3)
+    expect([...head]).toEqual([0xEF, 0xBB, 0xBF])
+    expect(text).toContain('时间,用户,来源,Tool / 操作,查询或动作,目标知识库,范式,状态,结果数,耗时(ms),错误码,调用 ID')
+    expect(text).toContain('核心网告警')
+    expect(text).toContain('云核心网手册')
+    expect(text).toContain('告警范式 v2')
+    expect(text).toContain('structured_query · st_')
+    expect(text).toContain('call-1')
+    // 未截断时无提示
+    expect(wrapper.text()).not.toContain('上限')
+  })
+
+  it('shows a notice instead of an empty file when nothing matches', async () => {
+    const wrapper = shallowMount(RetrievalRecordsPanel)
+    await flushPromises()
+    vi.clearAllMocks()
+    api.exportAll.mockResolvedValue({ items: [], truncated: false, row_limit: 10000 })
+
+    await wrapper.findAll('button').find(b => b.text() === '导出')!.trigger('click')
+    await flushPromises()
+
+    expect(saveBlob).not.toHaveBeenCalled()
+    expect(wrapper.find('.records-panel__filter-notice').text()).toContain('没有可导出的记录')
+  })
+
+  it('warns when the export is truncated at the row limit', async () => {
+    const wrapper = shallowMount(RetrievalRecordsPanel)
+    await flushPromises()
+    vi.clearAllMocks()
+    api.exportAll.mockResolvedValue({ items: [record], truncated: true, row_limit: 10000 })
+
+    await wrapper.findAll('button').find(b => b.text() === '导出')!.trigger('click')
+    await flushPromises()
+
+    expect(saveBlob).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.records-panel__filter-notice').text()).toContain('已按上限截断')
+  })
+
+  it('surfaces export failures inline without breaking the panel', async () => {
+    const wrapper = shallowMount(RetrievalRecordsPanel)
+    await flushPromises()
+    vi.clearAllMocks()
+    api.exportAll.mockRejectedValue(new Error('export downstream down'))
+
+    await wrapper.findAll('button').find(b => b.text() === '导出')!.trigger('click')
+    await flushPromises()
+
+    expect(saveBlob).not.toHaveBeenCalled()
+    expect(wrapper.find('.records-panel__filter-error').text()).toContain('export downstream down')
   })
 
   it('opens a safe detail drawer without displaying secrets or response bodies', async () => {

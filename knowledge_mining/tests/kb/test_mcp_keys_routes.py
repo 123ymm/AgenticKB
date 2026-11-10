@@ -291,7 +291,12 @@ async def test_unauthenticated_401(async_pool):
 @pytest.mark.asyncio
 async def test_config_save_response_carries_domain_bound(async_pool, kbdb):
     """终审整改：PUT config 响应自带 domain_bound——保存一次配置不会把健康
-    钥匙误标「域已解绑」（False 场景：解绑后保存其它域钥匙配置）。"""
+    钥匙误标「域已解绑」。
+
+    正式解绑路径（set_user_domains/unbind）现在会把该域 active 钥匙一并自动
+    吊销（域成员是外层边界），「解绑但钥匙仍活跃」只能直接删绑定行合成——
+    这里只钉响应字段；解绑自动吊销由 test_unbind_domain_revokes_keys 单独钉。
+    """
     s = _suffix()
     u = await _mk_user(async_pool)
     await kbdb.set_user_domains(user_id=u["id"], domains=["generic", "odn"])
@@ -303,12 +308,31 @@ async def test_config_save_response_carries_domain_bound(async_pool, kbdb):
                         json={"instructions": "保存后仍健康"}, headers=headers)
         assert r.status_code == 200, r.text
         assert r.json()["domain_bound"] is True
-        # 解绑 odn → odn 钥匙配置保存响应 domain_bound=False
-        await kbdb.set_user_domains(user_id=u["id"], domains=["generic"])
+        # odn 绑定行直接删除（绕过解绑路径的自动吊销）→ 钥匙仍活跃但域已解绑
+        async with async_pool.connection() as conn:
+            await conn.execute(
+                "DELETE FROM user_domains WHERE user_id = %s AND domain = 'odn'",
+                (u["id"],),
+            )
         r = await c.put(f"{BASE}/{k_o['id']}/config",
                         json={"instructions": "已解绑"}, headers=headers)
         assert r.status_code == 200, r.text
         assert r.json()["domain_bound"] is False
+
+
+@pytest.mark.asyncio
+async def test_unbind_domain_revokes_keys(async_pool, kbdb):
+    """解绑域 → 该域 active 钥匙同事务自动吊销（域成员是外层边界）。"""
+    s = _suffix()
+    u = await _mk_user(async_pool)
+    await kbdb.set_user_domains(user_id=u["id"], domains=["generic", "odn"])
+    async with await _client(async_pool) as c:
+        headers = kb_headers(u["username"])
+        k_g = await _create(c, f"rvk-g-{s}", "generic", headers)
+        k_o = await _create(c, f"rvk-o-{s}", "odn", headers)
+        await kbdb.set_user_domains(user_id=u["id"], domains=["generic"])
+        assert (await kbdb.get_mcp_key(key_id=k_o["id"]))["status"] == "revoked"
+        assert (await kbdb.get_mcp_key(key_id=k_g["id"]))["status"] == "active"
 
 
 # --------------------------------------- 51号批次2（Task 5）：mcp-key-verify 钥匙级
@@ -348,8 +372,14 @@ async def test_verify_endpoint_ok_shape(async_pool, kbdb):
 async def test_verify_unbound_domain_403(async_pool, kbdb):
     async with await _client(async_pool) as c:
         u, _kb, created = await _mk_key_with_kb(async_pool, kbdb, c, kb_headers)
-        # 解绑所有域 → 同钥 403 domain_not_bound（N4 联动）
-        await kbdb.set_user_domains(user_id=u["id"], domains=[])
+        # 解绑该域 → 同钥 403 domain_not_bound（N4 联动）。u 在 generic 有库，
+        # set_user_domains 会先被 domain_has_owned_kbs 拦下（且正式解绑路径
+        # 还会自动吊销钥匙）——直接删绑定行合成「零绑定仍持钥」状态。
+        async with async_pool.connection() as conn:
+            await conn.execute(
+                "DELETE FROM user_domains WHERE user_id = %s AND domain = 'generic'",
+                (u["id"],),
+            )
         r = await c.post(VERIFY, json={"key": created["key"]}, headers=INTERNAL)
         assert r.status_code == 403, r.text
         detail = r.json()["detail"]

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 # 词云原料上限：窗口内去重问句按次数取前 N 条。300 条 × LEFT(...,200) 截断，
@@ -15,6 +15,24 @@ def _since(days: int) -> datetime:
     return datetime.combine(
         today - timedelta(days=days - 1), datetime.min.time(), tzinfo=timezone.utc
     )
+
+
+def _window(
+    days: int, start_date: date | None, end_date: date | None
+) -> tuple[datetime, datetime | None]:
+    """occurred_at 过滤窗口：自定义日期段（闭区间，按 UTC 日切）优先于近 N 天快捷档。
+
+    返回 (since, until)：until 为开区间上界（end_date 次日零点），None 表示不设上界。
+    """
+    if start_date is not None and end_date is not None:
+        since = datetime.combine(
+            start_date, datetime.min.time(), tzinfo=timezone.utc
+        )
+        until = datetime.combine(
+            end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        )
+        return since, until
+    return _since(days), None
 
 
 def _record(row: Any) -> dict[str, Any]:
@@ -412,6 +430,8 @@ class RetrievalRecordRepository:
         cursor_at: datetime | None,
         cursor_id: str | None,
         page_size: int,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> dict[str, Any]:
         clauses, params = self._where(
             domain=domain,
@@ -425,8 +445,12 @@ class RetrievalRecordRepository:
             paradigm_id=paradigm_id,
             visible_kb_ids=visible_kb_ids,
         )
+        since, until = _window(days, start_date, end_date)
         clauses.append("occurred_at >= %(since)s")
-        params["since"] = _since(days)
+        params["since"] = since
+        if until is not None:
+            clauses.append("occurred_at < %(until)s")
+            params["until"] = until
         if cursor_at is not None and cursor_id is not None:
             clauses.append("(occurred_at, id) < (%(cursor_at)s, %(cursor_id)s)")
             params.update(cursor_at=cursor_at, cursor_id=cursor_id)
@@ -494,6 +518,8 @@ class RetrievalRecordRepository:
         mcp_key_id: str | None = None,
         status: str | None = None,
         paradigm_id: str | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> dict[str, Any]:
         clauses, params = self._where(
             domain=domain,
@@ -507,8 +533,12 @@ class RetrievalRecordRepository:
             status=status,
             paradigm_id=paradigm_id,
         )
+        since, until = _window(days, start_date, end_date)
         clauses.append("occurred_at >= %(since)s")
-        params["since"] = _since(days)
+        params["since"] = since
+        if until is not None:
+            clauses.append("occurred_at < %(until)s")
+            params["until"] = until
         where = " AND ".join(clauses)
         failed_sql = "status IN ('denied','invalid','timeout','failed')"
         async with self._pool.connection() as conn:
@@ -540,9 +570,12 @@ class RetrievalRecordRepository:
             )
             trend_rows = {str(r["day"]): r for r in await trend_cur.fetchall()}
             today = datetime.now(timezone.utc).date()
+            # 快捷档窗口截至今天；自定义窗口是 [start_date, end_date] 闭区间。
+            first_day = since.date() if until is not None else today - timedelta(days=days - 1)
+            last_day = until.date() - timedelta(days=1) if until is not None else today
             trend = []
-            for offset in range(days - 1, -1, -1):
-                day = today - timedelta(days=offset)
+            day = first_day
+            while day <= last_day:
                 item = trend_rows.get(day.isoformat(), {})
                 trend.append({
                     "date": day.isoformat(),
@@ -551,6 +584,7 @@ class RetrievalRecordRepository:
                     "no_result": int(item.get("no_result") or 0),
                     "failed": int(item.get("failed") or 0),
                 })
+                day += timedelta(days=1)
 
             sources = await self._breakdown_on_conn(conn, where, params, "source")
             # tools 只统计真实带 tool_name 的 MCP 调用——网页/API 调用 tool_name 为
@@ -567,7 +601,8 @@ class RetrievalRecordRepository:
             )
         return {
             "available": True,
-            "days": days,
+            # 快捷档下与入参 days 相同；自定义窗口下回窗口实际天数，趋势轴长度始终与之相等
+            "days": len(trend),
             "summary": {
                 "total_calls": total_calls,
                 "calls": calls,
@@ -585,6 +620,21 @@ class RetrievalRecordRepository:
             "paradigms": paradigms,
             "top_queries": top_queries,
         }
+
+    async def no_result_queries(
+        self, *, domain: str, days: int, limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """答不上来的原句榜（按原文聚合，次数倒序）。
+
+        492ee5f 起不再进 summary 载荷——新端点的消费方已下线该卡片，
+        summary 不该为它多跑一次 SQL；本方法只服务旧版 /api/ops/usage
+        兼容端点的按需调用。"""
+        clauses, params = self._where(domain=domain)
+        clauses.append("occurred_at >= %(since)s")
+        params["since"] = _since(days)
+        where = " AND ".join(clauses) + " AND operation = 'search' AND status = 'no_result'"
+        async with self._pool.connection() as conn:
+            return await self._query_usage_on_conn(conn, where, params, limit)
 
     async def _breakdown_on_conn(
         self, conn: Any, where: str, params: dict[str, Any], column: str

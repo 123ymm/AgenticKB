@@ -17,18 +17,21 @@ from knowledge_mining.mining.infra.object_store.config import ObjectStoreConfig
 from knowledge_mining.mining.infra.object_store.fake import FakeObjectStore
 
 
-def make_object_store(config: ObjectStoreConfig) -> ObjectStorePort:
+def make_object_store(
+    config: ObjectStoreConfig, tmp_dir: str | None = None
+) -> ObjectStorePort:
     """Return the ``ObjectStorePort`` for ``config.provider``.
 
     Lazy on ``minio``: constructing a MinIO adapter imports the SDK; the Fake
-    adapter has no third-party dependency.
+    adapter has no third-party dependency. ``tmp_dir``（可选，仅 MinIO 适配器
+    消费）把大对象暂存文件指到持久卷（整库导出场景），默认 None=系统 /tmp。
     """
     if config.provider == "fake":
         return FakeObjectStore(root_path=config.root_path)
     if config.provider == "minio":
         from knowledge_mining.mining.infra.object_store.minio import MinioObjectStore
 
-        return MinioObjectStore(config)
+        return MinioObjectStore(config, tmp_dir=tmp_dir)
     raise ValueError(f"unknown object store provider: {config.provider!r}")
 
 

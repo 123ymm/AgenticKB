@@ -231,10 +231,17 @@ class FakeObjectStore:
         self,
         location: ObjectLocation,
         expires_in_seconds: int = 900,
+        filename: str | None = None,
     ) -> PresignedAccess:
+        url = self._fake_url("GET", location, expires_in_seconds)
+        if filename:
+            # 与 MinIO 适配器的 response-content-disposition 对齐（测试可断言）。
+            from urllib.parse import quote
+
+            url += f"&filename={quote(filename)}"
         return PresignedAccess(
             method="GET",
-            url=self._fake_url("GET", location, expires_in_seconds),
+            url=url,
             expires_in_seconds=expires_in_seconds,
             location=location,
         )

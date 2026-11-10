@@ -145,7 +145,9 @@ async def test_unique_domain_name(async_pool):
     await db.create_kb(domain="cloud_core_network", name="dup", owner_id=owner["id"])
     with pytest.raises(Exception):
         await db.create_kb(domain="cloud_core_network", name="dup", owner_id=owner["id"])
-    # 不同 domain 同名允许
+    # 不同 domain 同名允许（alice 由 upsert 自动绑定默认域 cloud_core_network，
+    # 建 generic 域库须先补绑定——否则 create_kb 按 user_not_active 拒绝）
+    await db.bind_domain(user_id=owner["id"], domain="generic")
     kb2 = await db.create_kb(domain="generic", name="dup", owner_id=owner["id"])
     assert kb2["domain"] == "generic"
 
@@ -173,9 +175,9 @@ async def test_same_name_is_owner_scoped_and_soft_delete_releases_name(async_poo
 
 
 async def test_derived_status_mined_for_committed_run_document(async_pool):
-    """P1：KB 挖掘 publish=False（无 active release）、run_document 到 committed
-    时，派生 status 应为 'mined'。旧 _STATUS_CASE_SQL 没有 committed 档，
-    会 ELSE 兜底回 'uploaded'——与「没挖过」无法区分，正是「挖掘后状态没打通」根因。
+    """P1→36号 §九 演进：「已入库（mined）」的口径是**存在该 KB 最新 validated
+    build 且 selection_status='active'**，不再是 run_document committed 本身
+    （staging 完成不叫已入库）。run committed 但还没进 build 时仍是 uploaded。
     """
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("alice")
@@ -208,8 +210,30 @@ async def test_derived_status_mined_for_committed_run_document(async_pool):
                VALUES (%s, %s, 'doc:/a.md', 'h', 'h', 'NEW', 'committed', %s, %s)""",
             ("rd-1", "run-mine-1", started, "2026-01-01T00:00:01+00:00"),
         )
+        # committed 但尚未进 validated build → 仍 uploaded（staging ≠ 入库）
+        assert (await db.list_documents_in_kb(kb_id=kb["id"]))[0]["status"] == "uploaded"
 
-    # committed + 无 active release → mined（P1 修复点）
+        # 进了 validated build（active 成员）→ mined
+        snap_id, build_id = f"snap-{doc['id']}", f"build-{doc['id']}"
+        await conn.execute(
+            """INSERT INTO asset_document_snapshots
+               (id, domain, normalized_content_hash, raw_content_hash, mime_type, created_at)
+               VALUES (%s, 'cloud_core_network', 'nh', 'rh', 'text/markdown', %s)""",
+            (snap_id, started),
+        )
+        await conn.execute(
+            """INSERT INTO asset_builds
+               (id, build_code, status, build_mode, domain, kb_id, created_at)
+               VALUES (%s, %s, 'validated', 'full', 'cloud_core_network', %s, %s)""",
+            (build_id, f"BUILD-{doc['id']}", kb["id"], started),
+        )
+        await conn.execute(
+            """INSERT INTO asset_build_document_snapshots
+               (build_id, document_id, document_snapshot_id, selection_status, reason)
+               VALUES (%s, %s, %s, 'active', 'add')""",
+            (build_id, doc["id"], snap_id),
+        )
+
     rows = await db.list_documents_in_kb(kb_id=kb["id"])
     assert rows[0]["status"] == "mined"
     assert await db.derive_document_status(doc["id"]) == "mined"
@@ -293,6 +317,14 @@ async def test_get_document_knowledge_hides_graph_assets(async_pool):
                (build_id, document_id, document_snapshot_id, selection_status, reason)
                VALUES (%s, %s, %s, 'active', 'add')""",
             (build_id, doc_id, snap_id),
+        )
+        # current_serving 选择规则（与 Java serving 对齐）还要求快照经
+        # asset_document_snapshot_links 挂到文档上，缺链 = 无当前可搜索版本。
+        await conn.execute(
+            """INSERT INTO asset_document_snapshot_links
+               (id, document_id, document_snapshot_id, relative_path, source_uri, linked_at)
+               VALUES (%s, %s, %s, 'a.md', %s, %s)""",
+            (f"link-{doc_id}", doc_id, snap_id, f"file:///tmp/{kb['id']}/a.md", started),
         )
         await conn.execute(
             """INSERT INTO asset_raw_segment_relations

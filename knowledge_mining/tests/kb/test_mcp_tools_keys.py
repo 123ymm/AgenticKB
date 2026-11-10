@@ -36,7 +36,8 @@ class _FakeDocSvc:
     """直传对照组用：intake_upload 免对象存储，返回最小 file 结果。"""
 
     async def intake_upload(self, *, kb_id, owner_id, filename, stream,
-                            file_max_bytes):
+                            directory_path=None, document_type=None, mime=None,
+                            file_max_bytes=None, on_archive_complete=None):
         async for _ in stream:
             pass
         return {"kind": "file",

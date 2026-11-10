@@ -54,6 +54,7 @@
 !CLAUDE.md
 !docker-compose.yml
 !pyproject.toml
+!.gitattributes
 !deploy-build.sh
 !deploy-server.sh
 !deploy-sync.sh
@@ -107,7 +108,8 @@ sync-*.tar.gz.sha256
 cmkb-*.tar.zst
 cmkb-*.tar.zst.sha256
 kb-ui-dist/
-runtime/
+# 锚定根目录：宿主机 bind-mount 的运行时产物（llm_service/runtime 是源码包，勿遮蔽）
+/runtime/
 .cmkb-sync-stage.*
 .cmkb-pack-stage.*
 .cmkb-code-stage.*
@@ -124,4 +126,10 @@ var/
 # deploy-sync 依赖清单基线（pack 自动落盘，下次 pack 对比）
 .cmkb-sync-last/
 release_tests/eval/__pycache__/
-\n# 一张网凭据（真实 app_id/static_token，不进 git）\nmain_control_service/config/system/onenet.yaml\n
+# 一张网凭据（真实 app_id/static_token，不进 git）
+main_control_service/config/system/onenet.yaml
+
+# 62号：LLM 域覆盖文件为运维侧动作（含真实密钥，deploy-sync 从不携带 config/）
+main_control_service/config/system/llm_service.domains/
+# 一张网域覆盖文件同规则（按域真实凭据，运维侧放置）
+main_control_service/config/system/onenet.domains/

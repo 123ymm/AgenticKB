@@ -117,6 +117,12 @@ async def test_can_create_in_domain_rejects_disabled_users(kbdb, site_role):
     )
     if site_role == "member":
         await kbdb.bind_domain(user_id=user["id"], domain="generic")
+    else:
+        # update_user 有「最后一个活跃 admin 不可禁用」护栏（UserDeletionConflict）；
+        # 再造一个 admin 让目标可禁用，保持本用例焦点在「角色不免死」。
+        await kbdb.create_user(
+            username=f"disabled_domain_co_{site_role}_{_suffix()}", site_role="admin",
+        )
 
     assert await kbdb.can_create_in_domain(
         user_id=user["id"], domain="generic",
@@ -175,9 +181,17 @@ async def test_public_kb_visibility_requires_binding(kbdb):
     uid, uid2 = f"u_vis_1_{s}", f"u_vis_2_{s}"
     await _mk_user(kbdb, uid, f"vis_user_1_{s}")
     await _mk_user(kbdb, uid2, f"vis_user_2_{s}")
+    # create_kb 现要求 owner 先绑定所在域；写入侧 unbind 又有 domain_has_owned_kbs
+    # 守卫——「已建库后被解绑」只能直接删绑定行合成（读侧硬边界仍要钉住）。
+    await kbdb.bind_domain(user_id=uid2, domain="generic")
     kb = await kbdb.create_kb(
         domain="generic", name=f"vis-public-{s}", owner_id=uid2, visibility="public",
     )
+    async with kbdb._pool.connection() as conn:
+        await conn.execute(
+            "DELETE FROM user_domains WHERE user_id = %s AND domain = 'generic'",
+            (uid2,),
+        )
     kb_id = kb["id"]
     try:
         # 未绑定 → 不可见（list_visible_kb_ids / is_visible）
@@ -360,9 +374,17 @@ async def test_document_readable_requires_binding(kbdb):
     uid, uid2 = f"u_dr_1_{s}", f"u_dr_2_{s}"
     await _mk_user(kbdb, uid, f"dr_user_1_{s}")
     await _mk_user(kbdb, uid2, f"dr_user_2_{s}")
+    # 同 test_public_kb_visibility_requires_binding：建库要求先绑定，
+    # 「已建库后被解绑」直接删绑定行合成。
+    await kbdb.bind_domain(user_id=uid2, domain="generic")
     kb = await kbdb.create_kb(
         domain="generic", name=f"dr-public-{s}", owner_id=uid2, visibility="public",
     )
+    async with kbdb._pool.connection() as conn:
+        await conn.execute(
+            "DELETE FROM user_domains WHERE user_id = %s AND domain = 'generic'",
+            (uid2,),
+        )
     kb_id = kb["id"]
     doc = await kbdb.insert_document_identity(
         domain="generic", kb_id=kb_id,
@@ -432,6 +454,8 @@ async def test_internal_kb_count(async_pool):
     s = _suffix()
     domain = f"dom_cnt_{s}"
     u = await db.create_user(username=f"iu_cnt_{s}", site_role="member")
+    # 合成域不在任何用户的绑定集里——owner 先补绑定，create_kb 才放行
+    await db.bind_domain(user_id=u["id"], domain=domain)
     kb = await db.create_kb(domain=domain, name=f"iu-cnt-{s}", owner_id=u["id"])
     try:
         async with await _internal_client(async_pool) as c:

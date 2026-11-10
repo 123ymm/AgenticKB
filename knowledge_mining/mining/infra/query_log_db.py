@@ -51,7 +51,10 @@ class QueryLogStats:
     async def no_result_queries(
         self, *, domain: str, days: int, limit: int = 10
     ) -> list[dict[str, Any]]:
-        return (await self._payload(domain=domain, days=days))["no_result_queries"][:limit]
+        # 答不上来原句榜已在 492ee5f 从 summary 载荷退役（新端点不再消费）；
+        # 本兼容端点仍要这个键，改为按需单跑，不再借道 summary 缓存
+        return await self._repository.no_result_queries(
+            domain=domain, days=days, limit=limit)
 
     async def top_queries(
         self, *, domain: str, days: int, limit: int = 20

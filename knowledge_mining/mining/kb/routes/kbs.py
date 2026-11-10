@@ -12,11 +12,14 @@ from pydantic import BaseModel, Field
 from knowledge_mining.mining.kb.auth import current_user, require_admin
 from knowledge_mining.mining.kb.db import KbDB
 from knowledge_mining.mining.kb.deps import (
-    get_kb_db, get_kb_service, get_purge_service,
+    get_copy_service, get_kb_db, get_kb_service, get_purge_service,
 )
 from knowledge_mining.mining.kb.services.kb_service import (
     Duplicate, DomainNotBound, Forbidden, InvalidDomain, InvalidName, InvalidVisibility,
     KbService, NotFound,
+)
+from knowledge_mining.mining.kb.services.copy_service import (
+    CopyService, SourceEmpty, SourceTooLarge,
 )
 
 router = APIRouter(prefix="/api/kb", tags=["kb"])
@@ -46,6 +49,16 @@ class OwnerTransfer(BaseModel):
     keep_old_as_editor: bool = False
 
 
+class KbCopy(BaseModel):
+    """整库拷贝请求（v1.1 快照血缘共享）。全部可选：缺省派生/继承。"""
+    #: 新库名；缺省派生 <源名>-副本-YYYYMMDD
+    new_name: str | None = Field(default=None, max_length=200)
+    #: 缺省继承源库（非 owner 继承 public 时强制 private）；public 受防放大规则约束
+    visibility: Literal["private", "public"] | None = None
+    #: 缺省继承源库；显式 null = 清空
+    description: str | None = None
+
+
 class MemberAdd(BaseModel):
     username: str = Field(description="登录名 / X-KB-User 用户名")
     role: Literal["viewer", "editor"] = "viewer"
@@ -68,6 +81,8 @@ def _map_error(exc: Exception) -> HTTPException:
         return HTTPException(400, f"invalid visibility: {exc}")
     if isinstance(exc, InvalidName):
         return HTTPException(400, str(exc))
+    if isinstance(exc, (SourceEmpty, SourceTooLarge)):
+        return HTTPException(422, str(exc))
     return HTTPException(500, str(exc))
 
 
@@ -187,6 +202,33 @@ async def list_owner_candidates(
             kb_id=kb_id, actor_id=user["id"], q=q, limit=limit,
         )}
     except (NotFound, Forbidden) as exc:
+        raise _map_error(exc) from None
+
+
+@router.post("/{kb_id}/copy", status_code=201)
+async def copy_kb(
+    kb_id: str,
+    body: KbCopy | None = None,
+    user: dict[str, Any] = Depends(current_user),
+    svc: CopyService = Depends(get_copy_service),
+):
+    """整库拷贝（v1.1 快照血缘共享，设计 docs/kb-copy-design.md）.
+
+    同步单事务：新 KB + 目录树 + 文档身份（对象字节共享，storage_object_id
+    同源）+ snapshot links（血缘）。不建 Build——拷完文档均为 uploaded、不可
+    检索；新库自选范式触发挖掘，指纹命中复用既有快照资产。响应附
+    copy_source / copy_stats / next_step_hint（前端据此引导选范式）。
+    """
+    # model_fields_set 语义：只传显式给出的字段（区分「未传」与「显式 null」）。
+    overrides = body.model_dump(exclude_unset=True) if body else {}
+    try:
+        return await svc.copy_kb(
+            kb_id=kb_id, actor_id=user["id"], overrides=overrides,
+        )
+    except (
+        NotFound, Forbidden, Duplicate, DomainNotBound, InvalidVisibility,
+        InvalidName, SourceEmpty, SourceTooLarge,
+    ) as exc:
         raise _map_error(exc) from None
 
 

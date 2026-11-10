@@ -30,6 +30,7 @@ from knowledge_mining.mining.api.routes.retrieval_records import (
 )
 from knowledge_mining.mining.kb.routes.kbs import router as kb_router
 from knowledge_mining.mining.kb.routes.artifacts import router as artifacts_router
+from knowledge_mining.mining.kb.routes.exports import router as kb_exports_router
 from knowledge_mining.mining.kb.routes.wiki import router as wiki_router
 from knowledge_mining.mining.kb.routes.documents import router as kb_documents_router
 from knowledge_mining.mining.kb.routes.mining import router as kb_mining_router
@@ -127,7 +128,13 @@ async def lifespan(app: FastAPI):
     from knowledge_mining.mining.infra.object_store.factory import make_object_store
 
     object_store_config = ObjectStoreConfig.from_control_plane()
-    app.state.object_store = make_object_store(object_store_config)
+    # 整库导出：put_stream/get_stream 的暂存文件指到 uploads 卷（tmp_root），
+    # 避免 /tmp（容器层）被几十 GB 的导出包撑爆——组合根一次性注入。
+    from knowledge_mining.mining.infra.export_config import ExportConfig
+
+    export_cfg = ExportConfig()
+    app.state.object_store = make_object_store(
+        object_store_config, tmp_dir=export_cfg.tmp_root_path)
     app.state.object_store_config = object_store_config
 
 
@@ -171,6 +178,39 @@ async def lifespan(app: FastAPI):
                         recovered)
     except Exception:  # noqa: BLE001 - 恢复失败不阻断启动
         logger.warning("[purge-task] startup recovery failed", exc_info=True)
+
+    # 整库导出（打包下载通道）：重启恢复 + 过期产物周期清理。
+    # 恢复语义同 purge——queued/running 删残留 .part 后重新入队（object_key
+    # 任务内固定，重跑覆盖即幂等）；cancelling 收口为 cancelled。
+    try:
+        from knowledge_mining.mining.kb.services.export_tasks import (
+            recover_export_tasks,
+        )
+        recovered_exports = await recover_export_tasks(
+            pool=pool, object_store=app.state.object_store,
+            object_store_config=object_store_config, config=export_cfg)
+        if recovered_exports:
+            logger.info("[export-task] recovered %s task(s) at startup",
+                        recovered_exports)
+    except Exception:  # noqa: BLE001 - 恢复失败不阻断启动
+        logger.warning("[export-task] startup recovery failed", exc_info=True)
+
+    async def _export_sweep_loop() -> None:
+        from knowledge_mining.mining.kb.services.export_tasks import (
+            sweep_expired_exports,
+        )
+        interval = max(1, int(export_cfg.export_sweep_interval_hours)) * 3600
+        while True:
+            try:
+                await sweep_expired_exports(
+                    pool=pool, object_store=app.state.object_store,
+                    config=export_cfg)
+            except Exception:  # noqa: BLE001
+                logger.warning("[export-sweep] round failed", exc_info=True)
+            await asyncio.sleep(interval)
+
+    export_sweep_task = asyncio.create_task(_export_sweep_loop())
+    app.state.export_sweep_task = export_sweep_task
 
     # Domain-specific async/sync pools are opened lazily by API dependencies.
     app.state.domain_pools = DomainPoolManager(cfg)
@@ -242,7 +282,8 @@ async def lifespan(app: FastAPI):
     yield
 
     gc_task.cancel()
-    await asyncio.gather(gc_task, return_exceptions=True)
+    export_sweep_task.cancel()
+    await asyncio.gather(gc_task, export_sweep_task, return_exceptions=True)
 
     app.state.domain_run_dispatcher.close()
     await app.state.domain_pools.close()
@@ -288,6 +329,9 @@ def create_app() -> FastAPI:
     # 63号批次2：wiki 制品页面/链接/状态端点（同 /api/artifacts 静态前缀，
     # 紧随 artifacts 注册——与 kb_router 动态段无交集）。
     app.include_router(wiki_router)
+    # 整库导出：/api/kb/export-tasks/{task_id} 首段是字面量，必须在 kb_router
+    # 的动态 /api/kb/{kb_id} 之前注册（否则 task_id 被当成 kb_id 吞掉）。
+    app.include_router(kb_exports_router)
     app.include_router(kb_router)
     app.include_router(kb_documents_router)
     app.include_router(kb_mining_router)

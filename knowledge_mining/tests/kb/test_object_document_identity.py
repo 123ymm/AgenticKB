@@ -108,8 +108,9 @@ async def test_revival_rechecks_upload_target_after_lock(changed):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("overrides", [{"expected_revision": 0}, {"file_size": -1}, {"storage_object_id": ""}, {"source_raw_hash": ""}])
+@pytest.mark.parametrize("overrides", [{"expected_revision": -1}, {"file_size": -1}, {"storage_object_id": ""}, {"source_raw_hash": ""}])
 async def test_invalid_replacement_never_writes(overrides):
+    # expected_revision=0 是合法态（008 迁移默认；legacy 本地路径未写过 1）——只拒负数
     pool = RecordingPool()
     args = dict(expected_revision=1, storage_object_id="new", source_raw_hash="h", file_size=12)
     with pytest.raises(ValueError):
@@ -138,6 +139,7 @@ def test_outdated_knowledge_is_a_separate_active_build_fact():
     assert "kbmv.in_active_build" in expression
     assert "kbmv.serving_raw_hash <> d.source_raw_hash" in expression
     assert "NULLIF" in expression and "FALSE" in expression
-    assert "AS knowledge_outdated" in inspect.getsource(KbDB.list_documents_in_kb)
+    # 列表口径已抽成共享常量（list/count 共用），单点仍在方法内联
+    assert "AS knowledge_outdated" in db_module._DOCUMENT_LIST_SELECT_SQL
     assert "AS knowledge_outdated" in inspect.getsource(KbDB.get_document_identity)
     assert "knowledge_outdated" not in db_module._STATUS_CASE_SQL

@@ -12,7 +12,8 @@ import type {
   DeletedKbRow, KbPurgeTask,
   KbOverview, KbRunRecord, KbStats, KbSummary, KbUpdateBody, KbUserCandidate,
   McpKeyCreated, McpKeyItem, McpKeyRotateResult, McpToolMeta,
-  DocumentKnowledge,
+  DocumentKnowledge, KbCopyResult, KbVisibility,
+  KbExportDownloadUrl, KbExportTask,
 } from '@/types/kb'
 
 export interface KbQualityReport {
@@ -85,6 +86,55 @@ export function useKbApi() {
     async createKb(body: KbCreateBody): Promise<KbDetail> {
       const { data } = await client.post('/api/kb', body)
       return extractOne<KbDetail>(data)
+    },
+
+    /**
+     * 整库拷贝（v1.1 快照血缘共享，docs/kb-copy-design.md）：同步单事务拷
+     * 文件+目录树+快照 links；对象字节与快照资产同源共享。拷完文档均为
+     * uploaded、**不可检索**——需自选挖掘范式触发 /mine（选与源库相同范式
+     * 可指纹复用，零 LLM 重嵌）。响应附 copy_source/copy_stats/next_step_hint。
+     */
+    async copyKb(
+      kbId: string,
+      body?: { new_name?: string; visibility?: KbVisibility; description?: string | null },
+    ): Promise<KbCopyResult> {
+      const { data } = await client.post(`/api/kb/${kbId}/copy`, body ?? {})
+      return extractOne<KbCopyResult>(data)
+    },
+
+    // ── 整库导出（打包下载通道：copy 超 5000 文档走这里）──
+    /**
+     * 创建整库导出任务（202 秒回）：后台打包原始文档 + manifest.json 为
+     * STORED zip 传对象存储。同库已有排队/运行中任务时幂等返回该任务
+     * （already_started=true）。大库（数 GB+）打包可能耗时小时级，进度走
+     * listExportTasks 轮询。
+     */
+    async createExportTask(kbId: string): Promise<KbExportTask> {
+      const { data } = await client.post(`/api/kb/${kbId}/export`)
+      return data
+    },
+    /** 本库导出任务列表（域管理员看全部；普通用户只看自己发起的）。 */
+    async listExportTasks(kbId: string): Promise<KbExportTask[]> {
+      const { data } = await client.get(`/api/kb/${kbId}/export-tasks`)
+      return (data.tasks ?? []) as KbExportTask[]
+    },
+    async getExportTask(taskId: string): Promise<KbExportTask> {
+      const { data } = await client.get(`/api/kb/export-tasks/${taskId}`)
+      return data
+    },
+    /**
+     * 现签 presign 下载 URL（每次调用新签，仅 succeeded 且未过期）。
+     * 下载必须 window.open(url) 浏览器直连对象存储——大包走代理会撞网关
+     * 300s 读超时，直连还天然支持 Range 断点续传。
+     */
+    async getExportDownloadUrl(taskId: string): Promise<KbExportDownloadUrl> {
+      const { data } = await client.get(`/api/kb/export-tasks/${taskId}/download-url`)
+      return data
+    },
+    /** 运行中 → 请求取消（202）；终态 → 删产物对象 + 删任务记录（200）。 */
+    async deleteExportTask(taskId: string): Promise<{ cancelled?: boolean; deleted?: boolean; task_id?: string }> {
+      const { data } = await client.delete(`/api/kb/export-tasks/${taskId}`)
+      return data
     },
 
     async getKb(kbId: string): Promise<KbDetail> {

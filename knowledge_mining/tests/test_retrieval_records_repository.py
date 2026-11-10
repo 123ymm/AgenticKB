@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timezone
 import json
 
 import pytest
@@ -165,6 +165,64 @@ async def test_list_records_applies_the_same_days_window_as_summary() -> None:
     assert "occurred_at >= %(since)s" in sql
     assert isinstance(params["since"], datetime)
     assert params["limit"] == 26
+
+
+@pytest.mark.asyncio
+async def test_list_records_custom_window_replaces_the_day_preset() -> None:
+    """自定义日期窗口：闭区间 [start, end] 映射为 [start 00:00, end+1 00:00) 半开区间。"""
+    connection = _ListConnection()
+    repository = RetrievalRecordRepository(_Pool(connection))
+
+    await repository.list_records(
+        domain="d1",
+        days=30,
+        start_date=date(2026, 10, 1),
+        end_date=date(2026, 10, 3),
+        actor_user_id=None,
+        source=None,
+        tool_name=None,
+        operation=None,
+        kb_id=None,
+        mcp_key_id=None,
+        status=None,
+        paradigm_id=None,
+        visible_kb_ids=None,
+        cursor_at=None,
+        cursor_id=None,
+        page_size=25,
+    )
+
+    sql, params = connection.statements[0]
+    assert "occurred_at >= %(since)s" in sql
+    assert "occurred_at < %(until)s" in sql
+    assert params["since"] == datetime(2026, 10, 1, tzinfo=timezone.utc)
+    assert params["until"] == datetime(2026, 10, 4, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_summary_trend_spans_the_custom_window() -> None:
+    connection = _Connection()
+    repository = RetrievalRecordRepository(_Pool(connection))
+
+    result = await repository.summary(
+        domain="d1",
+        days=7,
+        start_date=date(2026, 10, 1),
+        end_date=date(2026, 10, 3),
+        actor_user_id=None,
+        kb_id=None,
+        visible_kb_ids=None,
+    )
+
+    assert result["days"] == 3
+    assert [item["date"] for item in result["trend"]] == [
+        "2026-10-01", "2026-10-02", "2026-10-03",
+    ]
+    # 六条统计 SQL 共享同一窗口参数（counts/trend/sources/tools/paradigms/top_queries）
+    for sql, params in connection.statements:
+        assert params["since"] == datetime(2026, 10, 1, tzinfo=timezone.utc)
+        assert params["until"] == datetime(2026, 10, 4, tzinfo=timezone.utc)
+        assert "occurred_at < %(until)s" in sql
 
 
 def test_upsert_only_transitions_pending_to_terminal_and_terminal_replay_is_idempotent() -> None:

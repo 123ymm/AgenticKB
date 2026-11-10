@@ -71,4 +71,62 @@ describe('RetrievalRecordsAnalysis', () => {
     const toolBars = wrapper.findAllComponents({ name: 'BarChart' })[1]
     expect(toolBars.props('data')).toEqual([{ name: 'search_knowledge', value: 5 }])
   })
+
+  it('defaults to the 7-day window and switches presets immediately', async () => {
+    const wrapper = shallowMount(RetrievalRecordsAnalysis)
+    await flushPromises()
+
+    expect(api.getSummary).toHaveBeenCalledTimes(1)
+    expect(api.getSummary).toHaveBeenCalledWith('domain-a', expect.objectContaining({ days: 7 }))
+
+    await wrapper.find('[aria-label="时间范围"]').setValue('30')
+    await flushPromises()
+    expect(api.getSummary).toHaveBeenCalledTimes(2)
+    expect(api.getSummary).toHaveBeenLastCalledWith('domain-a', expect.objectContaining({ days: 30 }))
+  })
+
+  it('switching to custom prefills the last 7 days and queries the custom window', async () => {
+    const wrapper = shallowMount(RetrievalRecordsAnalysis)
+    await flushPromises()
+    expect(api.getSummary).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('[aria-label="时间范围"]').setValue('custom')
+    await flushPromises()
+
+    // 预填近 7 天 → 一次带 start/end（不再送 days）的请求
+    expect(api.getSummary).toHaveBeenCalledTimes(2)
+    const filters = api.getSummary.mock.calls[1][1]
+    expect(filters.days).toBeUndefined()
+    expect(filters.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(filters.endDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+
+    await wrapper.find('[aria-label="开始日期"]').setValue('2026-10-01')
+    await wrapper.find('[aria-label="结束日期"]').setValue('2026-10-20')
+    await flushPromises()
+    expect(api.getSummary).toHaveBeenLastCalledWith('domain-a', expect.objectContaining({
+      startDate: '2026-10-01', endDate: '2026-10-20',
+    }))
+  })
+
+  it('shows an inline error and skips the request for invalid custom ranges', async () => {
+    const wrapper = shallowMount(RetrievalRecordsAnalysis)
+    await flushPromises()
+    expect(api.getSummary).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('[aria-label="时间范围"]').setValue('custom')
+    await flushPromises()
+    expect(api.getSummary).toHaveBeenCalledTimes(2)
+
+    // 开始日期先改成仍合法的值（与预填的结束日期构成合法区间）→ 正常加载一次
+    await wrapper.find('[aria-label="开始日期"]').setValue('2026-10-21')
+    await flushPromises()
+    expect(api.getSummary).toHaveBeenCalledTimes(3)
+
+    // 结束日期改到开始之前 → 倒序区间只提示不请求
+    await wrapper.find('[aria-label="结束日期"]').setValue('2026-10-20')
+    await flushPromises()
+
+    expect(api.getSummary).toHaveBeenCalledTimes(3)
+    expect(wrapper.find('.records-analysis__range-error').text()).toContain('开始日期不能晚于结束日期')
+  })
 })

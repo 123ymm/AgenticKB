@@ -102,8 +102,13 @@ class ObjectStorePort(Protocol):
         self,
         location: ObjectLocation,
         expires_in_seconds: int = 900,
+        filename: str | None = None,
     ) -> PresignedAccess:
-        """Mint a short-lived GET URL for an existing object (SRS §C00)."""
+        """Mint a short-lived GET URL for an existing object (SRS §C00).
+
+        ``filename``（可选）让适配器在 URL 上带 response-content-disposition
+        （RFC 5987），浏览器直连下载时保存为业务文件名而非 object_key 尾段。
+        """
         ...
 
     async def presign_put(

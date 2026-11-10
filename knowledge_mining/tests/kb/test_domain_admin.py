@@ -60,7 +60,10 @@ async def _client(async_pool) -> AsyncClient:
 
 async def test_domain_grants_default_member_and_preserve_role(async_pool):
     db = KbDB(async_pool)
-    user = await db.create_user(username=_name("grant"), site_role="member")
+    # 域管理员授权契约：目标用户须已有密码（首个密码走 set_domain_grants_with_password）
+    user = await db.create_user(
+        username=_name("grant"), password_hash="test-hash", site_role="member",
+    )
     await db.set_domain_grants(user_id=user["id"], grants=[
         {"domain": "generic", "domain_role": "admin"},
         {"domain": "odn", "domain_role": "member"},
@@ -78,12 +81,17 @@ async def test_domain_grants_default_member_and_preserve_role(async_pool):
 
 async def test_domain_admin_manages_every_kb_only_in_own_domain(async_pool):
     db = KbDB(async_pool)
-    domain_admin = await db.create_user(username=_name("domain_admin"), site_role="member")
+    domain_admin = await db.create_user(
+        username=_name("domain_admin"), password_hash="test-hash", site_role="member",
+    )
     owner = await db.create_user(username=_name("owner"), site_role="member")
     await db.set_domain_grants(user_id=domain_admin["id"], grants=[
         {"domain": "generic", "domain_role": "admin"},
         {"domain": "odn", "domain_role": "member"},
     ])
+    # owner 建两个域的库，先各补绑定（create_user 只自动绑默认域）
+    await db.bind_domain(user_id=owner["id"], domain="generic")
+    await db.bind_domain(user_id=owner["id"], domain="odn")
     own_domain_kb = await db.create_kb(
         domain="generic", name=_name("private"), owner_id=owner["id"], visibility="private",
     )
@@ -185,7 +193,9 @@ async def test_site_admin_assigns_roles_and_domain_admin_manages_members(async_p
 
 async def test_domain_access_endpoint_exposes_scoped_capabilities(async_pool):
     db = KbDB(async_pool)
-    domain_admin = await db.create_user(username=_name("caps"), site_role="member")
+    domain_admin = await db.create_user(
+        username=_name("caps"), password_hash="test-hash", site_role="member",
+    )
     await db.set_domain_grants(user_id=domain_admin["id"], grants=[
         {"domain": "generic", "domain_role": "admin"},
         {"domain": "odn", "domain_role": "member"},

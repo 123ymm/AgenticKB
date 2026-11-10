@@ -153,17 +153,20 @@ def _client(monkeypatch, *, configured=True):
     app.dependency_overrides[onenet_routes.require_admin] = fake_admin
     app.dependency_overrides[onenet_routes.current_user] = fake_current
 
-    if configured:
-        monkeypatch.setattr(onenet_routes, "resolve_config", lambda: CFG)
-    else:
-        monkeypatch.setattr(onenet_routes, "resolve_config", lambda: None)
+    # 域覆盖后配置解析走 resolve_effective_config（TTL 缓存+回落链在
+    # test_effective_config.py 单测）；此处直接打桩该 seam。
+    async def fake_resolve(domain=None):
+        return CFG if configured else None
+
+    monkeypatch.setattr(onenet_routes, "resolve_effective_config", fake_resolve)
 
     monkeypatch.setattr(
         onenet_routes, "_repo", lambda request: repo)
     if configured:
+        async def fake_make(domain=None):
+            return FakeScanClient()
         monkeypatch.setattr(
-            onenet_routes, "_client_factory",
-            lambda request: (lambda: FakeScanClient()))
+            onenet_routes, "_client_factory", lambda request: fake_make)
         async def fake_import_service(request):
             return FakeImportService(repo)
         monkeypatch.setattr(
@@ -477,3 +480,122 @@ def test_delete_import_busy_rejected(monkeypatch):
 def test_delete_import_not_found(monkeypatch):
     c, _ = _client(monkeypatch)
     assert c.delete("/api/onenet/imports/nope").status_code == 404
+
+
+# ---------------------------------------------------------------- 域覆盖路由（62号镜像）
+
+
+def _domain_client(monkeypatch, *, domains=("cloud_core_network",), global_ok=True):
+    """按域路由装配：保留真 _client_factory（不整体替换），只打桩
+    resolve_effective_config（按域回放+调用记录）与 OnenetClient.from_config
+    （返回 FakeScanClient）——断言各端点把正确的域传进解析 seam。"""
+    app = FastAPI()
+    app.include_router(onenet_routes.router)
+    repo = FakeRepo()
+    app.state.pg_pool = None
+
+    async def fake_admin():
+        return ADMIN
+
+    async def fake_current():
+        return ADMIN
+
+    app.dependency_overrides[onenet_routes.require_admin] = fake_admin
+    app.dependency_overrides[onenet_routes.current_user] = fake_current
+
+    seen: list[str | None] = []
+
+    async def fake_resolve(domain=None):
+        seen.append(domain)
+        if domain is None:
+            return CFG if global_ok else None
+        if domain in domains:
+            return OnenetConfig(app_id=f"app-{domain}", static_token="s")
+        return None                       # 该域未配置（无覆盖文件语义）
+
+    monkeypatch.setattr(onenet_routes, "resolve_effective_config", fake_resolve)
+    monkeypatch.setattr(onenet_routes, "_repo", lambda request: repo)
+
+    import knowledge_mining.mining.onenet.client as onenet_client_mod
+    monkeypatch.setattr(
+        onenet_client_mod.OnenetClient, "from_config",
+        classmethod(lambda cls, cfg: FakeScanClient()))
+
+    return TestClient(app), repo, seen
+
+
+def test_search_defaults_to_global_then_accepts_domain(monkeypatch):
+    c, _, seen = _domain_client(monkeypatch)
+    cond = [{"field": "doc_name", "fuzzy": False, "content": "UDG"}]
+    assert c.post("/api/onenet/search", json={"conditions": cond}).status_code == 200
+    assert seen == [None]                 # 不带 domain → 全局基底
+    assert c.post("/api/onenet/search", json={
+        "conditions": cond, "domain": "cloud_core_network"}).status_code == 200
+    assert seen == [None, "cloud_core_network"]
+
+
+def test_probe_accepts_domain(monkeypatch):
+    c, _, seen = _domain_client(monkeypatch)
+    assert c.post("/api/onenet/probe", json={
+        "source_id": "DOC1", "domain": "cloud_core_network"}).status_code == 200
+    assert seen == ["cloud_core_network"]
+    assert c.post("/api/onenet/probe", json={"source_id": "DOC1"}).status_code == 200
+    assert seen == ["cloud_core_network", None]
+
+
+def test_toc_resolves_with_body_domain(monkeypatch):
+    c, _, seen = _domain_client(monkeypatch)
+    resp = c.post("/api/onenet/toc", json={
+        "domain": "cloud_core_network", "source_id": "DOC1"})
+    assert resp.status_code == 200
+    assert seen == ["cloud_core_network"]  # 扫描路径按域取配置
+
+
+def test_unconfigured_domain_503_while_global_ok(monkeypatch):
+    c, _, seen = _domain_client(monkeypatch, domains=())
+    resp = c.post("/api/onenet/search", json={
+        "conditions": [{"field": "doc_name", "fuzzy": False, "content": "UDG"}],
+        "domain": "other_domain"})
+    assert resp.status_code == 503
+    assert "other_domain" in resp.json()["detail"]
+    # 全局基底照常可用（未配置域不拖垮全局）
+    ok = c.post("/api/onenet/search", json={
+        "conditions": [{"field": "doc_name", "fuzzy": False, "content": "UDG"}]})
+    assert ok.status_code == 200
+
+
+def test_resync_resolves_with_import_row_domain(monkeypatch):
+    """重同步用导入记录里的域取 client（后台域在路由外不可知）。"""
+    c, repo, seen = _domain_client(monkeypatch)
+    repo.imports["imp-1"] = {"id": "imp-1", "domain": "cloud_core_network",
+                             "source_id": "DOC1", "kb_id": "kb-pub",
+                             "created_by": "u-admin"}
+    captured: dict[str, object] = {}
+
+    async def fake_resync(**kw):
+        captured["client"] = kw["client"]
+        return {"ok": True}
+
+    import knowledge_mining.mining.onenet.resync as resync_mod
+    monkeypatch.setattr(resync_mod, "resync", fake_resync)
+
+    class FakeImportSvc:
+        async def _import_file(self, **kw):
+            return "d1"
+
+    async def fake_import_service(request):
+        return FakeImportSvc()
+
+    monkeypatch.setattr(onenet_routes, "_import_service", fake_import_service)
+
+    import knowledge_mining.mining.kb.deps as deps
+
+    async def fake_doc_service(request):
+        return object()
+
+    monkeypatch.setattr(deps, "get_document_service", fake_doc_service)
+
+    resp = c.post("/api/onenet/imports/imp-1/resync")
+    assert resp.status_code == 200
+    assert isinstance(captured["client"], FakeScanClient)
+    assert seen == ["cloud_core_network"]

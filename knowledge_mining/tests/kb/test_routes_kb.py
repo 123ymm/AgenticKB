@@ -63,13 +63,20 @@ async def test_create_list_get_update_delete(async_pool):
         # 2026-09-16 删除体系：DELETE=硬删管线，需 confirm_name（库全名）→ 202
         r = await c.request("DELETE", f"/api/kb/{kb_id}", json={"confirm_name": "KB-A2"}, headers=h)
         assert r.status_code == 202, r.text
-        # deleting 态置位/后台管线有异步窗口——轮询至 404（读写全退，不泄露存在性）
+        # deleting 态置位/后台管线有异步窗口——轮询至 404（读写全退，不泄露存在性）。
+        # 库行要等管线末尾的 DELETE 才消失，远程 PG 批量跑时偶发超 10s——
+        # 预算放宽到 20s，超时附 purge-task 状态便于定位（管线卡住 vs 真没删）
         import asyncio
-        for _ in range(20):
+        for _ in range(40):
             r = await c.get(f"/api/kb/{kb_id}", headers=h)
             if r.status_code == 404:
                 break
             await asyncio.sleep(0.5)
+        if r.status_code != 404:
+            tasks = await c.get(f"/api/kb/purge-tasks?domain={DOMAIN}", headers=h)
+            raise AssertionError(
+                f"purge not finished in 20s: kb={kb_id} still {r.status_code}, "
+                f"tasks={tasks.text[:500]}")
         assert r.status_code == 404
 
 

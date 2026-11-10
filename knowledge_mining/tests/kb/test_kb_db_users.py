@@ -36,6 +36,9 @@ async def test_user_crud(async_pool):
     assert (await db.list_users()) and any(x["username"] == "bob" for x in await db.list_users())
     await db.update_user(u["id"], site_role="admin")
     assert (await db.get_user_by_username("bob"))["site_role"] == "admin"
+    # bob 现在是库里唯一 active admin——再留一个备用 admin，禁用才不触发
+    # last_active_admin 守卫（该行为由 test_user_lifecycle 的守卫用例单独钉）
+    await db.create_user(username="backup-admin", password_hash="h0", site_role="admin")
     await db.update_user(u["id"], status="disabled")
     assert (await db.get_user_by_username("bob"))["status"] == "disabled"
     await db.set_password_hash(u["id"], "h2")

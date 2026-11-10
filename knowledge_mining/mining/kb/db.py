@@ -277,15 +277,29 @@ class KbDB:
     async def _lock_user_domain_access_on_conn(
         conn: Any, *, user_id: str, domain: str,
     ) -> bool:
+        """FOR SHARE 串行化用户行后，**另起一条语句**重查域绑定。
+
+        不能把 EXISTS 绑定检查并进 FOR SHARE 同一条：被 unbind_domain 的
+        FOR UPDATE 阻塞再唤醒时，EvalPlanQual 重查仍按语句起始快照取
+        user_domains，刚解绑的域会被当成仍绑定——并发 unbind + 建钥匙/建库
+        实测会造出「未绑定域里的 active 钥匙」。READ COMMITTED 每条语句
+        取新快照，锁到之后再查才能看到解绑结果。
+        """
         cur = await conn.execute(
-            """SELECT u.id FROM kb_users u
-               WHERE u.id = %(uid)s AND u.status = 'active'
-                 AND u.deleted_at IS NULL
+            """SELECT id FROM kb_users
+               WHERE id = %(uid)s AND status = 'active' AND deleted_at IS NULL
+               FOR SHARE""",
+            {"uid": user_id},
+        )
+        if await cur.fetchone() is None:
+            return False
+        cur = await conn.execute(
+            """SELECT 1 FROM kb_users u
+               WHERE u.id = %(uid)s
                  AND (u.site_role = 'admin' OR EXISTS (
                      SELECT 1 FROM user_domains ud
                      WHERE ud.user_id = u.id AND ud.domain = %(domain)s
-                 ))
-               FOR SHARE""",
+                 ))""",
             {"uid": user_id, "domain": domain},
         )
         return await cur.fetchone() is not None
@@ -1033,6 +1047,22 @@ class KbDB:
                 row = await cur.fetchone()
                 return dict(row)  # type: ignore[arg-type]
 
+    async def _lock_transfer_users_on_conn(
+        self, conn: Any, *, lock_ids: set[str],
+    ) -> dict[str, dict[str, Any]]:
+        """FOR SHARE 锁定转移相关用户行（并发清除/转移竞态测试的暂停 seam）。"""
+        locked_users: dict[str, dict[str, Any]] = {}
+        for locked_user_id in sorted(lock_ids):
+            cur = await conn.execute(
+                """SELECT id, status, site_role, deleted_at FROM kb_users
+                   WHERE id = %s FOR SHARE""",
+                (locked_user_id,),
+            )
+            row = await cur.fetchone()
+            if row is not None:
+                locked_users[locked_user_id] = dict(row)
+        return locked_users
+
     async def transfer_kb_owner(
         self, *, kb_id: str, actor_id: str, new_owner_id: str, keep_old_as_editor: bool,
     ) -> dict[str, Any] | None:
@@ -1050,16 +1080,9 @@ class KbDB:
                 lock_ids = {str(actor_id), str(new_owner_id)}
                 if keep_old_as_editor:
                     lock_ids.add(str(kb["owner_id"]))
-                locked_users: dict[str, dict[str, Any]] = {}
-                for locked_user_id in sorted(lock_ids):
-                    cur = await conn.execute(
-                        """SELECT id, status, site_role, deleted_at FROM kb_users
-                           WHERE id = %s FOR SHARE""",
-                        (locked_user_id,),
-                    )
-                    row = await cur.fetchone()
-                    if row is not None:
-                        locked_users[locked_user_id] = dict(row)
+                locked_users = await self._lock_transfer_users_on_conn(
+                    conn, lock_ids=lock_ids,
+                )
                 actor = locked_users.get(str(actor_id))
                 if (
                     actor is None or actor["status"] != "active"
@@ -1320,7 +1343,7 @@ class KbDB:
             cur = await conn.execute(
                 """SELECT id, domain, name, description, owner_id, visibility, status,
                           deleted_at, created_at, updated_at, mining_workflow_id,
-                          default_paradigm_id
+                          default_paradigm_id, metadata_json
                    FROM knowledge_bases WHERE id = %s""" + clause,
                 [kb_id],
             )
@@ -2526,6 +2549,7 @@ WITH latest AS (
                            d.document_type, d.storage_path, d.directory_path, d.owner_id,
                            d.metadata_json, d.created_at, d.file_size, d.modified_at,
                            d.storage_object_id, d.source_raw_hash, d.content_revision, d.folder_id,
+                           d.deleted_at,
                            {_KNOWLEDGE_OUTDATED_SQL} AS knowledge_outdated,
                            {_STATUS_CASE_SQL} AS status
                     FROM asset_documents d
@@ -2985,6 +3009,223 @@ WITH latest AS (
                 [kb_id, directory_path or "", document_name])
             row = await cur.fetchone()
             return dict(row) if row else None
+
+    # ---------------------------------------------------------------- copy (v1.1 快照血缘共享)
+
+    async def count_active_documents_in_kb(self, kb_id: str) -> int:
+        """KB 内 active（未软删）文档数——copy 前置校验（空库/超上限）。"""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) AS n FROM asset_documents"
+                " WHERE kb_id = %s AND deleted_at IS NULL",
+                [kb_id],
+            )
+            return int((await cur.fetchone())["n"])
+
+    async def copy_kb(
+        self, *, source_kb_id: str, operator_id: str, name: str,
+        visibility: str, description: str | None,
+        copy_source: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """整库拷贝（docs/kb-copy-design.md v1.1 §4）：单事务五步，任一步失败整体回滚。
+
+        快照血缘共享而非直建 Build：新文档经 snapshot_links 链到源快照，
+        检索能力由新库自行挖掘获得（首挖指纹命中 → 复用既有 v2 资产）。
+
+        - 源库行 FOR SHARE：与 purge/软删的 FOR UPDATE 互斥——拷贝期间源库不被并发删除；
+          行不存在或非 active（校验后到锁前的竞态软删）→ 返回 None，调用方译 404。
+        - 对象字节零复制：新 asset_documents 行指向同一 storage_object_id
+          （对象回收按全局引用计数，多文档引用安全——设计 §1）。
+        - 锁序 knowledge_bases → kb_users，与 transfer_kb_owner 一致。
+        - 新库 mining_workflow_id = NULL（范式不复制；/mine 400 引导先选范式）。
+        """
+        now = _utcnow()
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                cur = await conn.execute(
+                    """SELECT id, domain, name, owner_id FROM knowledge_bases
+                       WHERE id = %s AND status = 'active' FOR SHARE""",
+                    [source_kb_id],
+                )
+                source = await cur.fetchone()
+                if source is None:
+                    return None
+                if not await self._lock_user_domain_access_on_conn(
+                    conn, user_id=operator_id, domain=source["domain"],
+                ):
+                    raise UserDeletionConflict("user_not_active")
+
+                # 1. 新 KB 行（copy_source 溯源记入 metadata_json）
+                new_kb_id = _new_id()
+                cur = await conn.execute(
+                    """INSERT INTO knowledge_bases
+                         (id, domain, name, description, owner_id, visibility, status,
+                          metadata_json, created_at, updated_at, mining_workflow_id)
+                       VALUES
+                         (%(id)s, %(dom)s, %(n)s, %(desc)s, %(own)s, %(vis)s, 'active',
+                           %(meta)s::jsonb, %(t)s, %(t)s, NULL)
+                       RETURNING id, domain, name, description, owner_id, visibility,
+                                 status, metadata_json, created_at, updated_at,
+                                 mining_workflow_id""",
+                    {
+                        "id": new_kb_id, "dom": source["domain"], "n": name,
+                        "desc": description, "own": operator_id, "vis": visibility,
+                        "meta": _json({"copy_source": copy_source}), "t": now,
+                    },
+                )
+                new_kb = dict(await cur.fetchone())  # type: ignore[arg-type]
+
+                # 2. 目录树：新 id、新 kb_id、parent_id 重映射；path 原样
+                #    （(kb_id, path) 唯一约束天然无冲突；ORDER BY path 保证父先于子，
+                #     故先为全部分配新 id、再按序插入，parent 引用同批新 id 已就绪）。
+                cur = await conn.execute(
+                    """SELECT id, parent_id, name, path FROM kb_folders
+                       WHERE kb_id = %s ORDER BY path""",
+                    [source_kb_id],
+                )
+                folder_rows = [dict(r) for r in await cur.fetchall()]
+                folder_map = {r["id"]: _new_id() for r in folder_rows}
+                if folder_rows:
+                    # executemany 是 cursor 的方法（psycopg3 的 AsyncConnection
+                    # 没有 executemany——上线首拷即 500 的原因）；3.1+ 走 pipeline 批量。
+                    async with conn.cursor() as cur:
+                        await cur.executemany(
+                            """INSERT INTO kb_folders
+                                 (id, kb_id, parent_id, name, path, created_at, created_by)
+                               VALUES (%(id)s, %(kb)s, %(p)s, %(n)s, %(path)s, %(t)s, %(cb)s)""",
+                            [
+                                {
+                                    "id": folder_map[r["id"]], "kb": new_kb_id,
+                                    "p": folder_map[r["parent_id"]]
+                                         if r["parent_id"] is not None else None,
+                                    "n": r["name"], "path": r["path"], "t": now,
+                                    "cb": operator_id,
+                                }
+                                for r in folder_rows
+                            ],
+                        )
+
+                # 3. 文档批量拷贝：新 document_id + 新 kb_id（document_key 在
+                #    (kb_id, document_key) 唯一约束下原样安全）；对象指针/内容身份
+                #    同源共享；owner = 操作者；storage_path（legacy）与软删列不复制。
+                #    created_at 是 TEXT、content_updated_at 是 TIMESTAMPTZ——同一
+                #    ISO 串喂两列会触发 AmbiguousParameter，拆 t1/t2 两个绑定参数。
+                cur = await conn.execute(
+                    """SELECT id, domain, document_key, document_name, document_type,
+                              metadata_json::text AS metadata_json, directory_path,
+                              file_size, modified_at, storage_object_id,
+                              source_raw_hash, content_revision, folder_id
+                       FROM asset_documents
+                       WHERE kb_id = %s AND deleted_at IS NULL
+                       ORDER BY document_key""",
+                    [source_kb_id],
+                )
+                doc_rows = [dict(r) for r in await cur.fetchall()]
+                doc_map = {r["id"]: _new_id() for r in doc_rows}
+                if doc_rows:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(
+                            """INSERT INTO asset_documents
+                                 (id, domain, document_key, document_name, document_type,
+                                  metadata_json, created_at, kb_id, directory_path, owner_id,
+                                  file_size, modified_at, storage_object_id, source_raw_hash,
+                                  content_revision, content_updated_at, folder_id)
+                               VALUES
+                                 (%(id)s, %(dom)s, %(k)s, %(n)s, %(t)s,
+                                  %(meta)s::jsonb, %(t1)s, %(kb)s, %(dp)s, %(own)s,
+                                  %(fs)s, %(ma)s, %(so)s, %(hash)s,
+                                  %(rev)s, %(t2)s, %(folder)s)""",
+                            [
+                                {
+                                    "id": doc_map[r["id"]], "dom": r["domain"],
+                                    "k": r["document_key"], "n": r["document_name"],
+                                    "t": r["document_type"],
+                                    "meta": r["metadata_json"] or "{}",
+                                    "t1": now, "t2": now,
+                                    "kb": new_kb_id, "dp": r["directory_path"],
+                                    "own": operator_id, "fs": r["file_size"],
+                                    "ma": r["modified_at"], "so": r["storage_object_id"],
+                                    "hash": r["source_raw_hash"],
+                                    "rev": r["content_revision"],
+                                    "folder": folder_map[r["folder_id"]]
+                                              if r["folder_id"] is not None else None,
+                                }
+                                for r in doc_rows
+                            ],
+                        )
+
+                # 4. 快照血缘：仅 §2 有 build 映射的文档建 link（复用
+                #    get_current_serving_snapshot 的「先 DISTINCT ON 取最新 build 行、
+                #    再滤 active」语义，批量版）。link 字段取自源 link；
+                #    source_batch_id 不复制（批次归属源库的上传事实）。
+                cur = await conn.execute(
+                    """SELECT t.document_id, t.document_snapshot_id,
+                              l.relative_path, l.source_uri, l.title,
+                              l.source_storage_object_id, l.source_content_revision,
+                              l.linked_at
+                       FROM (
+                           SELECT DISTINCT ON (bs.document_id)
+                                  bs.document_id, bs.document_snapshot_id,
+                                  bs.selection_status
+                           FROM asset_build_document_snapshots bs
+                           JOIN asset_builds b ON b.id = bs.build_id
+                           JOIN asset_documents d ON d.id = bs.document_id
+                           WHERE b.kb_id = %s
+                             AND b.status IN ('validated', 'published')
+                             AND b.kb_id = d.kb_id
+                             AND d.deleted_at IS NULL
+                           ORDER BY bs.document_id, b.created_at DESC, b.id DESC
+                       ) t
+                       JOIN asset_document_snapshot_links l
+                         ON l.document_snapshot_id = t.document_snapshot_id
+                            AND l.document_id = t.document_id
+                       WHERE t.selection_status = 'active'""",
+                    [source_kb_id],
+                )
+                serving_rows = [dict(r) for r in await cur.fetchall()]
+                # 同 (doc, snapshot) 多条 link（指纹复用重挖再挂链）时取 linked_at 最新。
+                latest_link: dict[str, dict[str, Any]] = {}
+                for r in serving_rows:
+                    key = str(r["document_id"])
+                    if key not in latest_link or str(r["linked_at"] or "") >= str(
+                        latest_link[key]["linked_at"] or ""
+                    ):
+                        latest_link[key] = r
+                link_rows = [
+                    r for r in latest_link.values() if r["document_id"] in doc_map
+                ]
+                if link_rows:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(
+                            """INSERT INTO asset_document_snapshot_links
+                                 (id, document_id, document_snapshot_id, source_batch_id,
+                                  relative_path, source_uri, title, linked_at,
+                                  source_storage_object_id, source_content_revision)
+                               VALUES
+                                 (%(id)s, %(doc)s, %(snap)s, NULL,
+                                  %(rp)s, %(su)s, %(title)s, %(t)s,
+                                  %(so)s, %(rev)s)""",
+                            [
+                                {
+                                    "id": _new_id(), "doc": doc_map[r["document_id"]],
+                                    "snap": r["document_snapshot_id"],
+                                    "rp": r["relative_path"], "su": r["source_uri"],
+                                    "title": r["title"], "t": now,
+                                    "so": r["source_storage_object_id"],
+                                    "rev": r["source_content_revision"],
+                                }
+                                for r in link_rows
+                            ],
+                        )
+
+                return {
+                    "kb": new_kb,
+                    "stats": {
+                        "documents": len(doc_rows),
+                        "folders": len(folder_rows),
+                        "linked_snapshots": len(link_rows),
+                    },
+                }
 
     async def replace_document_content(
         self, document_id: str, *, expected_revision: int, storage_object_id: str,

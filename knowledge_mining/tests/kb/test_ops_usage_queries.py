@@ -53,12 +53,14 @@ async def qlog(async_pool):
     """建表 + 清空 + 交出仓储；用完把表删掉，不污染同库的其余用例。"""
     async with async_pool.connection() as conn:
         await conn.execute(_DDL)
-        await conn.execute("TRUNCATE TABLE knowledge_access_records")
+        # CASCADE：knowledge_access_record_payloads 以 FK 引用本表，
+        # 不级联清子表会 FeatureNotSupported。
+        await conn.execute("TRUNCATE TABLE knowledge_access_records CASCADE")
     try:
         yield QueryLogStats(async_pool)
     finally:
         async with async_pool.connection() as conn:
-            await conn.execute("TRUNCATE TABLE knowledge_access_records")
+            await conn.execute("TRUNCATE TABLE knowledge_access_records CASCADE")
 
 
 def _today() -> str:

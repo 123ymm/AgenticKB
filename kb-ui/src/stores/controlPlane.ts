@@ -76,8 +76,12 @@ export const useControlPlaneStore = defineStore('control-plane', () => {
     if (!selectedSystemConfigName.value) return
     saving.value = true
     try {
-      await api.updateSystemConfigRaw(selectedSystemConfigName.value, systemConfigText.value)
+      const result = await api.updateSystemConfigRaw(
+        selectedSystemConfigName.value,
+        systemConfigText.value,
+      )
       systemConfigOriginal.value = systemConfigText.value
+      return result
     } finally {
       saving.value = false
     }

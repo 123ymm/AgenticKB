@@ -28,6 +28,7 @@ async def _mk_doc(
 async def test_search_by_name_substring_and_case(async_pool):
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("fs_case")
+    await db.bind_domain(user_id=owner["id"], domain="generic")  # upsert 只绑默认域
     kb = await db.create_kb(domain="generic", name="fs-case", owner_id=owner["id"])
     await _mk_doc(db, kb["id"], "设备X手册.pdf")
     await _mk_doc(db, kb["id"], "Release-Notes.txt")
@@ -46,6 +47,7 @@ async def test_search_by_name_substring_and_case(async_pool):
 async def test_search_directory_prefix_recursive_boundary(async_pool):
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("fs_prefix")
+    await db.bind_domain(user_id=owner["id"], domain="generic")  # upsert 只绑默认域
     kb = await db.create_kb(domain="generic", name="fs-prefix", owner_id=owner["id"])
     await _mk_doc(db, kb["id"], "root.pdf")                       # 根
     await _mk_doc(db, kb["id"], "a.pdf", directory="产品文档")
@@ -64,6 +66,7 @@ async def test_search_directory_prefix_recursive_boundary(async_pool):
 async def test_search_status_filter(async_pool):
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("fs_status")
+    await db.bind_domain(user_id=owner["id"], domain="generic")  # upsert 只绑默认域
     kb = await db.create_kb(domain="generic", name="fs-status", owner_id=owner["id"])
     await _mk_doc(db, kb["id"], "fresh.md")  # 无 run 记录 → uploaded
 

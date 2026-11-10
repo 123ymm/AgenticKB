@@ -219,6 +219,11 @@ def _truncate_all(conn):
     conn.execute("TRUNCATE TABLE kb_members CASCADE")
     conn.execute("TRUNCATE TABLE knowledge_bases CASCADE")
     conn.execute("TRUNCATE TABLE kb_users CASCADE")
+    # user_domains 随 kb_users 清（不清会孤儿堆积——解绑守卫等按行断言的
+    # 测试会被跨 run 残留污染；无 FK，显式清）。
+    conn.execute("TRUNCATE TABLE user_domains CASCADE")
+    # 整库导出任务表（无 FK；残留任务行会让列表/幂等断言跨测试污染）。
+    conn.execute("TRUNCATE TABLE kb_export_tasks CASCADE")
 
     # Control tables exist only in the primary database. Domain-only fixtures
     # deliberately omit them, so cleanup must remain tolerant there.

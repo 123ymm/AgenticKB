@@ -80,10 +80,27 @@ async def _client(async_pool):
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-async def _mcp_upload(c, kb_id: str, filename: str) -> dict:
+async def _mk_key_opening_kb(async_pool, kb_id: str) -> str:
+    """begin-upload 已收口到钥匙级（51号批次2）：需要该用户一把 active 钥匙
+    且目标库在开放集里。直接落钥匙行（本文件只测排队语义，不走服务层建钥）。"""
+    from knowledge_mining.mining.kb.db import KbDB
+
+    db = KbDB(async_pool)
+    user = await db.get_user_by_username("auto-queue-owner")
+    key_id = uuid.uuid4().hex
+    await db.create_mcp_key(
+        user_id=user["id"], name=f"auto-queue-{key_id[:8]}", domain=DOMAIN,
+        key_hash=f"hash-{key_id}", key_prefix=key_id[:8], key_id=key_id,
+    )
+    await db.replace_mcp_key_open_kbs(key_id=key_id, kb_ids=[kb_id])
+    return key_id
+
+
+async def _mcp_upload(c, kb_id: str, filename: str, key_id: str) -> dict:
     """两步直传：begin-upload 拿票据 → PUT 原始字节 → 最终结果。"""
     begin = await c.post("/api/kb/mcp-tools/begin-upload", headers=INTERNAL_HEADERS, json={
         "username": "auto-queue-owner", "kb_id": kb_id, "filename": filename,
+        "key_id": key_id,
     })
     assert begin.status_code == 200, begin.text
     ticket = begin.json()["ticket"]
@@ -122,12 +139,13 @@ async def test_mcp_upload_queues_then_merges_and_manual_still_409(
         await c.patch(
             f"/api/kb/{kb_id}", json={"mining_workflow_id": "wf-test"}, headers=headers,
         )
+        key_id = await _mk_key_opening_kb(async_pool, kb_id)
 
-        first = await _mcp_upload(c, kb_id, "first.md")
+        first = await _mcp_upload(c, kb_id, "first.md", key_id)
         assert first["auto_mined"] is True, first
         assert first["run_id"]
 
-        second = await _mcp_upload(c, kb_id, "second.md")
+        second = await _mcp_upload(c, kb_id, "second.md", key_id)
         assert second["auto_mined"] is True
         assert second["run_id"] == first["run_id"]  # 合并：同一条排队 Run
 
@@ -162,9 +180,11 @@ async def test_mcp_direct_upload_zip_extracts_like_web_upload(async_pool, upload
         )
         assert created.status_code == 201, created.text
         kb_id = created.json()["id"]
+        key_id = await _mk_key_opening_kb(async_pool, kb_id)
 
         begin = await c.post("/api/kb/mcp-tools/begin-upload", headers=INTERNAL_HEADERS, json={
             "username": "auto-queue-owner", "kb_id": kb_id, "filename": "资料.zip",
+            "key_id": key_id,
         })
         assert begin.status_code == 200, begin.text
         assert begin.json()["max_bytes"] > 50 * 1024 * 1024  # 归档上限
@@ -210,8 +230,9 @@ async def test_upload_without_paradigm_degrades_but_succeeds(async_pool, upload_
         )
         assert cleared.status_code == 200, cleared.text
         assert cleared.json()["mining_workflow_id"] is None
+        key_id = await _mk_key_opening_kb(async_pool, kb_id)
 
-        body = await _mcp_upload(c, kb_id, "plain.md")
+        body = await _mcp_upload(c, kb_id, "plain.md", key_id)
         assert body["document_id"]
         assert body["auto_mined"] is False
         assert body["reason"] == "kb_no_paradigm"

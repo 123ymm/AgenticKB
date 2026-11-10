@@ -62,6 +62,20 @@ manifest 三处镜像校验和——`contract.py` `CURRENT_SCHEMA_CHECKSUM` 与
 - `mcp_key_open_artifacts`（钥匙级制品开放子集，对齐 `mcp_key_open_kbs` 模式）：
   public 不自动暴露给 Agent，每把钥匙显式勾选；读时校验开放行 ⊆ 钥匙主人可见面。
 
+## kb/：整库导出任务表（020，打包下载通道）
+
+启动链 DDL：`kb/schemas/020_kb_export_tasks.sql`（原 018——2026-11-10 合并
+fzl194/master 时与上游 wiki 制品的 018 撞号让位改号，仅改文件名与启动链引用，
+无 ledger 影响）；存量库版本化迁移：
+`migrations/core/20261026_010_kb_export_tasks.sql`（online_expand，两份同文；
+迁移 id 不变——已按该 id 上过生产 ledger）。
+
+`kb_export_tasks` 照 `kb_purge_tasks` 形制（status/phase/progress_json/error +
+lifespan 恢复），补产物列：`artifact_bucket/object_key/size/sha256/doc_count/expires_at`。
+产物是 staging 桶里的裸 zip（原始文档 STORED 不压缩 + manifest.json 清单），
+**不入 `asset_storage_objects`**——不受引用计数/GC 波及；过期由后台 sweep 删对象
+并置 `status='expired'`（行保留供列表回看）。copy_kb 超 5000 文档即引导走本通道。
+
 ## 当前决定
 
 ### 1. 三个库逻辑上分开

@@ -30,10 +30,12 @@ def upload_root(tmp_path_factory):
 async def _client(async_pool):
     app = FastAPI()
     app.state.pg_pool = async_pool
+    from knowledge_mining.mining.kb.routes.folders import router as folders_router
     from knowledge_mining.tests.kb.conftest import attach_object_store
     attach_object_store(app)
     app.include_router(kb_router)
     app.include_router(docs_router)
+    app.include_router(folders_router)
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
@@ -42,6 +44,11 @@ async def test_upload_list_get_patch_download(async_pool, upload_root):
         h = kb_headers("alice")
         kb_id = (await c.post("/api/kb", json={"domain": DOMAIN, "name": "KB1"}, headers=h)).json()["id"]
 
+        # 58号§2.5：上传目录必须先存在（不自动创建）——先建 sub 目录
+        fr = await c.post(
+            f"/api/kb/{kb_id}/folders", json={"name": "sub"}, headers=h,
+        )
+        assert fr.status_code == 201, fr.text
         r = await c.post(
             f"/api/kb/{kb_id}/documents",
             files={"file": ("a.txt", b"hello world")},
@@ -89,22 +96,23 @@ async def test_upload_zip_extracts_with_directory(async_pool, upload_root):
         )
         assert r.status_code == 201, r.text
         docs = r.json()["documents"]
+        # 批次2b：zip 落位前缀 = 压缩包 stem（u.zip → u/…），与网页上传一致
         assert {d["document_name"] for d in docs} == {"x.txt", "y.txt", "z.txt"}
-        assert {d["directory_path"] for d in docs} == {"dir1", "dir1/sub"}
-        assert all(d["document_key"].startswith("doc:/dir1/") for d in docs)
+        assert {d["directory_path"] for d in docs} == {"u/dir1", "u/dir1/sub"}
+        assert all(d["document_key"].startswith("doc:/u/dir1/") for d in docs)
 
         # zip 子目录必须写入 kb_folders，否则文件管理器按 path 过滤会「上传成功但列表空」
         from knowledge_mining.mining.kb.db import KbDB
         folders = await KbDB(async_pool).list_folders(kb_id)
-        assert {f["path"] for f in folders} == {"dir1", "dir1/sub"}
-        parent = next(f for f in folders if f["path"] == "dir1")
-        child = next(f for f in folders if f["path"] == "dir1/sub")
-        assert child["parent_id"] == parent["id"] and parent["parent_id"] is None
+        assert {f["path"] for f in folders} == {"u", "u/dir1", "u/dir1/sub"}
+        parent = next(f for f in folders if f["path"] == "u/dir1")
+        child = next(f for f in folders if f["path"] == "u/dir1/sub")
+        assert child["parent_id"] == parent["id"]
 
-        # 根目录列表不应出现子目录内文件；进入 dir1 可见 x/y
+        # 根目录列表不应出现子目录内文件；进入 u/dir1 可见 x/y
         root_docs = (await c.get(f"/api/kb/{kb_id}/documents", params={"directory": ""}, headers=h)).json()
         assert root_docs == []
-        dir1_docs = (await c.get(f"/api/kb/{kb_id}/documents", params={"directory": "dir1"}, headers=h)).json()
+        dir1_docs = (await c.get(f"/api/kb/{kb_id}/documents", params={"directory": "u/dir1"}, headers=h)).json()
         assert {d["document_name"] for d in dir1_docs} == {"x.txt", "y.txt"}
 
 
@@ -140,7 +148,8 @@ async def test_upload_zip_with_nested_xlsx_is_discoverable(async_pool, upload_ro
     assert [document["document_name"] for document in documents] == [
         "inventory.xlsx"
     ]
-    assert documents[0]["document_key"] == "doc:/nested/inventory.xlsx"
+    # 批次2b：zip 落位前缀 = 压缩包 stem（excel.zip → excel/…）
+    assert documents[0]["document_key"] == "doc:/excel/nested/inventory.xlsx"
 
     # 对象存储时代：zip 成员走内容寻址对象（无本地解压目录），
     # 断言文档行携带对象指针与源哈希（挖掘输入按对象身份解析）。
@@ -157,10 +166,11 @@ async def test_other_user_cannot_access_private_kb_docs(async_pool, upload_root)
             f"/api/kb/{kb_id}/documents", files={"file": ("a.txt", b"x")}, headers=h_a,
         )).json()["id"]
 
-        # bob 对 private KB 的文档：list/get/download 全 404（不泄露）
+        # bob 对 private KB 的文档：列表/写 404（KB 级不可见，不泄露）；
+        # 47号后单文档读（get/download）是文档级授权——存在但无权 → 403
         assert (await c.get(f"/api/kb/{kb_id}/documents", headers=h_b)).status_code == 404
-        assert (await c.get(f"/api/kb/{kb_id}/documents/{doc_id}", headers=h_b)).status_code == 404
-        assert (await c.get(f"/api/kb/{kb_id}/documents/{doc_id}/download", headers=h_b)).status_code == 404
+        assert (await c.get(f"/api/kb/{kb_id}/documents/{doc_id}", headers=h_b)).status_code == 403
+        assert (await c.get(f"/api/kb/{kb_id}/documents/{doc_id}/download", headers=h_b)).status_code == 403
         assert (await c.patch(f"/api/kb/{kb_id}/documents/{doc_id}", json={"document_name": "h"}, headers=h_b)).status_code == 404
 
 
@@ -174,7 +184,8 @@ async def test_delete_removes_file_and_identity(async_pool, upload_root):
         )).json()["id"]
         r = await c.delete(f"/api/kb/{kb_id}/documents/{doc_id}", headers=h)
         assert r.status_code == 200
-        assert r.json() == {"ok": True}
+        # 删除管线顺带回收存储对象/快照（增量字段）
+        assert r.json() == {"ok": True, "reclaimed_objects": 1, "reclaimed_snapshots": 0}
         # 身份行已删：再 get → 404
         assert (await c.get(f"/api/kb/{kb_id}/documents/{doc_id}", headers=h)).status_code == 404
 

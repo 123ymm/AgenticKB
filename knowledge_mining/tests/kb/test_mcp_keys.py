@@ -54,6 +54,8 @@ async def test_mcp_key_lifecycle(kbdb):
     s = _suffix()
     uid = f"u_mk_1_{s}"
     await _mk_user(kbdb, uid, f"mk_user_1_{s}")
+    await kbdb.bind_domain(user_id=uid, domain="generic")  # _mk_user 无自动绑定
+    await kbdb.bind_domain(user_id=uid, domain="odn")
     # 两个域各一个 active 库（generic 钥匙域）
     kb_a = await kbdb.create_kb(domain="generic", name=f"mk-a-{s}", owner_id=uid)
     kb_b = await kbdb.create_kb(domain="generic", name=f"mk-b-{s}", owner_id=uid)
@@ -74,10 +76,6 @@ async def test_mcp_key_lifecycle(kbdb):
     assert got["tool_descriptions"] is None
     assert await kbdb.get_mcp_key(key_id="no_such_key") is None
     assert await kbdb.count_active_mcp_keys(user_id=uid) == 1
-    assert await kbdb.delete_mcp_key(key_id=key_id) is True
-    assert await kbdb.delete_mcp_key(key_id=key_id) is False
-    assert await kbdb.get_mcp_key(key_id=key_id) is None
-    assert {row["id"] for row in await kbdb.list_mcp_keys(user_id=uid)} == {key2}
 
     # 开放库域防线：越域 kb_c 被拒（SQL 层）
     effective = await kbdb.replace_mcp_key_open_kbs(
@@ -145,6 +143,13 @@ async def test_mcp_key_lifecycle(kbdb):
     ) is None
     assert await kbdb.count_active_mcp_keys(user_id=uid) == 1
 
+    # delete：只软藏 revoked 行留审计（55号——active 钥匙必须先 revoke 再删），
+    # 幂等二次删 False，删后 get/list 均不可见，只剩 key2
+    assert await kbdb.delete_mcp_key(key_id=key_id) is True
+    assert await kbdb.delete_mcp_key(key_id=key_id) is False
+    assert await kbdb.get_mcp_key(key_id=key_id) is None
+    assert {row["id"] for row in await kbdb.list_mcp_keys(user_id=uid)} == {key2}
+
 
 @pytest.mark.asyncio
 async def test_update_mcp_key_config_partial(kbdb):
@@ -152,6 +157,7 @@ async def test_update_mcp_key_config_partial(kbdb):
     s = _suffix()
     uid = f"u_mk_2_{s}"
     await _mk_user(kbdb, uid, f"mk_user_2_{s}")
+    await kbdb.bind_domain(user_id=uid, domain="generic")  # _mk_user 无自动绑定
     key_id = uuid.uuid4().hex
     h = _hash(f"cfg-{s}")
     await kbdb.create_mcp_key(
@@ -522,8 +528,14 @@ async def test_key_service_domain_scoped_lifecycle(kbdb):
     verified = await svc.verify_key(k1["key"])
     assert verified is not None and verified["domain"] == "generic"
 
-    # 解绑一个域 → 该域钥匙 domain_bound=False（仍可 list，建钥才拦截）
-    await kbdb.set_user_domains(user_id=uid, domains=["generic"])
+    # 解绑一个域 → 该域钥匙 domain_bound=False（仍可 list，建钥才拦截）。
+    # set_user_domains 现有 domain_has_owned_kbs 守卫（uid 在 odn 有库）——
+    # 守卫是写入侧约束，读侧 domain_bound 仍须如实反映，直接删行合成。
+    async with kbdb._pool.connection() as conn:
+        await conn.execute(
+            "DELETE FROM user_domains WHERE user_id = %s AND domain = 'odn'",
+            (uid,),
+        )
     keys = await svc.list_keys(user_id=uid, is_admin=False)
     by_dom = {k["domain"]: k for k in keys}
     assert by_dom["generic"]["domain_bound"] is True

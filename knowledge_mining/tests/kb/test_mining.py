@@ -71,6 +71,18 @@ async def _make_kb_with_upload(c, headers, name="KBm"):
     return kb_id
 
 
+async def _clear_auto_queued_runs(async_pool, kb_id: str) -> None:
+    """清掉上传后 auto-mine 自动入队的整库 Run（57号：上传即入队）。
+
+    它会占住「每库一个活跃 Run」的槽位，让本文件的手动 mine 202 机制全部
+    409——手动触发语义才是这里的主题。"""
+    async with async_pool.connection() as conn:
+        await conn.execute(
+            "DELETE FROM mining_runs WHERE kb_id = %s AND status = 'queued'",
+            (kb_id,),
+        )
+
+
 async def test_mine_not_found(async_pool, upload_root):
     async with await _client(async_pool) as c:
         r = await c.post("/api/kb/nope-kb/mine", headers=kb_headers("alice"))
@@ -120,6 +132,7 @@ async def test_mine_owner_202_creates_run_row(async_pool, upload_root, monkeypat
         # KB 必须先选挖掘范式（mine_kb 校验 mining_workflow_id 非空，否则 400）
         pr = await c.patch(f"/api/kb/{kb_id}", json={"mining_workflow_id": "wf-test"}, headers=h)
         assert pr.status_code == 200, pr.text
+        await _clear_auto_queued_runs(async_pool, kb_id)
         r = await c.post(f"/api/kb/{kb_id}/mine", headers=h)
         assert r.status_code == 202, r.text
         body = r.json()
@@ -165,6 +178,8 @@ async def test_same_kb_is_rejected_but_different_kb_can_queue(
                 headers=headers,
             )
             assert response.status_code == 200, response.text
+        for kb_id in (kb_a, kb_b):
+            await _clear_auto_queued_runs(async_pool, kb_id)
 
         first = await c.post(f"/api/kb/{kb_a}/mine", headers=headers)
         duplicate = await c.post(f"/api/kb/{kb_a}/mine", headers=headers)
@@ -198,6 +213,7 @@ async def test_mine_force_redo_propagates_to_metadata(async_pool, upload_root, m
         h = kb_headers("alice")
         kb_id = await _make_kb_with_upload(c, h, name="force-mine")
         await c.patch(f"/api/kb/{kb_id}", json={"mining_workflow_id": "wf-test"}, headers=h)
+        await _clear_auto_queued_runs(async_pool, kb_id)
         r = await c.post(f"/api/kb/{kb_id}/mine", json={"force_redo": True}, headers=h)
         assert r.status_code == 202, r.text
         body = r.json()
@@ -235,6 +251,7 @@ async def test_mine_signature_change_does_not_auto_force_redo(async_pool, upload
                     json.dumps({"kb_id": kb_id, "signature": "wf-test:1:OLDHASH"}),
                 ),
             )
+        await _clear_auto_queued_runs(async_pool, kb_id)
         r = await c.post(f"/api/kb/{kb_id}/mine", headers=h)
         assert r.status_code == 202, r.text
         body = r.json()

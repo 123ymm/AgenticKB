@@ -1,6 +1,189 @@
 {
-  "current": "1.1.15",
+  "current": "1.1.29",
   "releases": [
+    {
+      "version": "1.1.29",
+      "released_at": "2026-10-29",
+      "title": "onenet.yaml 域覆盖（62号镜像）：一张网凭据按域 + mining 每请求 TTL 拉取 + 域覆盖管理 UI",
+      "changes": [
+        "控制面：system/onenet.domains/{domain_id}.yaml 域覆盖存储与五条路由（覆盖列表摘要 app_id / raw GET·PUT·DELETE / effective 成品）；全部 10 键可按域覆盖（凭据×2/端点×2/调优×6），保存校验键白名单+类型+范围（chunk_width/page_size ∈[1,10000]）+ merge 后凭据完整性闸；删域级联清理覆盖；绕过 PUT 的盘改坏文件由 effective 端点二次校验兜底 400",
+        "顺手修两处暗病：全局 onenet.yaml 的 PUT 从盲写改为结构校验（此前写坏后 mining 静默吞错全端点 503）；补上 docstring 声称却从未存在的 onenet.example.yaml 占位",
+        "mining：新增 effective_config.py——每请求向控制面拉该域 merge 后的 effective 配置，进程内 ~10s TTL 缓存 + 失败沿用上次成功值（控制面短暂重启无感）+ 冷启动不可达回退旧通道（env→盘上文件）；客户端工厂改为调用时带域（await factory(domain)——后台导入任务执行时域才可知）；/search /probe 支持可选 domain 参数（UI 查询/摸底自动带当前域，可实测域凭据）；toc/导入/重同步各自按业务域解析",
+        "⚠ 语义变化：环境变量 ONENET_APP_ID/ONENET_STATIC_TOKEN 从「压过盘上文件」降级为「仅控制面不可达且无缓存时的回退通道」——控制面配置成为唯一权威；保存后 ≤10 秒生效（mining 短 TTL 拉取，无热加载通知机制）",
+        "kb-ui：设置页新 tab「一张网域覆盖」——凭据/端点表单（app_id / static_token 密码框不回显 / token_url / search_url，placeholder 显示全局基底继承值，留空=继承）+ 高级 YAML 折叠（调优 6 键在此编辑）+ 保存提示「约 10 秒内生效」；系统配置选 onenet.yaml 时提示前往域覆盖页；后端 400 结构化报文透传；删除确认+幂等；llmOverrideYaml 通用化为域覆盖工具（新增平铺读写）",
+        "测试：控制面 8 例（CRUD 回路/校验矩阵/凭据闸/盘改兜底/未知域/删域级联/全局 PUT 校验）；mining effective 回落链 9 例 + 按域路由 5 例 + 导入域契约 1 例；前端 11 例新 spec + 平铺读写补测；全套绿：控制面 99、mining onenet 188、前端 601 + vue-tsc",
+        "部署：Python（控制面+mining）+ 前端 dist 全量包，无迁移；apply 重启 control→mining；服务器无覆盖文件=行为与 1.1.28 一致（mining 走全局基底），首个域覆盖是后续运维动作（设置页「一张网域覆盖」直接操作，~10s 生效）"
+      ]
+    },
+    {
+      "version": "1.1.28",
+      "released_at": "2026-10-29",
+      "title": "LLM 域覆盖 rerank 表单补齐：端点/密钥两输入（对齐 embedding 三输入）",
+      "changes": [
+        "「LLM 域覆盖」tab 的 Rerank 段从仅「模型」补齐为 模型 / Base URL / API Key 三输入（对齐 embedding 段样式）：密钥框 show-password、留空继承全局、placeholder 提示；后端一期白名单本就允许 rerank 按域覆盖端点/密钥，此前仅表单未暴露——本次零后端改动，表单与高级 YAML 两条路能力一致",
+        "表单与 YAML 同源保持：表单只精准改写单键，同段其余键（如 YAML 先写的 base_url/api_key）原样保留；新建覆盖模板注释同步补可选 rerank 端点/密钥示例",
+        "测试：组件 spec 14 例（三键写回 / 只清模型时端点密钥保留 / 三键全清才整段消失 / YAML 先写键经表单改模型不丢），前端全量 588 passed + vue-tsc 通过",
+        "部署：纯前端 dist 增量，无迁移无配置；nginx 静态文件替换即时生效（apply 因 releases.json 变更按惯例重启 control）"
+      ]
+    },
+    {
+      "version": "1.1.27",
+      "released_at": "2026-10-29",
+      "title": "LLM 配置按域隔离第二期：embedding 按域覆盖（同维度）+ 行级模型溯源 + 域覆盖表单化 UI（62号二期）",
+      "changes": [
+        "embedding 按域覆盖（同维度锁定）：域覆盖文件放开 embedding 段（model/base_url/api_key 等可按域差异，密钥留空继承全局）；dimensions 锁全局——merge 后必须等于全局值（当前 1024），漂移即 400 并说明原因（所有域共享同一定长向量列 vector(1024)）；零 schema/零迁移/零 Java 改动，检索严格单域故同维不同模型跨域永不互比",
+        "llm_service 按域解析 embedding：同步端点 /models/embeddings、异步 submit_embedding（域默认模型落库）、worker 执行（按任务域选 provider）三链路全部按 knowledge_domain 走域 effective 配置；幂等指纹已含 model+dimensions，切换模型自动不复用旧向量结果；装载侧新增维度比对兜底闸（维度漂移的域作废回落全局，不致命）",
+        "行级模型溯源：挖掘生成的向量行 provider/model/model_version 不再落 unknown——两个生成器实现 describe()（捕获服务端实际回传模型与维度，异步通道零协议改动），EmbeddingFacade 跑后二次 describe 刷新再冻结；无 describe 的旧生成器行为逐字节不变（红线）；真库验证 staging 表 SELECT DISTINCT 见 llm_service/embedding-3/1024",
+        "域覆盖 UI 表单化：「LLM 域覆盖」tab 重写为表单为主 + 高级 YAML 折叠——Chat 下拉（全局模型∪域自有，可清空=继承全局）、Rerank/Embedding 输入框（留空继承全局并在 placeholder 显示全局值）、dimensions 只读锁图标+tooltip（用户一眼知道哪些能改哪些不能）；embedding 段非空常驻混存警告，保存时 embedding 有差异弹确认框（存量向量不自动重嵌、检索可能劣化、重嵌工具下一批）；表单与 YAML 同源（即所存原文）；系统配置 tab 选 llm_service.yaml 时提示前往域覆盖页做差异化",
+        "测试：llm_service 133 passed（域配置矩阵新增 embedding 11 例）；控制面 14 passed（embedding 覆盖矩阵：同维过/2048 拒/缺字段拒/坏键拒/非整数拒/盘改兜底）；mining 单测 31 例新增（生成器 describe 捕获/门面跑后刷新/旧生成器 unknown 红线），全量 1735 passed（18 例既有环境红与本次无关，stash 验证）；前端 587 passed + vue-tsc 通过（新 util 7 例 + tab 12 例）",
+        "部署：Python 三服务 + 前端 dist 增量，无迁移；apply 重启序 control → llm_service → mining；存量 unknown 向量行不动，serving 侧模型 mismatch 硬闸与重嵌工具留待下一批；在途任务窗口：覆盖生效前提交的任务仍按提交侧落库的全局模型名执行（同维度约束下瞬态自愈）"
+      ]
+    },
+    {
+      "version": "1.1.26",
+      "released_at": "2026-10-29",
+      "title": "LLM 配置保存即热加载 + 域覆盖管理 UI（62号一期收尾）",
+      "changes": [
+        "保存即生效：系统配置保存 llm_service.yaml、域覆盖保存/删除后，控制面自动通知 llm_service reload-config（按注册表 llm_url 寻址、X-Internal-Auth+X-KB-Role 双头）——不再需要手动重启或调接口；通知为尽力而为，失败不影响保存，结果回显 UI（提示重启后台服务生效）；幂等空删不通知",
+        "域覆盖管理 UI：设置页新 tab「LLM 域覆盖」——已覆盖域清单（chat/rerank 摘要）、新增（候选=注册表域减已覆盖，编辑器预填全注释模板与用法示例）、YAML 编辑保存、删除确认，走 1.1.25 已就绪的五条路由；语义提示常驻（只写差异/deep-merge 继承全局/embedding 锁全局/保存即热加载）",
+        "报文透传：后端 400 的结构化校验报文（如「embedding 锁全局」「不允许的顶层键」）直达用户，不再吞成一句「保存失败」；系统配置 tab 保存 llm_service.yaml 时按热加载结果分级提示（成功/失败+原因）",
+        "测试：控制面新增 4 例（通知接线矩阵：llm_service 触发/ui 不触发/覆盖 PUT+DELETE 触发/幂等空删不触发；notify 单元矩阵：无地址/缺密钥/非200/网络错/成功带双头断言）；前端新 tab 7 例；后端全量 213 passed（4 例 TestClient client= 失败为 starlette 升级既有问题），前端全量 575 passed，vue-tsc 通过",
+        "部署：Python + 前端 dist 增量（全量 pack，jar 未变），apply 重启 control + llm_service；无迁移无配置变更"
+      ]
+    },
+    {
+      "version": "1.1.25",
+      "released_at": "2026-10-29",
+      "title": "LLM 配置按域隔离第一期（62号）：chat+rerank 按域覆盖、embedding 锁全局、收窄版热加载",
+      "changes": [
+        "控制面（main_control_service）：新增 system/llm_service.domains/{domain_id}.yaml 域覆盖存储与五条路由（覆盖列表 / raw GET·PUT·DELETE / effective 成品）；deep-merge 只在控制面做，llm_service 拉取合并后的 effective 配置（设计裁定①）；删除域时级联删除该域覆盖文件",
+        "保存校验（A2）：覆盖文件只许 provider/rerank 两段——embedding 段出现即 400（锁全局，VECTOR(1024) schema 硬约束，维度差异化留二期）、未知键 400 且报文说明、merge 后模型条目需三要素齐整（同名条目部分覆盖可继承全局）、active_model 可解析；绕过 PUT 的盘改坏文件在 effective 端点二次校验兜底 400",
+        "llm_service：DomainConfigs 全局基底+域覆盖持有者，启动期拉取 overrides——坏覆盖作废回落全局并留痕，绝不致命（裁定②）；ProviderResolver 按 (domain, model) 解析 provider 共享缓存，启动 provider 播种为全局项——无覆盖域零构建，行为与单配置时代字节等价（兼容性铁律）",
+        "按域解析：submit/execute/worker 按任务自带 knowledge_domain 解析域默认 chat 模型（显式 model 参数仍优先并校验，裁定③）；rerank 同步端点与异步 worker 均按域选 provider 与默认模型；embedding 链路零改动",
+        "热加载（B3，收窄版）：GET /admin/config-status（内部密钥）——全局/各覆盖域 effective active_model、被作废覆盖及原因；POST /admin/reload-config（内部密钥+admin 双闸）——原子换 DomainConfigs+清 provider 缓存，拉取失败保留旧配置；与 aaaad19 删除的全运行时热切换的区别（worker/任务旋钮仍需重启）已写入端点文档",
+        "安全：auth 中间件 _is_admin_only 补 DELETE 闸（域覆盖删除=站点管理员写操作，原规则只认 GET/PUT）；.gitignore 新增 llm_service.domains/ 规则（覆盖文件含真实密钥，属服务器侧运维动作）并修复 c063f73 起字面换行损坏导致 onenet.yaml 排除规则从未生效的问题（onenet.yaml 已 git rm --cached 移出索引）",
+        "测试：llm_service 新增 test_domain_config.py 解析矩阵 20 例（回落语义/缓存不串域/域默认落库/rerank 双链路/闸门矩阵），全套 123 passed；main_control_service 新增覆盖 CRUD 回路+校验矩阵+鉴权闸门 8 例，全套 86 passed（4 例 TestClient client= 参数失败为 starlette 升级既有环境问题，stash 验证与本次无关）",
+        "部署：纯 Python --code-only，apply 重启 control + llm_service（重启顺序 control 先于 llm_service，新路由先就位）；无迁移无配置变更；服务器暂无任何覆盖文件=行为与 1.1.24 一致，首个域覆盖是后续运维动作（放置 yaml 后调 reload-config 或重启 llm_service，config-status 验收）"
+      ]
+    },
+    {
+      "version": "1.1.24",
+      "released_at": "2026-10-28",
+      "title": "使用分析页时间范围选择器：近 7/30/90 天 + 自定义日期（此前写死近 7 天），与记录明细共用时间范围模块",
+      "changes": [
+        "使用分析页（RetrievalRecordsAnalysis）顶部新增时间范围工具栏：近 7/30/90 天快捷档 + 自定义日期（切到自定义预填近 7 天）；本页时间范围是唯一筛选，变更即生效无需筛选按钮——合法即自动重载，非法（缺日期/倒序/超 365 天）只显示行内错误不请求",
+        "调用趋势折线、六张统计卡、范式/MCP Tool/来源分布、查询热词全部跟随所选窗口（后端 summary 的 start_date/end_date 与按窗口生成趋势轴是 1.1.22 已部署能力，本次纯前端）",
+        "抽出共用模块 kb-ui/src/components/retrieval/timeRange.ts：档位类型/365 天上限（与后端 _CUSTOM_RANGE_MAX_DAYS 对齐）/预填/校验/rangeFilters 映射单一事实源，记录明细面板同步改为复用删除本地副本——两个 tab 行为不分叉",
+        "测试：分析组件 4 新例（默认 7 天/切档即载/自定义预填+区间查询/倒序拦截）；面板 17 例回归确认重构零行为变化；前端共 29 passed，vue-tsc 通过",
+        "部署：纯前端 dist 增量（全量 pack），apply 重启 control；无 Python/迁移/配置变更"
+      ]
+    },
+    {
+      "version": "1.1.23",
+      "released_at": "2026-10-28",
+      "title": "检索记录-记录明细数据导出：同一套筛选单次拉满（上限 1 万行）→ 前端解析名称生成 BOM CSV",
+      "changes": [
+        "后端：新增 GET /api/retrieval-records/export——与列表同一套筛选参数（含 1.1.22 的 start_date/end_date 自定义窗口与 422 校验），单次拉满 _EXPORT_ROW_LIMIT=10000 行，响应 {items, truncated, row_limit}；字面量段注册在 /{record_id} 动态段之前（沿用 1.1.19 export-tasks 先例）；权限与列表同链路（可见库裁剪 + 非管理员只看自己）",
+        "前端：筛选栏新增「导出」按钮——按当前已应用筛选（非仅当前页）拉取，前端解析 KB/范式名称后生成 CSV 下载（文件名 检索记录_YYYYMMDD-HHMMSS.csv）",
+        "CSV 兼容性：UTF-8 BOM（Excel 双击直开中文）、标准引号/逗号/换行转义、列与表格一致（时间/用户/来源/Tool·操作/查询或动作/目标知识库/范式/状态/结果数/耗时/错误码/调用 ID）",
+        "边界反馈：空结果提示不产空文件；超上限黄色提示「已按上限截断」；失败行内红字；导出中按钮禁用防重复",
+        "测试：后端 3 例（字面量路由优先/筛选透传 page_size=10001/422 边界）后端共 55 passed；前端 5 例（CSV 内容+arrayBuffer 字节级 BOM 断言——blob.text() 按 spec 剥 BOM 的测试坑/空结果/截断/失败）前端共 23 passed；vue-tsc 通过",
+        "部署：Python 源码 + 前端 dist 增量（全量 pack），apply 重启 mining + control；无迁移无配置"
+      ]
+    },
+    {
+      "version": "1.1.22",
+      "released_at": "2026-10-28",
+      "title": "检索记录-记录明细支持自定义日期筛选：时间范围下拉新增「自定义」+ start_date/end_date 端到端",
+      "changes": [
+        "前端：时间范围下拉新增「自定义」档，选中出现开始/结束日期输入框（切换时预填近 7 天便于微调）；提交前本地校验（成对、开始≤结束、最长跨 365 天），失败行内红字提示且不请求、列表维持上次生效筛选；重置回到近 7 天档",
+        "后端：/api/retrieval-records 与 /summary 新增 start_date/end_date（YYYY-MM-DD）查询参数，与 days 快捷档二选一、自定义优先；不成对/倒序/超 365 天返回 422（恰 365 天放行）",
+        "窗口语义：闭区间 [start, end] 映射 UTC 半开区间 occurred_at >= start 00:00 AND < end+1 00:00（与近 N 天档同按 UTC 日切）；summary 趋势轴按实际窗口逐日生成，回包 days=窗口实际天数（快捷档行为不变）；明细页汇总卡片与表格共用筛选链路自动跟随",
+        "「使用分析」tab 固定近 7 天独立取数，不受影响；无 DB 迁移、无配置变更",
+        "测试：路由层 422 边界（半开/倒序/超宽/恰 365 天）+ 透传断言，仓库层窗口 SQL 参数与趋势区间断言，前端序列化与面板自定义区间/校验拦截/重置回归——后端 52 passed、前端 21 passed、vue-tsc 通过",
+        "部署：Python 源码 + 前端 dist 增量（全量 pack），apply 重启 mining + control；无迁移无配置"
+      ]
+    },
+    {
+      "version": "1.1.21",
+      "released_at": "2026-10-27",
+      "title": "测试修复暴露的三处产品缺陷：文档恢复失效（identity 丢 deleted_at）/并发解绑竞态漏 active 钥匙/ops usage KeyError 500",
+      "changes": [
+        "来源：修复 tests/kb 62 个陈旧失败用例时逐簇诊断，三处是真产品缺陷（其余为测试未跟上 47/51/55/57/58号契约）",
+        "缺陷一（文档恢复静默失效）：get_document_identity 的 SELECT 漏 d.deleted_at 列，restore() 读 doc.get('deleted_at') 恒为 None，恢复路径判「未删除」直接空过——补列即恢复功能回归修复",
+        "缺陷二（并发解绑竞态，55号守卫有洞）：_lock_user_domain_access_on_conn 把 EXISTS 域绑定检查并进 FOR SHARE 同一条 SQL，被 unbind_domain 的 FOR UPDATE 阻塞唤醒后 EvalPlanQual 重查仍按语句起始快照取 user_domains——真库实测并发解绑+建钥匙会留下「未绑定域里的 active 钥匙」。改为 FOR SHARE 锁定用户行后另起一条语句重查绑定（READ COMMITTED 逐句新快照），create_mcp_key/create_kb/add_member 三处共用此 seam",
+        "缺陷三（/api/ops/usage 真库必 500）：492ee5f 把 no_result_queries 从 retrieval summary 载荷退役（少跑一次 SQL），但旧端点仍调用该键 → KeyError。RetrievalRecordRepository 新增 no_result_queries 按需单跑方法（按原文聚合、次数倒序），QueryLogStats 适配层改调它——summary 载荷保持瘦身不回退那次整改",
+        "附带：transfer_kb_owner 用户行锁定循环抽成 _lock_transfer_users_on_conn（并发竞态测试可暂停 seam，行为零变化）；tests/kb 22 个测试文件对齐现行契约 + 修复 test_purge_routes 模块打桩泄漏（跨文件污染），全量 70 文件真库 682 passed",
+        "部署：纯 Python 源码增量（--code-only），仅重启 mining；无 DB 迁移、无配置变更、无前端/jar 变更"
+      ]
+    },
+    {
+      "version": "1.1.20",
+      "released_at": "2026-10-27",
+      "title": "导出直链浏览器不可达修复：presign URL 按公共入口改写 + nginx /object-store/ 反代 + expires 漏传修复",
+      "changes": [
+        "病象：整库导出任务 succeeded 后浏览器点下载失败——download-url 返回的是 http://minio:9000/...（docker 网络名，外部 DNS 解析不了）；服务器侧打包/上传/签名全部成功（日志无错）",
+        "修复一（URL 改写）：ObjectStoreConfig 新增 presign_public_base（storage.yaml object_store 段，空=不改写保持内网直连），_presign_blocking 签名后把 scheme://endpoint 前缀改写为该入口；签名含 host（X-Amz-SignedHeaders=host）但只重写前缀、查询串逐字节不动，MinIO 校验不受影响",
+        "修复二（反代入口）：容器 nginx 新增 location /object-store/ → proxy_pass http://minio:9000/，关键三件事：proxy_set_header Host minio:9000 原样转发（签名的 host，切不可用 $host）、proxy_buffering off 流式转发防大包落盘、3600s 读写超时匹配小时级下载；Range 头原样透传天然支持断点续传",
+        "修复三（expires 漏传，日志分析时顺带发现）：_presign_blocking 此前未把 expires_in_seconds 传给 SDK，恒为 SDK 默认 604800（7 天）而非配置的 86400——本次显式 timedelta(seconds=expires) 修正，presign_get/put 双侧",
+        "SDK 坑记录：minio-py presign 需要 bucket region——client 未显式传 region 时会发一次 GetBucketLocation 网络请求（生产可达无感，本地测试会挂）；单测显式 region='us-east-1' 钉死纯本地签名",
+        "测试：新增 tests/object_store/test_minio_presign_delivery.py 6 例（expires 进 URL/非 SDK 默认/disposition/PUT 侧/公共前缀改写签名逐字节一致/外来前缀防御性透传）；object_store + export packager + export service 全量 33 例通过",
+        "部署备注：docker/nginx.conf 为镜像内文件非挂载，容器内热补丁 + reload；远端 storage.yaml object_store 段手工追加 presign_public_base: http://39.96.13.112:8080/object-store（备份后编辑，apply 重启生效）"
+      ]
+    },
+    {
+      "version": "1.1.19",
+      "released_at": "2026-10-27",
+      "title": "知识库整库导出下载：原始文档 STORED ZIP64 打包 → 对象存储直链（copy 超 5000 文档的互补通道）",
+      "changes": [
+        "新表 kb_export_tasks（databases/kb/schemas/018 + 在线迁移 core/20261026_010，纯 CREATE IF NOT EXISTS 幺等）：状态机 queued/running/cancelling/succeeded/failed/cancelled/expired，TEXT ISO 时间列、无 FK，与 purge_tasks 同族；迁移登记链三处 checksum（manifest.yaml/contract.py guard 60→61/ServingRuntimeSchemaInitializer）已由守卫测试钉住",
+        "后端管线：POST /api/kb/{id}/export 202 秒回 → 后台 worker keyset 分批遍历文档（batch 500）→ 原始文件流式写入 STORED 不压缩 ZIP64 本地 .part → put_stream 直传 staging 桶（任务内固定 object_key=export/{kb_id}/{task_id}.zip，重跑覆盖=幂等）→ 下载走现签 presign 直连 MinIO（绕开网关 300s 读超时，天然 Range 断点续传，disposition 带中文保存名）",
+        "鲁棒性：单文档缺失/读失败降级 manifest.warnings 继续（不整单失败）；zip sha256 对最终包字节计算（打包器增量 sha 不含 zip 头，已修）；取消在 worker 启动前挂起时 2s shield 兜底落 cancelled；启动恢复（残留 .part 清理重入队）+ 每 6h sweep（过期产物删除标 expired + 24h 孤儿 .part 清理）",
+        "路由 /api/kb/export-tasks/{task_id} 字面量段先于 kb_router 的 /{kb_id} 动态段注册；MinIO 适配器向后兼容小改（tmp_dir 注入 uploads 卷、presign_get 带 filename disposition），fake/port 同步对齐",
+        "配置：mining.yaml 新增 export 段（enabled/bucket_class=staging/tmp_root=./uploads/_exports/批 500/保留 72h/presign 24h/并行 1）；ExportConfig 缺省与之逐项一致，远端 config 未同步也不阻断（本次发布已手工在 39.96.13.112 补齐该段）",
+        "前端：知识库卡片菜单新增「导出下载」→ KbExportDialog（任务表：状态/打包进度/产物大小+sha256 复制/发起时间；下载 window.open(presign) 绝不走 blob；运行中轮询 5s 可关窗后台继续）",
+        "测试：新增 29 例（packager 11：arcname 净化/防重/ZIP64/中文 UTF-8 flag/manifest 末尾/sha 对照；worker 5：对象+legacy+broken 打包/取消/恢复/sweep；service 13：权限闸门/幂等/下载冲突态/路由 202→succeeded→download-url→delete）；tests/kb 全量套件另发现 62 例陈旧断言 + 1 例 transfer 竞态测试钩子失效挂死（根因三处已定性，均为既有问题与本功能无关，另行修复）"
+      ]
+    },
+    {
+      "version": "1.1.18",
+      "released_at": "2026-10-26",
+      "title": "整库拷贝 500 修复：copy_kb 三处 conn.executemany 误用（psycopg3 AsyncConnection 无此方法）",
+      "changes": [
+        "病象：POST /api/kb/{id}/copy 首拷即 500——AttributeError: 'AsyncConnection' object has no attribute 'executemany'（kb/db.py copy_kb 目录树/文档批量/快照血缘三处批量插入全中）",
+        "病根：psycopg3 的 executemany 是 cursor 方法（async with conn.cursor() as cur: await cur.executemany(...)），AsyncConnection 只有 execute 便捷方法；1.1.16 开发机无真库，PG 门控验收例（KB_RUN_POSTGRES_ACCEPTANCE=1）未跑，纯 fake-db 单测探不到 driver 层 API 误用，上线首次真实拷贝即暴露——changelog 预警的\"验收待内网真库预演\"一步成谶",
+        "修复：三处统一改为 cursor.executemany（psycopg 3.1+ 内部走 pipeline 批量，性能不劣化）；批量参数与 SQL 原样未动",
+        "验收：部署后在 39.96.13.112 用生产链路原样复现拷贝请求（同 KB 同域）确认 201 + 统计字段；非 PG 单测 2 例通过"
+      ]
+    },
+    {
+      "version": "1.1.17",
+      "released_at": "2026-10-26",
+      "title": "挖掘向量化维度失配修复：异步 embedding 在提交侧解析 dimensions（入库报 expected 1024 dimensions, not 2048）",
+      "changes": [
+        "病根：异步 embedding 链路（llm_call_mode=async）里 mining 提交任务不传 dimensions（knowledge_mining/mining/infra/embedding.py），llm_service.submit_embedding 把 None 原样落进任务 input、worker 又原样透传 provider——请求智谱 API 不带 dimensions 参数，embedding-3 按默认 2048 维返回，而库列/索引为 vector(1024)，pgvector 入库报 expected 1024 dimensions, not 2048，快照停在 embedding_incomplete、Build 全批拒绝；同步端点（ModelService）一直有默认值兜底返回 1024，故同步路径无恙、仅异步中毒",
+        "双层修复：①提交侧（llm_service/runtime/service.py submit_embedding）dimensions=None 时解析配置 embedding.dimensions 默认值，与 ModelService 同步端点对齐，且解析后的值进入幂等请求指纹（配置翻维度自动新建任务，不吃旧缓存向量）；②worker 侧（runtime/worker.py）构造注入 default_embedding_dimensions，执行时对 input 里仍为 None 的存量队列任务兜底——补丁部署前已入队的坏任务也按站点契约维度执行",
+        "校验随之激活：_validate_embedding_result 只在 dimensions 非 None 时比对实际维度——修复前 None 直通=2048 坏向量无校验放行直达入库；修复后解析出 1024 即启用比对，provider 返回维度不符在 llm_service 侧 fail→重试→dead_letter，不再把坏结果标记 succeeded 毒化幂等缓存",
+        "性质：存量潜伏缺陷，非 1.1.13–1.1.16 回归（1.1.12 的 submit_embedding 同形）；此前部署机从未实际跑通过异步挖掘向量化，1.1.16 部署后首次真实使用即暴露",
+        "测试：新增 ll_service/tests/test_submit_embedding_dimensions.py（不传→落配置默认 1024；显式 512 不被覆盖）+ test_worker_embedding_validation.py 追加 3 例（None+默认维度兜底生效并透传 provider；兜底后维度不符 fail 不放行；无默认时行为与修复前一致）；llm_service 全量 101 通过 5 跳过",
+        "部署：增量包同步（--code-only，纯 Python 变更，jar/前端不动）——39.96.13.112 从 1.1.16 升 1.1.17"
+      ]
+    },
+    {
+      "version": "1.1.16",
+      "released_at": "2026-10-23",
+      "title": "知识库整库拷贝：快照血缘共享（备份/沙箱试验/模板分发）",
+      "changes": [
+        "整库拷贝端到端（设计 docs/kb-copy-design.md v1.1）：新端点 POST /api/kb/{kb_id}/copy——同步单事务完成新库+目录树+全部 active 文档身份行+快照血缘 links；文档对象字节零复制（新行共享源 storage_object_id，MinIO 不动，purge 按全局引用计数天然安全）；不建 Build——拷完文档均为 uploaded、不可检索，新库自选挖掘范式后触发挖掘，指纹命中（同域+同 raw_hash+同范式指纹）自动复用既有快照的解析与向量资产（零 LLM 重嵌），范式失配则全量重算（真实 LLM 成本，UI 静态提示引导选与源相同范式）",
+        "拷贝语义拍板（v1.0→v1.1 修订）：只共享快照血缘，不做\"即拷即用\"（不直建 Build、不占域发布锁、不触发任何检索就绪）——links 是血缘不是可见性也不是保护；新库 mining_workflow_id/default_paradigm_id=NULL（范式不复制）、成员不复制、知识制品不复制；名称缺省派生 <源名>-副本-YYYYMMDD（≤80 字符自动截断源名），可选覆盖 visibility/description",
+        "权限与防放大：read 即可拷（成员拷他人 private 库、任何人拷 public 库都合法——副本 owner=操作者）；可见性防放大规则——副本设 public 仅限源库 owner/站点管理员（显式请求越权 403，继承 public 静默降级 private），防止把他人私有知识域内公开；源库不可见一律 404（不泄露存在性）；未绑域 403；同名 409（唯一索引兜底+并发双击防护）；空库/超 5000 文档 422（同步事务上限，提示走导出导入）",
+        "并发安全：源库行 FOR SHARE + 事务内 active 复核（拷贝期间源库不被并发硬删，与 purge 的 FOR UPDATE 互斥），锁序 knowledge_bases→kb_users 与 transfer_owner 一致；目录树 parents-first 重映射，document_key 同域新库内无冲突；副本文档 created_at/content_updated_at=now（新行时间起点），modified_at（文件 mtime 语义）同源保留",
+        "前端体验：列表卡片「⋯」菜单常驻化新增「拷贝」入口（改名/删除仍按写权限分级）；拷贝对话框预填派生名/源描述，非 owner 可见性预锁 private；201 后跳新库详情；详情页「拷贝自」徽标（metadata_json.copy_source 溯源）+ 范式未选时常驻引导条直达挖掘 tab；快照血缘统计（documents/folders/linked_snapshots）随响应展示",
+        "零 DDL：不新增任何迁移（复用既有表结构，metadata_json 记录 copy_source）；全链验证——后端 kb 测试套件改动前后零回归，前端 vue-tsc/vitest 556 例/vite build 全绿；新增 test_copy_service.py 16 例（血缘形状/防放大/权限矩阵/名称派生/闸门/软删排除/源库删除隔离/路由错误映射）",
+        "升级注意：本地开发机无 PostgreSQL/Docker，PG 门控验收例（KB_RUN_POSTGRES_ACCEPTANCE=1 的 test_copy_service.py 集成链）与首挖复用/回收存活端到端（设计 §8 验收清单 1-7）需在内网验收环境随真库预演执行后再放量",
+        "1.1.16 部署资产包（sync-20261026-104902.tar.gz，33MB，随 v1.1.16 tag）：runtime jar 吸取 1.1.15 混合产物教训按纯源码 clean 构建，打包前程序化校验 mapper 含定版检索 SQL 形态（AssetRetrievalUnitV2Mapper.xml candidateBudget≥2）且 force_custom_plan 会话级设置类存在（ServingBeans/DomainPoolManager），jar md5=24b87ea0e311a66709541aab4a0239b5；包内 releases.json 版本与 sha256 校验通过，拷贝功能代码/测试/新前端均在包内抽查确认；零迁移零 DDL——apply 为纯代码同步+按需重启（mining/control 重启，前端即时生效，数据库 plan 秒过）。镜像同步推送 ghcr.io/zdychina/coremasterkb-app（标签 v1.1.16/latest/sha-9fceabb，fork 仓库经 GHCR_TOKEN classic PAT 推送）"
+      ]
+    },
     {
       "version": "1.1.15",
       "released_at": "2026-10-19",

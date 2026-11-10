@@ -27,7 +27,9 @@ import hashlib
 import os
 import tempfile
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 
 from knowledge_mining.mining.contracts.storage.errors import (
     ChecksumMismatch,
@@ -96,6 +98,25 @@ def _bucket_for(config: ObjectStoreConfig, artifact_class: str) -> str:
     return f"{config.bucket_prefix}{artifact_class}"
 
 
+def _presign_delivery_url(config: ObjectStoreConfig, url: str) -> str:
+    """把 presign URL 的 scheme://endpoint 前缀改写为浏览器可达的交付地址。
+
+    endpoint 通常是 docker 网络名（如 ``minio:9000``），浏览器解析不了；
+    ``presign_public_base`` 指到 nginx 反代入口（如
+    ``http://<公网>:8080/object-store``，代理保持 Host=endpoint，签名不受影响）。
+    未配置或前缀不匹配时原样返回。签名里的 host 仍是 endpoint——
+    反代必须 ``proxy_set_header Host <endpoint>`` 转发才能通过 MinIO 校验。
+    """
+    base = (config.presign_public_base or "").rstrip("/")
+    if not base:
+        return url
+    scheme = "https" if config.secure else "http"
+    internal = f"{scheme}://{config.endpoint}"
+    if url.startswith(internal):
+        return base + url[len(internal):]
+    return url
+
+
 class MinioObjectStore:
     """Production ``ObjectStorePort`` over the MinIO SDK (D-002, D-006, D-020).
 
@@ -106,7 +127,7 @@ class MinioObjectStore:
 
     provider = "minio"
 
-    def __init__(self, config: ObjectStoreConfig) -> None:
+    def __init__(self, config: ObjectStoreConfig, tmp_dir: str | None = None) -> None:
         if config.provider != "minio":
             raise ValueError(f"MinioObjectStore requires provider='minio', got {config.provider!r}")
         # Lazy import: keep this OUT of module top-level (D-006).
@@ -118,6 +139,11 @@ class MinioObjectStore:
                 "install with `pip install minio>=7.2`"
             ) from exc
         self._config = config
+        # 可选的暂存目录（默认 None=系统 /tmp）。整库导出等大对象场景把
+        # put_stream/get_stream 的临时文件指到持久卷，避免容器可写层吃满。
+        if tmp_dir:
+            os.makedirs(tmp_dir, exist_ok=True)
+        self._tmp_dir = tmp_dir
         self._client: Any = Minio(
             config.endpoint,
             access_key=config.access_key or None,
@@ -184,7 +210,7 @@ class MinioObjectStore:
         """
         sha = hashlib.sha256()
         size = 0
-        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".minio-put-")
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".minio-put-", dir=self._tmp_dir)
         try:
             with os.fdopen(tmp_fd, "wb") as fh:
                 async for chunk in stream:
@@ -247,7 +273,7 @@ class MinioObjectStore:
     async def get_stream(self, location: ObjectLocation) -> AsyncIterator[bytes]:
         # Buffer the response to a tmp file off-loop, then stream chunks back.
         # This avoids holding the SDK response object across awaits.
-        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".minio-get-")
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".minio-get-", dir=self._tmp_dir)
         os.close(tmp_fd)
         try:
             await asyncio.to_thread(self._get_to_file_blocking, location, tmp_path)
@@ -368,9 +394,10 @@ class MinioObjectStore:
         self,
         location: ObjectLocation,
         expires_in_seconds: int = 900,
+        filename: str | None = None,
     ) -> PresignedAccess:
         url = await asyncio.to_thread(
-            self._presign_blocking, "GET", location, expires_in_seconds
+            self._presign_blocking, "GET", location, expires_in_seconds, filename
         )
         return PresignedAccess(
             method="GET",
@@ -399,6 +426,7 @@ class MinioObjectStore:
         method: str,
         location: ObjectLocation,
         expires: int,
+        filename: str | None = None,
     ) -> str:
         try:
             from minio.error import S3Error  # type: ignore[import-not-found]
@@ -406,10 +434,29 @@ class MinioObjectStore:
             S3Error = Exception  # type: ignore[assignment, misc]
         try:
             if method == "GET":
-                return self._client.presigned_get_object(
-                    location.bucket, location.object_key, version_id=location.version_id
+                response_headers = None
+                if filename:
+                    # RFC 5987：默认保存名是 object_key 尾段（系统名），浏览器
+                    # 下载场景（整库导出 zip）需要业务文件名。
+                    response_headers = {
+                        "response-content-disposition": (
+                            "attachment; "
+                            f"filename*=UTF-8''{quote(filename)}"
+                        )
+                    }
+                url = self._client.presigned_get_object(
+                    location.bucket,
+                    location.object_key,
+                    version_id=location.version_id,
+                    response_headers=response_headers,
+                    expires=timedelta(seconds=expires),
                 )
-            return self._client.presigned_put_object(location.bucket, location.object_key)
+            else:
+                url = self._client.presigned_put_object(
+                    location.bucket, location.object_key,
+                    expires=timedelta(seconds=expires),
+                )
+            return _presign_delivery_url(self._config, url)
         except S3Error as exc:  # type: ignore[misc]
             raise _map_s3_error(exc) from exc
 

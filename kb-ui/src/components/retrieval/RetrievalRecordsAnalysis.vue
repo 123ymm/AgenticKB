@@ -1,5 +1,21 @@
 <template>
   <section class="records-analysis">
+    <div class="records-analysis__toolbar">
+      <span class="records-analysis__toolbar-label">时间范围</span>
+      <select v-model.number="range.days" class="records-analysis__select" aria-label="时间范围" @change="onPresetChange">
+        <option :value="7">近 7 天</option>
+        <option :value="30">近 30 天</option>
+        <option :value="90">近 90 天</option>
+        <option value="custom">自定义</option>
+      </select>
+      <template v-if="range.days === 'custom'">
+        <input v-model="range.startDate" type="date" class="records-analysis__date" aria-label="开始日期" />
+        <span class="records-analysis__sep">至</span>
+        <input v-model="range.endDate" type="date" class="records-analysis__date" aria-label="结束日期" />
+      </template>
+      <span v-if="rangeError" class="records-analysis__range-error">{{ rangeError }}</span>
+    </div>
+
     <div v-if="loading" class="records-analysis__notice">正在加载使用分析…</div>
     <div v-else-if="error" class="records-analysis__notice records-analysis__notice--error">
       {{ error }} <button type="button" @click="load">重试</button>
@@ -46,12 +62,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRetrievalRecordsApi } from '@/api/retrievalRecords'
 import { apiErrorDetail } from '@/api/proxyClient'
 import { useDomainStore } from '@/stores/domain'
 import StatsCard from '@/components/common/StatsCard.vue'
 import { useRetrievalNames } from '@/components/retrieval/useRetrievalNames'
+import {
+  prefillCustomRange, rangeFilters, validateCustomRange, type TimeRangeState,
+} from '@/components/retrieval/timeRange'
 import { aggregateTerms } from '@/components/retrieval/segmentTerms'
 import LineChart from '@/components/charts/LineChart.vue'
 import BarChart from '@/components/charts/BarChart.vue'
@@ -67,6 +86,15 @@ const summary = ref<RetrievalRecordsSummary | null>(null)
 const loading = ref(false)
 const error = ref('')
 let generation = 0
+
+// 时间范围是本页唯一筛选：无需筛选按钮，变更即生效（校验失败只提示不请求）。
+const range = reactive<TimeRangeState>({ days: 7, startDate: '', endDate: '' })
+const rangeError = ref('')
+
+function onPresetChange(): void {
+  rangeError.value = ''
+  prefillCustomRange(range)
+}
 
 const trendLabels = computed(() => summary.value?.trend.map(item => item.date.slice(5)) ?? [])
 const trendCalls = computed(() => summary.value?.trend.map(item => item.total_calls) ?? [])
@@ -90,7 +118,11 @@ async function load(): Promise<void> {
   // 名称映射走自己的缓存与兜底，失败不连累分析本体。
   void loadNames(domain)
   try {
-    const value = await api.getSummary(domain, { days: 7, kbId: props.kbId || undefined, mcpKeyId: props.mcpKeyId || undefined })
+    const value = await api.getSummary(domain, {
+      ...rangeFilters(range),
+      kbId: props.kbId || undefined,
+      mcpKeyId: props.mcpKeyId || undefined,
+    })
     if (current !== generation || domain !== domainStore.currentDomain) return
     summary.value = value
   } catch (reason) {
@@ -108,8 +140,19 @@ function sourceLabel(value: string): string { return ({ web: '网页', mcp: 'MCP
 onMounted(load)
 watch(() => domainStore.currentDomain, load)
 watch(() => [props.kbId, props.mcpKeyId], load)
+// 时间范围三项合成一个快照 watch：预填在同 tick 完成后只触发一次加载
+watch(() => [range.days, range.startDate, range.endDate], () => {
+  if (range.days === 'custom') {
+    rangeError.value = validateCustomRange(range)
+    if (rangeError.value) return
+  } else {
+    rangeError.value = ''
+  }
+  load()
+})
 </script>
 
 <style scoped>
-.records-analysis { display: flex; flex-direction: column; gap: 14px; }.records-analysis__stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }.records-analysis__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }.records-analysis__card { min-width: 0; padding: 16px; border: 1px solid var(--kb-border-light); border-radius: var(--kb-radius); background: var(--kb-bg-card); }.records-analysis__card h3 { margin: 0 0 12px; color: var(--kb-text-secondary); font-size: 13px; }.records-analysis__card p { color: var(--kb-text-tertiary); font-size: 12px; text-align: center; }.records-analysis__notice { padding: 24px; color: var(--kb-text-tertiary); text-align: center; border: 1px dashed var(--kb-border); border-radius: var(--kb-radius); }.records-analysis__notice--error { color: var(--kb-danger); } @media (max-width: 1100px) { .records-analysis__grid { grid-template-columns: 1fr; } }
+.records-analysis { display: flex; flex-direction: column; gap: 14px; }.records-analysis__stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }.records-analysis__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }.records-analysis__card { min-width: 0; padding: 16px; border: 1px solid var(--kb-border-light); border-radius: var(--kb-radius); background: var(--kb-bg-card); }.records-analysis__card h3 { margin: 0 0 12px; color: var(--kb-text-secondary); font-size: 13px; }.records-analysis__card p { color: var(--kb-text-tertiary); font-size: 12px; text-align: center; }.records-analysis__notice { padding: 24px; color: var(--kb-text-tertiary); text-align: center; border: 1px dashed var(--kb-border); border-radius: var(--kb-radius); }.records-analysis__notice--error { color: var(--kb-danger); }
+.records-analysis__toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border: 1px solid var(--kb-border-light); border-radius: var(--kb-radius); background: var(--kb-bg-card); }.records-analysis__toolbar-label { color: var(--kb-text-tertiary); font-size: 12px; }.records-analysis__select, .records-analysis__date { min-height: 34px; padding: 0 10px; border: 1px solid var(--kb-border); border-radius: 6px; color: var(--kb-text-primary); background: var(--kb-bg-card); }.records-analysis__date { width: 150px; }.records-analysis__sep { color: var(--kb-text-tertiary); font-size: 12px; }.records-analysis__range-error { color: var(--kb-danger); font-size: 12px; } @media (max-width: 1100px) { .records-analysis__grid { grid-template-columns: 1fr; } }
 </style>

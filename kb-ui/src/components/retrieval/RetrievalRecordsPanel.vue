@@ -8,11 +8,17 @@
     </div>
 
     <form class="records-panel__filters" @submit.prevent="applyFilters">
-      <select v-model.number="draft.days" class="records-panel__select" aria-label="时间范围">
+      <select v-model.number="draft.days" class="records-panel__select" aria-label="时间范围" @change="onRangePresetChange">
         <option :value="7">近 7 天</option>
         <option :value="30">近 30 天</option>
         <option :value="90">近 90 天</option>
+        <option value="custom">自定义</option>
       </select>
+      <template v-if="draft.days === 'custom'">
+        <input v-model="draft.startDate" type="date" class="records-panel__input records-panel__input--date" aria-label="开始日期" />
+        <span class="records-panel__range-sep">至</span>
+        <input v-model="draft.endDate" type="date" class="records-panel__input records-panel__input--date" aria-label="结束日期" />
+      </template>
       <select v-model="draft.source" class="records-panel__select" aria-label="来源">
         <option value="">全部来源</option>
         <option value="web">网页</option>
@@ -38,6 +44,9 @@
       </select>
       <button type="submit" class="records-panel__button">筛选</button>
       <button type="button" class="records-panel__button records-panel__button--plain" @click="resetFilters">重置</button>
+      <button type="button" class="records-panel__button records-panel__button--plain" :disabled="exporting" @click="exportCsv">{{ exporting ? '导出中…' : '导出' }}</button>
+      <p v-if="filterError" class="records-panel__filter-error">{{ filterError }}</p>
+      <p v-else-if="exportNotice" class="records-panel__filter-notice">{{ exportNotice }}</p>
     </form>
 
     <div v-if="error" class="records-panel__notice records-panel__notice--error">
@@ -149,8 +158,13 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRetrievalRecordsApi } from '@/api/retrievalRecords'
 import { apiErrorDetail } from '@/api/proxyClient'
 import { useDomainStore } from '@/stores/domain'
+import { saveBlob } from '@/utils/download'
 import StatsCard from '@/components/common/StatsCard.vue'
 import { useRetrievalNames } from '@/components/retrieval/useRetrievalNames'
+import {
+  prefillCustomRange, rangeFilters, validateCustomRange,
+  type RangePreset, type TimeRangeState,
+} from '@/components/retrieval/timeRange'
 import type {
   RetrievalOperation, RetrievalRecord, RetrievalRecordFilters, RetrievalRecordsSummary,
   RetrievalSource, RetrievalStatus,
@@ -186,8 +200,31 @@ const detailLoading = ref(false)
 const detailError = ref('')
 let loadGeneration = 0
 
-const draft = reactive({ days: 7, source: '', status: '', operation: '', tool: '', kbId: '', actorUserId: '', paradigmId: '' })
-const applied = reactive({ days: 7, source: '', status: '', operation: '', tool: '', kbId: '', actorUserId: '', paradigmId: '' })
+type PanelFilters = TimeRangeState & {
+  source: string; status: string; operation: string; tool: string
+  kbId: string; actorUserId: string; paradigmId: string
+}
+const draft = reactive<PanelFilters>({
+  days: 7, source: '', status: '', operation: '', tool: '',
+  kbId: '', actorUserId: '', paradigmId: '', startDate: '', endDate: '',
+})
+const applied = reactive<PanelFilters>({
+  days: 7, source: '', status: '', operation: '', tool: '',
+  kbId: '', actorUserId: '', paradigmId: '', startDate: '', endDate: '',
+})
+const filterError = ref('')
+const exporting = ref(false)
+const exportNotice = ref('')
+
+/** 切到"自定义"时预填近 7 天（共享逻辑见 timeRange.ts）。 */
+function onRangePresetChange(): void {
+  filterError.value = ''
+  prefillCustomRange(draft)
+}
+
+function validateDraft(): string {
+  return validateCustomRange(draft)
+}
 
 /**
  * 筛选下拉的选项 = 名称映射 ∪ 当前已加载记录里出现过的未知 ID。
@@ -212,7 +249,7 @@ const paradigmFilterOptions = computed(() => {
 
 function appliedFilters(): RetrievalRecordFilters {
   return {
-    days: applied.days,
+    ...rangeFilters(applied),
     kbId: props.kbId || applied.kbId || undefined,
     mcpKeyId: props.mcpKeyId || undefined,
     source: applied.source as RetrievalSource | '',
@@ -256,6 +293,9 @@ async function reload(): Promise<void> {
 }
 
 function applyFilters(): void {
+  // 校验失败只提示不请求，applied 保持旧值，列表维持上一次生效的筛选
+  filterError.value = validateDraft()
+  if (filterError.value) return
   Object.assign(applied, draft)
   cursorStack.value = []
   currentCursor.value = undefined
@@ -263,8 +303,73 @@ function applyFilters(): void {
 }
 
 function resetFilters(): void {
-  Object.assign(draft, { days: 7, source: '', status: '', operation: '', tool: '', kbId: '', actorUserId: '', paradigmId: '' })
+  Object.assign(draft, {
+    days: 7 as RangePreset, source: '', status: '', operation: '', tool: '',
+    kbId: '', actorUserId: '', paradigmId: '', startDate: '', endDate: '',
+  })
   applyFilters()
+}
+
+// ── 导出：当前筛选条件下拉全量（上限后端兜底），名称解析后拼 CSV ──
+
+const EXPORT_HEADERS = [
+  '时间', '用户', '来源', 'Tool / 操作', '查询或动作', '目标知识库',
+  '范式', '状态', '结果数', '耗时(ms)', '错误码', '调用 ID',
+]
+
+/** 标准 CSV 转义：含逗号/引号/换行的单元格包引号，引号翻倍。 */
+function csvCell(value: string): string {
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+}
+
+function exportStamp(): string {
+  const now = new Date()
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+}
+
+function exportRow(item: RetrievalRecord): string[] {
+  return [
+    formatTime(item.occurred_at),
+    item.actor_username || '',
+    sourceLabel(item.source),
+    item.tool_name || operationLabel(item.operation),
+    actionSummary(item),
+    item.kb_ids.length ? item.kb_ids.map(kbName).join('、') : '',
+    item.paradigm_id
+      ? `${paradigmName(item.paradigm_id)}${item.paradigm_version == null ? '' : ` v${item.paradigm_version}`}`
+      : '',
+    statusLabel(item.status),
+    item.result_count == null ? '' : String(item.result_count),
+    item.duration_ms == null ? '' : String(Math.round(item.duration_ms)),
+    item.error_code || '',
+    item.id,
+  ]
+}
+
+async function exportCsv(): Promise<void> {
+  const domain = domainStore.currentDomain
+  if (!domain || exporting.value) return
+  exporting.value = true
+  exportNotice.value = ''
+  filterError.value = ''
+  try {
+    const result = await api.exportAll(domain, appliedFilters())
+    if (!result.items.length) {
+      exportNotice.value = '当前筛选没有可导出的记录'
+      return
+    }
+    const lines = [EXPORT_HEADERS.map(csvCell).join(',')]
+    for (const item of result.items) lines.push(exportRow(item).map(csvCell).join(','))
+    // BOM 让 Excel 直接以 UTF-8 打开中文不乱码
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
+    saveBlob(blob, `检索记录_${exportStamp()}.csv`)
+    if (result.truncated) exportNotice.value = `匹配行数超过上限 ${result.row_limit}，已按上限截断导出`
+  } catch (reason) {
+    filterError.value = await apiErrorDetail(reason)
+  } finally {
+    exporting.value = false
+  }
 }
 
 function nextPage(): void {
@@ -388,6 +493,9 @@ watch(() => [props.kbId, props.mcpKeyId], () => { cursorStack.value = []; curren
 .records-panel__filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px; border: 1px solid var(--kb-border-light); border-radius: var(--kb-radius); background: var(--kb-bg-card); }
 .records-panel__input, .records-panel__select { min-height: 34px; padding: 0 10px; border: 1px solid var(--kb-border); border-radius: 6px; color: var(--kb-text-primary); background: var(--kb-bg-card); }
 .records-panel__input { flex: 1 1 220px; }.records-panel__input--tool { flex: 0 1 180px; }
+.records-panel__input--date { flex: 0 0 150px; }.records-panel__range-sep { align-self: center; color: var(--kb-text-tertiary); font-size: 12px; }
+.records-panel__filter-error { flex-basis: 100%; margin: 0; color: var(--kb-danger); font-size: 12px; }
+.records-panel__filter-notice { flex-basis: 100%; margin: 0; color: var(--kb-warning); font-size: 12px; }
 .records-panel__button { min-height: 34px; padding: 0 14px; border: 1px solid var(--kb-accent); border-radius: 6px; color: #fff; background: var(--kb-accent); cursor: pointer; }
 .records-panel__button--plain { color: var(--kb-text-secondary); background: var(--kb-bg-card); border-color: var(--kb-border); }
 .records-panel__button:disabled { opacity: .45; cursor: not-allowed; }

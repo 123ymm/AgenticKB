@@ -1,7 +1,7 @@
 """Application service for record visibility, filtering and cursor paging."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 import logging
 from threading import Lock
 from typing import Any
@@ -76,6 +76,8 @@ class RetrievalRecordService:
         paradigm_id: str | None,
         actor_user_id: str | None,
         user: dict[str, Any],
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> dict[str, Any]:
         if not await self._repository.is_available():
             return _empty_summary(days)
@@ -97,6 +99,8 @@ class RetrievalRecordService:
             mcp_key_id=mcp_key_id,
             status=status,
             paradigm_id=paradigm_id,
+            start_date=start_date,
+            end_date=end_date,
         )
 
     async def list_records(self, *, user: dict[str, Any], **filters: Any) -> dict[str, Any]:

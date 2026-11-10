@@ -65,15 +65,14 @@ async def _insert_run_document(pool, *, rd_id, run_id, document_key, status):
 
 async def _build_snapshot(
     pool, *, kb_id, document_id, build_status="validated", created_at=T0,
-    selection_status="active", segments=0, units=(), mentions=0, relations=0,
+    selection_status="active", segments=0, units=(), embeddings=0,
 ):
-    """造一份 build + 文档快照，并按需填充 segments / units / mentions / relations。
+    """造一份 build + 文档快照，并按需填充 segments / v2 检索单元 / v2 向量。
 
-    返回 (build_id, snapshot_id)。units 传 unit_type 列表，好让类型分布也能断言。
+    返回 (build_id, snapshot_id)。units 传 representation_type 列表，好让类型
+    分布也能断言（2026-09-01 口径切换后 stats_* 读 asset_retrieval_units_v2 /
+    embeddings_v2，旧链表恒 0，往旧表插数据测不出任何东西）。
     """
-    # mentions/relations 都要挂在具体切片上（外键）。少了这句，忘记给 segments 的调用方
-    # 会撞进 seg_ids 的 ZeroDivisionError，看半天才发现是自己漏传了参数。
-    assert not (mentions or relations) or segments > 0, "mentions/relations 需要 segments > 0"
     build_id, snap_id = _uid(), _uid()
     async with pool.connection() as conn:
         await conn.execute(
@@ -96,54 +95,56 @@ async def _build_snapshot(
             (build_id, document_id, snap_id, selection_status),
         )
 
-        seg_ids = []
         for i in range(segments):
-            seg_id = _uid()
-            seg_ids.append(seg_id)
             await conn.execute(
                 """INSERT INTO asset_raw_segments
                    (id, document_snapshot_id, segment_key, segment_index, raw_text,
                     normalized_text, content_hash, normalized_hash)
                    VALUES (%s, %s, %s, %s, 't', 't', %s, %s)""",
-                (seg_id, snap_id, f"seg-{i}", i, _uid(), _uid()),
+                (_uid(), snap_id, f"seg-{i}", i, _uid(), _uid()),
             )
+        rep_ids: list[str] = []
         for i, unit_type in enumerate(units):
+            rep_id = _uid()
+            rep_ids.append(rep_id)
             await conn.execute(
-                """INSERT INTO asset_retrieval_units
-                   (id, document_snapshot_id, unit_key, unit_type, target_type,
-                    text, search_text, created_at)
-                   VALUES (%s, %s, %s, %s, 'raw_segment', 't', 't', %s)""",
-                (_uid(), snap_id, f"unit-{i}", unit_type, created_at),
+                """INSERT INTO asset_retrieval_units_v2
+                   (representation_id, snapshot_id, representation_type,
+                    content_type, content_text, target_type, target_ref,
+                    canonical_evidence_id)
+                   VALUES (%s, %s, %s, 'text', 't', 'raw_segment', %s, %s)""",
+                (rep_id, snap_id, unit_type, f"seg-{i % segments}" if segments else "seg-0", _uid()),
             )
-        for i in range(mentions):
+        for _ in range(embeddings):
+            vec = "[" + ",".join(["0.1"] * 1024) + "]"
             await conn.execute(
-                """INSERT INTO asset_segment_entity_mentions
-                   (id, document_snapshot_id, segment_id, node_type, mention_text)
-                   VALUES (%s, %s, %s, 'device', 'x')""",
-                (_uid(), snap_id, seg_ids[i % len(seg_ids)]),
-            )
-        for i in range(relations):
-            await conn.execute(
-                """INSERT INTO asset_raw_segment_relations
-                   (id, document_snapshot_id, source_segment_id, target_segment_id,
-                    relation_type)
-                   VALUES (%s, %s, %s, %s, 'next')""",
-                (_uid(), snap_id, seg_ids[0], seg_ids[(i + 1) % len(seg_ids)]),
+                """INSERT INTO asset_retrieval_embeddings_v2
+                   (embedding_id, snapshot_id, representation_id, strategy,
+                    policy_version, provider, model, model_version, dimension,
+                    input_hash, embedding_vector_vec)
+                   VALUES (%s, %s, %s, 'dense', 'pv-1', 'test', 'm', '1', 1024,
+                           %s, %s ::vector)""",
+                (_uid(), snap_id, rep_ids[0] if rep_ids else _uid(), _uid(), vec),
             )
     return build_id, snap_id
 
 
 # ── stats_document_status ───────────────────────────────────────────────────
 
-async def test_document_status_six_keys_always_present(async_pool):
-    """六个键恒存在——调用方（路由与前端）不必判 undefined。"""
+async def test_document_status_seven_keys_always_present(async_pool):
+    """七个键恒存在——调用方（路由与前端）不必判 undefined。
+
+    update_failed 是第 7 态：同一文档重挖失败不回落 failed，单列出来才能解释
+    「上次挖成的还在，这次更新坏了」。
+    """
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("alice")
     kb = await db.create_kb(domain=DOMAIN, name="K", owner_id=owner["id"])
 
     counts = await db.stats_document_status(kb_ids=[kb["id"]])
     assert set(counts) == {
-        "uploaded", "mining", "mined", "published", "withdrawn", "failed"
+        "uploaded", "mining", "mined", "published", "withdrawn", "failed",
+        "update_failed",
     }
     assert all(v == 0 for v in counts.values())
 
@@ -152,8 +153,14 @@ async def test_document_status_buckets_by_run_state(async_pool):
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("alice")
     kb = await db.create_kb(domain=DOMAIN, name="K", owner_id=owner["id"])
-    for n in ("a.md", "b.md", "c.md", "d.md"):
-        await _add_doc(db, kb, n)
+    docs = {n: await _add_doc(db, kb, n) for n in ("a.md", "b.md", "c.md", "d.md", "e.md")}
+
+    # c.md / e.md 已入库：进过 validated build（36号 §九——mined 的口径是
+    # Build 成员资格，不是 run_document committed）
+    await _build_snapshot(
+        async_pool, kb_id=kb["id"], document_id=docs["c.md"]["id"])
+    await _build_snapshot(
+        async_pool, kb_id=kb["id"], document_id=docs["e.md"]["id"])
 
     await _insert_run(async_pool, run_id="run-1", kb_id=kb["id"])
     await _insert_run_document(
@@ -166,12 +173,18 @@ async def test_document_status_buckets_by_run_state(async_pool):
         async_pool, rd_id="rd-c", run_id="run-1", document_key="doc:/c.md",
         status="committed")
     # d.md 没有 run 记录 → uploaded
+    # e.md 已入库后最近一次更新失败 → update_failed（Build 旧版本仍在服务，
+    # 不回落 failed——这两种失败对用户的含义不同）
+    await _insert_run_document(
+        async_pool, rd_id="rd-e", run_id="run-1", document_key="doc:/e.md",
+        status="failed")
 
     counts = await db.stats_document_status(kb_ids=[kb["id"]])
-    assert counts["failed"] == 1
-    assert counts["mining"] == 1
-    assert counts["mined"] == 1
-    assert counts["uploaded"] == 1
+    assert counts["failed"] == 1          # a.md
+    assert counts["mining"] == 1          # b.md
+    assert counts["mined"] == 1           # c.md
+    assert counts["uploaded"] == 1        # d.md
+    assert counts["update_failed"] == 1   # e.md
 
 
 async def test_document_status_without_release_never_reports_published(async_pool):
@@ -205,7 +218,7 @@ async def test_document_status_empty_input_short_circuits(async_pool):
     db = KbDB(async_pool)
     counts = await db.stats_document_status(kb_ids=[])
     assert sum(counts.values()) == 0
-    assert len(counts) == 6
+    assert len(counts) == 7
 
 
 # ── stats_assets ────────────────────────────────────────────────────────────
@@ -231,9 +244,12 @@ async def test_assets_count_current_snapshot_only(async_pool):
     assert assets["snapshots"] == 1
     assert assets["segments"] == 3
     assert assets["retrieval_units"] == 1
+    assert assets["embeddings"] == 0   # 没造向量就是 0，不是键缺失
 
 
 async def test_assets_count_all_four_kinds(async_pool):
+    """2026-09-01 口径：快照/切片/检索单元/向量四类；实体提及与切片关系
+    随实体本体线下线移出统计。"""
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("alice")
     kb = await db.create_kb(domain=DOMAIN, name="K", owner_id=owner["id"])
@@ -241,12 +257,11 @@ async def test_assets_count_all_four_kinds(async_pool):
 
     await _build_snapshot(
         async_pool, kb_id=kb["id"], document_id=doc["id"],
-        segments=4, units=("raw_text", "summary"), mentions=3, relations=2)
+        segments=4, units=("raw_text", "summary"), embeddings=3)
 
     assets = await db.stats_assets(kb_ids=[kb["id"]])
     assert assets == {
-        "snapshots": 1, "segments": 4, "retrieval_units": 2,
-        "entity_mentions": 3, "relations": 2,
+        "snapshots": 1, "segments": 4, "retrieval_units": 2, "embeddings": 3,
     }
 
 
@@ -288,8 +303,7 @@ async def test_assets_are_bounded_by_kb_ids(async_pool):
 async def test_assets_empty_input_short_circuits(async_pool):
     db = KbDB(async_pool)
     assert await db.stats_assets(kb_ids=[]) == {
-        "snapshots": 0, "segments": 0, "retrieval_units": 0,
-        "entity_mentions": 0, "relations": 0,
+        "snapshots": 0, "segments": 0, "retrieval_units": 0, "embeddings": 0,
     }
 
 

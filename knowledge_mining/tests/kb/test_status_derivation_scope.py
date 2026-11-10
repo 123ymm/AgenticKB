@@ -109,8 +109,36 @@ async def test_failed_run_in_one_kb_does_not_bleed_into_another(async_pool):
     assert rows_b[doc_b["id"]] == "uploaded"
 
 
+async def _insert_build_membership(pool, *, kb_id, document_id):
+    """让文档成为 KB 最新 validated build 的 active 成员（mined 的口径前提）。"""
+    async with pool.connection() as conn:
+        snap_id, build_id = f"snap-{document_id}", f"build-{document_id}"
+        await conn.execute(
+            """INSERT INTO asset_document_snapshots
+               (id, domain, normalized_content_hash, raw_content_hash,
+                mime_type, created_at)
+               VALUES (%s, %s, 'nh', 'rh', 'text/markdown', %s)""",
+            (snap_id, DOMAIN, STARTED),
+        )
+        await conn.execute(
+            """INSERT INTO asset_builds
+               (id, build_code, status, build_mode, domain, kb_id, created_at)
+               VALUES (%s, %s, 'validated', 'full', %s, %s, %s)""",
+            (build_id, f"BUILD-{document_id}", DOMAIN, kb_id, STARTED),
+        )
+        await conn.execute(
+            """INSERT INTO asset_build_document_snapshots
+               (build_id, document_id, document_snapshot_id, selection_status, reason)
+               VALUES (%s, %s, %s, 'active', 'add')""",
+            (build_id, document_id, snap_id),
+        )
+
+
 async def test_each_kb_reflects_its_own_run(async_pool):
-    """两边都挖过时各认各的：A 失败、B 成功，互不覆盖。"""
+    """两边都挖过时各认各的：A 失败、B 成功，互不覆盖。
+
+    B 的「成功产出」按 36号 §九 口径 = committed run + validated build 成员。
+    """
     db = KbDB(async_pool)
     owner = await db.upsert_user_by_username("alice")
     kb_a = await db.create_kb(domain=DOMAIN, name="KB-A", owner_id=owner["id"])
@@ -134,6 +162,8 @@ async def test_each_kb_reflects_its_own_run(async_pool):
     await _insert_run_document(
         async_pool, rd_id="rd-b", run_id="run-b", document_key=key, status="committed",
     )
+    await _insert_build_membership(
+        async_pool, kb_id=kb_b["id"], document_id=doc_b["id"])
 
     assert await _status(db, doc_a["id"]) == "failed"
     assert await _status(db, doc_b["id"]) == "mined"
@@ -143,6 +173,10 @@ async def test_legacy_document_still_resolves_from_legacy_run(async_pool):
     """kb_id 两侧都为 NULL 时必须仍然匹配——所以用 IS NOT DISTINCT FROM 而不是 `=`。
 
     普通等值比较下 NULL = NULL 为 UNKNOWN，legacy 文档会整体退回 'uploaded'。
+    注意 legacy 文档挖到 committed 也只是 uploaded——mined 要 Build 成员
+    （b.kb_id = d.kb_id 精确匹配，legacy 无 KB），legacy run 只决定
+    failed/mining 档。所以这里用 failed 证明「关联没断」：断言本身就会在
+    退回 uploaded 的回归下变红。
     """
     db = KbDB(async_pool)
     key = "doc:/legacy.md"
@@ -150,10 +184,10 @@ async def test_legacy_document_still_resolves_from_legacy_run(async_pool):
     await _insert_run(async_pool, run_id="run-legacy", kb_id=None)
     await _insert_run_document(
         async_pool, rd_id="rd-legacy", run_id="run-legacy", document_key=key,
-        status="committed",
+        status="failed",
     )
 
-    assert await _status(db, "legacy-doc-1") == "mined"
+    assert await _status(db, "legacy-doc-1") == "failed"
 
 
 async def test_kb_document_is_not_claimed_by_legacy_run(async_pool):

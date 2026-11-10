@@ -32,6 +32,9 @@
         >
           范式已绑定
         </el-tag>
+        <el-tooltip v-if="copySource" :content="`拷贝于 ${formatCopyTime(copySource.copied_at)}`">
+          <el-tag size="small" type="info" effect="plain">拷贝自「{{ copySource.kb_name }}」</el-tag>
+        </el-tooltip>
       </div>
     </div>
 
@@ -58,6 +61,21 @@
         <span>向量 {{ readiness.embeddings }}</span>
       </div>
     </div>
+
+    <!-- v1.1 拷贝引导条：血缘已就位但范式未选——next_step_hint 语义的常驻化 -->
+    <el-alert
+      v-if="copySource && !miningWorkflowId"
+      type="success"
+      :closable="false"
+      class="kb-detail-view__copy-banner"
+    >
+      <template #title>
+        这是「{{ copySource.kb_name }}」的副本：文件与知识血缘已就绪。选择挖掘范式并开始挖掘后，知识才可被检索——选与源库相同的范式可复用已有解析与向量，几乎零成本。
+      </template>
+      <el-button size="small" type="primary" @click="activeTab = 'mining'">
+        去选择挖掘范式
+      </el-button>
+    </el-alert>
 
     <!-- Not found / no access -->
     <div v-if="!loading && loadError" class="kb-detail-view__missing">
@@ -165,6 +183,13 @@ let reloadGeneration = 0
 const canWrite = computed(
   () => kb.value ? canWriteKb(kb.value.my_role) : false,
 )
+
+/** v1.1 拷贝溯源（详情 metadata_json.copy_source；非拷贝库为 null）。 */
+const copySource = computed(() => kb.value?.metadata_json?.copy_source ?? null)
+
+function formatCopyTime(t: string): string {
+  return t ? new Date(t).toLocaleString('zh-CN') : ''
+}
 
 const READINESS_LABELS: Record<KbReadinessLevel, string> = {
   empty: '空库',
@@ -332,6 +357,20 @@ watch(activeTab, (tab) => {
   flex-direction: column;
   align-items: center;
   gap: 12px;
+}
+
+.kb-detail-view__copy-banner :deep(.el-alert__content) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.kb-detail-view__copy-banner :deep(.el-alert__title) {
+  flex: 1;
+  min-width: 260px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  font-weight: 500;
 }
 
 .kb-detail-view__tabs :deep(.el-tabs__header) {

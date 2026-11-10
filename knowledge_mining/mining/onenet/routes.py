@@ -20,7 +20,8 @@ from knowledge_mining.mining.api.domain_scope import require_domain
 from knowledge_mining.mining.kb.auth import current_user, require_admin
 from knowledge_mining.mining.kb.db import KbDB
 from knowledge_mining.mining.kb.deps import get_kb_db
-from knowledge_mining.mining.onenet.config import resolve_config
+from knowledge_mining.mining.onenet.config import resolve_config  # noqa: F401（回退通道；测试打桩点）
+from knowledge_mining.mining.onenet.effective_config import resolve_effective_config
 from knowledge_mining.mining.onenet.fetch import Selection
 from knowledge_mining.mining.onenet.restore import RULE_VERSION
 from knowledge_mining.mining.onenet.import_service import (
@@ -56,11 +57,21 @@ def _validated_source_id(raw) -> str:
 
 
 def _client_factory(request: Request):
-    cfg = resolve_config()
-    if cfg is None:
-        raise HTTPException(503, "onenet_not_configured")
-    from knowledge_mining.mining.onenet.client import OnenetClient
-    return lambda: OnenetClient.from_config(cfg)
+    """按域解析一张网客户端工厂（域覆盖，62号镜像：调用时给域）.
+
+    返回 async maker —— ``await make(domain)`` 得 OnenetClient；
+    domain=None 用全局基底。导入是后台任务执行时才建 client，
+    域在那时才可知，故域参数在调用时传入而非工厂创建时绑定。
+    域（或全局）未配置 → 503 onenet_not_configured。
+    """
+    async def make_client(domain: str | None = None):
+        cfg = await resolve_effective_config(domain)
+        if cfg is None:
+            raise HTTPException(
+                503, f"onenet_not_configured (domain={domain or '全局'})")
+        from knowledge_mining.mining.onenet.client import OnenetClient
+        return OnenetClient.from_config(cfg)
+    return make_client
 
 
 def _repo(request: Request) -> OnenetRepo:
@@ -111,16 +122,19 @@ async def onenet_search(
     request: Request = None,  # type: ignore[assignment]
 ):
     """第一步 · 查询发现（V1.2）：三元组透传 + 文档汇总分页。"""
+    client = await _client_factory(request)(str(body.get("domain") or "") or None)
     try:
         out = await asyncio.to_thread(
             search_documents,
-            _client_factory(request)(),
+            client,
             body.get("conditions") or [],
             page=int(body.get("page") or 1),
             page_size=int(body.get("page_size") or 20),
         )
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
+    finally:
+        client.close()
     return {**out,
             "notice": "fuzzy 查询命中封顶 10000，结果可能不全，只作发现手段"}
 
@@ -132,7 +146,7 @@ async def onenet_probe(
     request: Request = None,  # type: ignore[assignment]
 ):
     source_id = _validated_source_id(body.get("source_id"))
-    client = _client_factory(request)()
+    client = await _client_factory(request)(str(body.get("domain") or "") or None)
     try:
         return await asyncio.to_thread(probe_source, client, source_id)
     finally:
@@ -156,13 +170,16 @@ async def onenet_toc(
     # 缓存复用先比对 parsed_version（审查 M2：上游重解析后旧树不复活）；
     # 再比对 rule_version（beta-2：还原规则变版后旧树必须重扫，不复活）；
     # refresh=1 强制重扫（前端「刷新章节树」按钮）。
-    client_factory = _client_factory(request)
+    make_client = _client_factory(request)
     cached = await repo.get_toc_cache(domain, source_id)
     if cached is not None and not body.get("refresh"):
         if _cached_rule_version(cached) == RULE_VERSION:
-            current_version = await asyncio.to_thread(
-                lambda: client_factory().probe_source(source_id).get("parsed_version"))
-            if current_version == cached.get("parsed_version_seen"):
+            probe_client = await make_client(domain)
+            try:
+                probed = await asyncio.to_thread(probe_source, probe_client, source_id)
+            finally:
+                probe_client.close()
+            if probed.get("parsed_version") == cached.get("parsed_version_seen"):
                 return {"cached": True, **_toc_payload(cached)}
 
     try:
@@ -170,7 +187,7 @@ async def onenet_toc(
     except (TypeError, ValueError):
         raise HTTPException(422, "max_part_id must be an integer") from None
     try:
-        client = client_factory()
+        client = await make_client(domain)
         try:
             toc = await asyncio.to_thread(scan_toc, client, source_id, max_part_id=mpi)
         finally:
@@ -459,7 +476,7 @@ async def onenet_resync(
     import_row = await repo.get_import(import_id)
     if import_row is None:
         raise HTTPException(404, "import not found")
-    client = _client_factory(request)()
+    client = await _client_factory(request)(import_row["domain"])
     kbdb = KbDB(request.app.state.pg_pool)
     from knowledge_mining.mining.kb.deps import get_document_service
 

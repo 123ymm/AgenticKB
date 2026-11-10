@@ -6,7 +6,9 @@
 #   - 挖掘链与参数：挖掘范式模板（mining workflow templates，四套官方预置）
 #   - 挖掘 LLM 提示词：knowledge_mining/mining/retrieval_projection/llm_generation.py
 #     （doc2query / 层级摘要；版本冻结进 provenance）
-#   - LLM provider/model：main_control_service/config/system/llm_service.yaml
+#   - LLM provider/model：main_control_service/config/system/llm_service.yaml（全局基底）
+#     + system/llm_service.domains/{domain_id}.yaml 按域覆盖 chat+rerank
+#     （62号第一期；embedding 锁全局）
 #   - 检索管线：检索范式 DAG（范式编辑器/官方预置）
 # 本文件保留：display_name（域显示名）与 eval_questions（质量评估问题集，
 # 批次9 质量评估套件消费）。

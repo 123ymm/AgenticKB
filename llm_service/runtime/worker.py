@@ -65,6 +65,7 @@ class Worker:
         concurrency: int = 2,
         poll_interval: float = 1.0,
         llm_service: LLMService | None = None,
+        default_embedding_dimensions: int | None = None,
     ):
         self._db = db
         self._mgr = task_manager
@@ -75,6 +76,9 @@ class Worker:
         self._concurrency = concurrency
         self._poll_interval = poll_interval
         self._svc = llm_service
+        # 兜底用：提交侧已解析 dimensions（service.submit_embedding），
+        # 这里只救补丁前提交、input 里仍是 None 的存量队列任务。
+        self._default_embedding_dimensions = default_embedding_dimensions
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._active_task_ids: set[str] = set()
@@ -153,7 +157,15 @@ class Worker:
 
     async def _execute_chat(self, task_id: str) -> None:
         """Execute a chat task: read request -> delegate to shared execution."""
-        req = await self._db.fetchone("SELECT * FROM agent_llm_requests WHERE task_id = %s", (task_id,))
+        # 62号：knowledge_domain 与请求行一次取回——执行侧按域解析 provider
+        # （model 已在提交侧落库；域解析保证用该域 effective 的密钥/端点）。
+        req = await self._db.fetchone(
+            "SELECT r.*, t.knowledge_domain AS knowledge_domain "
+            "FROM agent_llm_requests r "
+            "JOIN agent_llm_tasks t ON t.id = r.task_id "
+            "WHERE r.task_id = %s",
+            (task_id,),
+        )
         if not req:
             await self._mgr.fail(task_id, "missing_request", "no request row found")
             return
@@ -169,6 +181,7 @@ class Worker:
                 task_id, request_id, messages, params,
                 expected_type, schema,
                 model=req.get("model"),
+                domain=req.get("knowledge_domain"),
             )
         except Exception as e:
             # execute_chat_attempt no longer re-raises — it handles _mgr.fail() internally.
@@ -196,9 +209,16 @@ class Worker:
         texts = input_data.get("texts", [])
         model = input_data.get("model")
         dimensions = input_data.get("dimensions")
+        if dimensions is None:
+            # 存量任务兜底：老提交链不带 dimensions（智谱默认 2048 维），
+            # 与库列维度不符会入库失败。落配置默认，保证按站点契约执行。
+            dimensions = self._default_embedding_dimensions
         request_id = req["id"]
 
-        task_row = await self._db.fetchone("SELECT attempt_count, max_attempts FROM agent_llm_tasks WHERE id = %s", (task_id,))
+        task_row = await self._db.fetchone(
+            "SELECT knowledge_domain, attempt_count, max_attempts FROM agent_llm_tasks WHERE id = %s",
+            (task_id,),
+        )
         if not task_row:
             return
         attempt_no = task_row["attempt_count"] + 1
@@ -214,7 +234,14 @@ class Worker:
 
         start = time.monotonic()
         try:
-            result = await self._model_provider.embed(texts, model=model, dimensions=dimensions)
+            # 62号二期：按任务域选 embedding provider（无覆盖域 = 全局实例；
+            # model 已在提交侧按域解析落库，这里只换端点/密钥）。
+            domain = task_row.get("knowledge_domain")
+            embed_provider = (
+                self._svc.model_provider_for(domain)
+                if self._svc is not None else None
+            ) or self._model_provider
+            result = await embed_provider.embed(texts, model=model, dimensions=dimensions)
             # Completing a malformed result would poison the idempotency cache:
             # callers key on content, so a succeeded-but-broken task is reused
             # forever and RETRY can never recover. Validate BEFORE completing —
@@ -289,7 +316,10 @@ class Worker:
         top_n = input_data.get("top_n")
         request_id = req["id"]
 
-        task_row = await self._db.fetchone("SELECT attempt_count, max_attempts FROM agent_llm_tasks WHERE id = %s", (task_id,))
+        task_row = await self._db.fetchone(
+            "SELECT knowledge_domain, attempt_count, max_attempts FROM agent_llm_tasks WHERE id = %s",
+            (task_id,),
+        )
         if not task_row:
             return
         attempt_no = task_row["attempt_count"] + 1
@@ -305,7 +335,13 @@ class Worker:
 
         start = time.monotonic()
         try:
-            result = await self._model_provider.rerank(query, documents, model=model, top_n=top_n)
+            # 62号：按任务域选 rerank provider（无覆盖域 = 全局实例）。
+            domain = task_row.get("knowledge_domain")
+            rerank_provider = (
+                self._svc.model_provider_for(domain)
+                if self._svc is not None else None
+            ) or self._model_provider
+            result = await rerank_provider.rerank(query, documents, model=model, top_n=top_n)
             latency = int((time.monotonic() - start) * 1000)
             finished = datetime.now(timezone.utc).isoformat()
 

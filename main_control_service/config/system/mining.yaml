@@ -23,3 +23,16 @@ upload:
   max_files_per_request: 50000
   disk_reserve_bytes: 1073741824    # 1GB
   archive_extensions: .zip .hdx .chm
+# 整库导出（打包下载通道，copy 超 5000 文档走这里）。
+export:
+  enabled: true
+  bucket_class: staging            # 产物桶 = bucket_prefix + 此值（已建桶；temporary 未建勿用）
+  tmp_root: ./uploads/_exports     # 本地暂存（命名卷；put_stream 再落一份副本，峰值≈2×包大小）
+  max_concurrent_tasks: 1          # 全局打包并发（串行，防内存/磁盘叠加）
+  batch_size: 500                  # keyset 分批大小
+  retention_hours: 72              # 产物保留时长（succeeded → 过期 sweep 清理）
+  presign_ttl_seconds: 86400       # 下载 URL 时效（≤ retention）
+  progress_interval_docs: 200      # 进度落库节流（文档数/秒 双阈值先到先写）
+  progress_interval_seconds: 5
+  sweep_interval_hours: 6          # 过期清理周期
+  max_export_bytes: 0              # 0 = 不限（可选字节闸门）

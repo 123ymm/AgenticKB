@@ -8,7 +8,13 @@ from typing import Callable
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from llm_service.config import load_llm_config, dig, resolve_active_model_config, fetch_internal_verify_secret
+from llm_service.config import (
+    DomainConfigs,
+    load_llm_config,
+    dig,
+    resolve_active_model_config,
+    fetch_internal_verify_secret,
+)
 from llm_service.db import LlmRuntimeDB
 from llm_service.pg_config import load_db_config
 from llm_service.pg_schema import assert_schema_contract
@@ -26,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level config set by __main__ before uvicorn forks workers.
 _STARTUP_CONFIG: dict | None = None
+_STARTUP_DOMAIN_CONFIGS: DomainConfigs | None = None
 
 
 def set_startup_config(cfg: dict) -> None:
@@ -34,11 +41,17 @@ def set_startup_config(cfg: dict) -> None:
     _STARTUP_CONFIG = cfg
 
 
+def set_startup_domain_configs(dc: DomainConfigs | None) -> None:
+    """Store per-domain configs from __main__（None = 重置为单全局配置）。"""
+    global _STARTUP_DOMAIN_CONFIGS
+    _STARTUP_DOMAIN_CONFIGS = dc
+
+
 def create_app_from_startup_config() -> FastAPI:
     """Uvicorn factory — reuses config loaded by __main__ (no double-fetch)."""
     if _STARTUP_CONFIG is None:
         raise RuntimeError("set_startup_config() must be called before create_app_from_startup_config()")
-    return create_app(config=_STARTUP_CONFIG)
+    return create_app(config=_STARTUP_CONFIG, domain_configs=_STARTUP_DOMAIN_CONFIGS)
 
 
 def create_app(
@@ -47,8 +60,14 @@ def create_app(
     model_provider_factory: Callable[[], ModelProviderProtocol] | None = None,
     *,
     start_worker: bool = True,
+    domain_configs: DomainConfigs | None = None,
 ) -> FastAPI:
-    cfg = config or load_llm_config()
+    if config is None and domain_configs is not None:
+        cfg = domain_configs.global_config
+    else:
+        cfg = config or load_llm_config()
+    # 62号：无域覆盖配置时退化为单全局——与旧行为逐字节一致。
+    dc = domain_configs or DomainConfigs.single(cfg)
     _factory = provider_factory
 
     @asynccontextmanager
@@ -165,17 +184,25 @@ def create_app(
         )
         await persist_writer.start()
 
-        svc = LLMService(db=db, provider=provider, config=cfg, model_provider=model_provider, templates=templates, persist_writer=persist_writer)
+        svc = LLMService(
+            db=db, provider=provider, config=cfg, model_provider=model_provider,
+            templates=templates, persist_writer=persist_writer,
+            domain_configs=dc,
+        )
         model_svc = ModelService(
             model_provider, db=db,
             persist_writer=persist_writer,
             default_embedding_model=dig(cfg, "embedding", "model"),
             default_rerank_model=dig(cfg, "rerank", "model"),
             default_embedding_dimensions=_embedding_dimensions,
+            provider_resolver=svc.resolver,
         )
         app.state.llm_service = svc
         app.state.model_service = model_svc
         app.state.db = db
+        # 62号：热加载端点原子换 DomainConfigs + 清共享 resolver 缓存。
+        app.state.domain_configs = dc
+        app.state.provider_resolver = svc.resolver
 
         worker = None
         recovery = None
@@ -192,6 +219,7 @@ def create_app(
                     concurrency=worker_concurrency,
                     poll_interval=dig(cfg, "worker", "poll_interval"),
                     llm_service=svc,
+                    default_embedding_dimensions=_embedding_dimensions,
                 )
                 await worker.start()
                 logger.info(
