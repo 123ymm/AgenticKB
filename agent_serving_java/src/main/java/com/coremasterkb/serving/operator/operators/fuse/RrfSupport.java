@@ -21,12 +21,16 @@ import java.util.Set;
  * 最佳通道名次升序 → canonical key 字典序，输出确定稳定。</p>
  *
  * <p>纯内存确定性计算：无 DB、无文本相似度、无阈值过滤。</p>
+ *
+ * <p>63号批次4：class 与 fuse 由包私有改 public 为制品域检索开放——
+ * {@code ArtifactWikiSearchService}（wiki 三通道融合）复用同一 RRF 实现，
+ * 不复制第二套融合；同包既有消费者（RrfOperator/测试）零影响。</p>
  */
-final class RrfSupport {
+public final class RrfSupport {
 
     private RrfSupport() {}
 
-    static List<RetrievalCandidate> fuse(
+    public static List<RetrievalCandidate> fuse(
             List<RetrievalCandidate> candidates, int k, Map<String, Double> channelWeights) {
 
         if (candidates == null || candidates.isEmpty()) {

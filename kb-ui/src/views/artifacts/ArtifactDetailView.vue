@@ -14,8 +14,16 @@
         <el-tag v-if="artifact" size="small" effect="plain">
           {{ artifact.kind === 'wiki' ? 'Wiki' : '表格' }}
         </el-tag>
-        <el-tag v-if="artifact?.draft_open" size="small" type="warning" effect="plain">
-          draft 开放中
+        <!-- D01（66号 §5）：服务版本 tag——rev>0 且非停用时点明「rN 正在服务」，
+             与下方草稿 tag 并列，让「正式版在服务 + 另有待发布草稿」的并存一眼可读。 -->
+        <el-tag v-if="servingRevisionLabel" size="small" type="success" effect="plain">
+          {{ servingRevisionLabel }}
+        </el-tag>
+        <!-- 草稿 tag 与 servingRevisionLabel 同源（Task 3.3 审查 Minor）：有
+             服务版（非停用且 rev>0）才说「另有待发布内容」；停用/rev0 语境一律
+             「draft 开放中」——deprecated+draft 边角不再出现「另有待发布」悬空。 -->
+        <el-tag v-if="artifact && artifact.draft_open" size="small" type="warning" effect="plain">
+          {{ servingRevisionLabel ? '另有待发布内容' : 'draft 开放中' }}
         </el-tag>
         <el-tag v-if="artifact" size="small" :type="artifact.visibility === 'public' ? 'success' : 'info'">
           {{ artifact.visibility === 'public' ? '公开' : '私有' }}
@@ -38,7 +46,7 @@
         </el-tooltip>
         <el-button v-if="artifact.status !== 'deprecated'" @click="deprecateArtifact">停用</el-button>
         <el-button v-if="artifact.status === 'deprecated'" @click="republishArtifact">恢复</el-button>
-        <el-button v-if="artifact.draft_open" @click="discardDraftAction">丢弃 draft</el-button>
+        <el-button v-if="artifact.draft_open" type="warning" plain @click="discardDraftAction">丢弃 draft</el-button>
         <!-- 008 删除门禁：owner 且已停用才可删（级联硬删不可恢复）；未停用时置灰指路 -->
         <el-tooltip
           :content="artifact.status === 'deprecated'
@@ -77,7 +85,60 @@
     <el-tabs v-if="artifact" v-model="activeTab" class="artifact-detail__tabs">
       <!-- ── 设计态：导入向导 / 列定义 / 行编辑三面板（owner+editor；viewer 无设计态）── -->
       <el-tab-pane label="设计态" name="design">
-        <template v-if="canWrite">
+        <!-- L01 空制品引导（66号 §4）：刚创建的空制品给「下一步做什么」指路
+             ——空 Wiki 提示从知识库生成；空表格提示上传 Excel 或编辑字段。 -->
+        <el-alert
+          v-if="emptyGuide"
+          type="info"
+          :closable="false"
+          class="artifact-detail__empty-guide"
+          data-test="design-empty-guide"
+          :title="emptyGuide.title"
+          :description="emptyGuide.description"
+        />
+        <!-- wiki 分支（63号批次2/3）：编译面板（来源绑定+目录确认+进度轮询）
+             在上；内容区「页面｜图谱」切换（66号 D03.1——四个主页签不变）。
+             viewer 也可读（面板内部按 canWrite 收敛写入口）。 -->
+        <template v-if="artifact.kind === 'wiki'">
+          <WikiCompilePanel
+            :artifact-id="artifactId"
+            :can-write="canWrite"
+            :expected-updated-at="artifact.updated_at"
+            @changed="reloadAll"
+          />
+          <el-divider content-position="left">
+            <el-button-group size="small" class="artifact-detail__wiki-views">
+              <el-button
+                :type="designWikiView === 'pages' ? 'primary' : ''"
+                data-test="wiki-design-view-pages"
+                @click="setWikiView('design', 'pages')"
+              >页面</el-button>
+              <el-button
+                :type="designWikiView === 'graph' ? 'primary' : ''"
+                data-test="wiki-design-view-graph"
+                @click="setWikiView('design', 'graph')"
+              >图谱</el-button>
+            </el-button-group>
+          </el-divider>
+          <!-- v-show 常驻：切图谱不丢编辑器状态（目录未保存修改守卫在面板内） -->
+          <WikiEditorPanel
+            v-show="designWikiView === 'pages'"
+            ref="wikiEditorRef"
+            :artifact-id="artifactId"
+            :can-write="canWrite"
+            :expected-updated-at="artifact.updated_at"
+            :draft-open="artifact.draft_open"
+            @changed="reloadAll"
+          />
+          <WikiGraphPanel
+            v-if="designGraphActivated"
+            v-show="designWikiView === 'graph'"
+            :artifact-id="artifactId"
+            :draft="canWrite"
+            @open-page="openWikiPageFromDesign"
+          />
+        </template>
+        <template v-else-if="canWrite">
           <ArtifactImportWizard
             :artifact-id="artifactId"
             :active="activeTab === 'design'"
@@ -105,54 +166,100 @@
         <EmptyState v-else text="设计态仅 owner / editor 可见（你当前是 viewer——请看运行态）" />
       </el-tab-pane>
 
-      <!-- ── 运行态：说明卡 + 只读行表格（本棒可用）── -->
+      <!-- ── 运行态：说明卡子组件 + 只读行表格（本棒可用）── -->
       <el-tab-pane label="运行态" name="runtime">
         <div class="artifact-detail__meta-bar">
-          <el-descriptions :column="1" border size="small" class="artifact-detail__desc-card">
-            <el-descriptions-item label="标题">{{ artifact.title }}</el-descriptions-item>
-            <el-descriptions-item label="描述">{{ artifact.description || '—' }}</el-descriptions-item>
-            <el-descriptions-item label="使用说明">
-              <span :class="{ 'artifact-detail__usage-missing': !artifact.usage_note }">
-                {{ artifact.usage_note || '未填写（发布前必填）' }}
-              </span>
-            </el-descriptions-item>
-            <el-descriptions-item label="当前版本">
-              {{ artifact.current_revision ? `r${artifact.current_revision}` : '未发布' }}
-            </el-descriptions-item>
-          </el-descriptions>
-          <el-button data-test="edit-meta" @click="openMetaEdit">编辑元信息</el-button>
+          <!-- C01：说明卡（描述/使用说明/版本/消费方式 + artifact_ref 复制 +
+               Agent 三条件区）整体抽入子组件——本视图已被多任务触碰，控行数。 -->
+          <ArtifactUsagePanel :artifact="artifact" class="artifact-detail__desc-card" />
+          <el-button data-test="edit-meta" :icon="Edit" @click="openMetaEdit">编辑元信息</el-button>
         </div>
 
-        <el-table v-loading="rowsLoading" :data="runtimeRows" size="small">
-          <el-table-column label="行键" min-width="150">
-            <template #default="{ row }">
-              <el-tooltip :content="row.row_key" placement="top" :disabled="row.row_key === displayRowKey(row)">
-                <span>{{ displayRowKey(row) }}</span>
-              </el-tooltip>
-            </template>
-          </el-table-column>
-          <el-table-column
-            v-for="col in runtimeColumns"
-            :key="col.column_id"
-            :label="col.column_name"
-            min-width="130"
-            show-overflow-tooltip
+        <!-- wiki 运行态阅读器/图谱（63号批次2 + 66号 D03.1）：面板自加载
+             current_revision 投影；「页面｜图谱」内容区切换（只读——图谱
+             draft=false 读正式版）。表格制品走下方只读行表（互斥）。 -->
+        <template v-if="artifact.kind === 'wiki'">
+          <!-- Q01 检索状态条（66号批次5 Task 5.3）：说明卡下方、内容区切换
+               上方——切片向量四计数（done/total 百分比），failed>0/投影缺失
+               黄色警示 + 修复投影入口（editor+；修复=幂等重入投影不动正文）。 -->
+          <div
+            v-if="wikiStatus && wikiStatus.revision > 0"
+            class="artifact-detail__search-status"
+            :class="{ 'is-warning': wikiUnits.failed > 0 || wikiUnits.total === 0 }"
+            data-test="wiki-search-status-bar"
           >
-            <template #default="{ row }">{{ displayValue(row.data[col.column_name]) }}</template>
-          </el-table-column>
-          <template #empty>
-            <EmptyState text="暂无已发布数据（发布后在运行态可见）" />
-          </template>
-        </el-table>
-        <el-pagination
-          v-if="rowsTotal > rowsPageSize"
-          class="artifact-detail__pager"
-          layout="total, prev, pager, next"
-          :total="rowsTotal"
-          :page-size="rowsPageSize"
-          :current-page="rowsPage"
-          @current-change="onRowsPageChange"
-        />
+            <el-tag
+              v-if="wikiUnits.failed > 0 || wikiUnits.total === 0"
+              type="warning" size="small"
+            >检索异常</el-tag>
+            <el-tag v-else-if="wikiUnits.pending > 0" size="small">向量处理中</el-tag>
+            <el-tag v-else type="success" size="small">检索就绪</el-tag>
+            <span class="artifact-detail__search-status-text">{{ wikiStatusText }}</span>
+            <el-button
+              v-if="canWrite && (wikiUnits.failed > 0 || wikiUnits.total === 0)"
+              size="small" type="warning" plain
+              :loading="wikiRepairing"
+              data-test="wiki-status-repair-btn"
+              @click="repairProjection"
+            >修复投影</el-button>
+          </div>
+          <el-button-group size="small" class="artifact-detail__wiki-views">
+            <el-button
+              :type="runtimeWikiView === 'pages' ? 'primary' : ''"
+              data-test="wiki-runtime-view-pages"
+              @click="setWikiView('runtime', 'pages')"
+            >页面</el-button>
+            <el-button
+              :type="runtimeWikiView === 'graph' ? 'primary' : ''"
+              data-test="wiki-runtime-view-graph"
+              @click="setWikiView('runtime', 'graph')"
+            >图谱</el-button>
+          </el-button-group>
+          <WikiReaderPanel
+            v-show="runtimeWikiView === 'pages'"
+            ref="wikiReaderRef"
+            :artifact-id="artifactId"
+          />
+          <WikiGraphPanel
+            v-if="runtimeGraphActivated"
+            v-show="runtimeWikiView === 'graph'"
+            :artifact-id="artifactId"
+            :draft="false"
+            @open-page="openWikiPageFromRuntime"
+          />
+        </template>
+        <template v-else>
+          <el-table v-loading="rowsLoading" :data="runtimeRows" size="small">
+            <el-table-column label="行键" min-width="150">
+              <template #default="{ row }">
+                <el-tooltip :content="row.row_key" placement="top" :disabled="row.row_key === displayRowKey(row)">
+                  <span>{{ displayRowKey(row) }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column
+              v-for="col in runtimeColumns"
+              :key="col.column_id"
+              :label="col.column_name"
+              min-width="130"
+              show-overflow-tooltip
+            >
+              <template #default="{ row }">{{ displayValue(row.data[col.column_name]) }}</template>
+            </el-table-column>
+            <template #empty>
+              <EmptyState text="暂无已发布数据（发布后在运行态可见）" />
+            </template>
+          </el-table>
+          <el-pagination
+            v-if="rowsTotal > rowsPageSize"
+            class="artifact-detail__pager"
+            layout="total, prev, pager, next"
+            :total="rowsTotal"
+            :page-size="rowsPageSize"
+            :current-page="rowsPage"
+            @current-change="onRowsPageChange"
+          />
+        </template>
       </el-tab-pane>
 
       <!-- ── 成员：成员管理仅 owner（后端 ROLE_OWNER_ONLY）── -->
@@ -160,6 +267,7 @@
         <ArtifactMembersPanel
           :artifact-id="artifactId"
           :can-manage="isOwner"
+          :visibility="artifact.visibility"
           @changed="reload"
         />
       </el-tab-pane>
@@ -172,6 +280,7 @@
           :can-write="canWrite"
           :current-revision="artifact.current_revision"
           :expected-updated-at="artifact.updated_at"
+          :kind="artifact.kind"
           @changed="reloadAll"
         />
       </el-tab-pane>
@@ -219,6 +328,8 @@
       :usage-note="artifact?.usage_note || ''"
       :draft-open="artifact?.draft_open"
       :current-revision="artifact?.current_revision ?? 0"
+      :unit-label="artifact?.kind === 'wiki' ? '页' : '行'"
+      :kind="artifact?.kind"
       @published="reloadAll"
       @changed="reload"
     />
@@ -228,19 +339,31 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft } from '@element-plus/icons-vue'
+import { ArrowLeft, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
 import ArtifactImportWizard from '@/components/artifacts/ArtifactImportWizard.vue'
+import ArtifactUsagePanel from '@/components/artifacts/ArtifactUsagePanel.vue'
 import ArtifactSchemaPanel from '@/components/artifacts/ArtifactSchemaPanel.vue'
 import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
 import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
 import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.vue'
 import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
+import WikiCompilePanel from '@/components/artifacts/WikiCompilePanel.vue'
+import WikiEditorPanel from '@/components/artifacts/WikiEditorPanel.vue'
+import WikiGraphPanel from '@/components/artifacts/WikiGraphPanel.vue'
+import WikiReaderPanel from '@/components/artifacts/WikiReaderPanel.vue'
 import { decodeRowKey } from '@/utils/rowKey'
-import type { ArtifactColumn, ArtifactDetail, ArtifactRow } from '@/types/artifacts'
+import type {
+  ArtifactColumn,
+  ArtifactDetail,
+  ArtifactKind,
+  ArtifactRow,
+  WikiStatus,
+  WikiUnitsStatus,
+} from '@/types/artifacts'
 
 const props = defineProps<{ artifactId: string }>()
 
@@ -273,6 +396,97 @@ const metaForm = ref({ title: '', description: '', usage_note: '', visibility: '
 // 发布
 const publishVisible = ref(false)
 
+// ── wiki 内容区「页面｜图谱」切换（66号 D03.1：四个主页签不变，表格制品无此入口）──
+/** 当前内容视图（pages=编辑器/阅读器；graph=只读图谱）。 */
+const designWikiView = ref<'pages' | 'graph'>('pages')
+const runtimeWikiView = ref<'pages' | 'graph'>('pages')
+/** 图谱懒挂载：首次切图谱才 mount（不拉数据），此后 v-show 常驻（切回不重载）。 */
+const designGraphActivated = ref(false)
+const runtimeGraphActivated = ref(false)
+/** 面板引用：图谱「打开页面」→ 切回页面视图并定位该页（selectPage 已 expose）。 */
+const wikiEditorRef = ref<InstanceType<typeof WikiEditorPanel> | null>(null)
+const wikiReaderRef = ref<InstanceType<typeof WikiReaderPanel> | null>(null)
+
+function setWikiView(area: 'design' | 'runtime', view: 'pages' | 'graph'): void {
+  if (area === 'design') {
+    if (view === 'graph') designGraphActivated.value = true
+    designWikiView.value = view
+  } else {
+    if (view === 'graph') runtimeGraphActivated.value = true
+    runtimeWikiView.value = view
+  }
+}
+
+/** 图谱「打开页面」：切回页面视图 + 定位该页（编辑器/阅读器 v-show 常驻已挂载；
+ * 方法级可选调用——面板被测试桩替换等边缘形态下静默跳过）。 */
+function openWikiPageFromDesign(pageKey: string): void {
+  designWikiView.value = 'pages'
+  void wikiEditorRef.value?.selectPage?.(pageKey)
+}
+
+function openWikiPageFromRuntime(pageKey: string): void {
+  runtimeWikiView.value = 'pages'
+  void wikiReaderRef.value?.selectPage?.(pageKey)
+}
+
+// ── Q01 wiki 检索状态条 + 投影修复（66号批次5 Task 5.3）──
+
+const wikiStatus = ref<WikiStatus | null>(null)
+const wikiRepairing = ref(false)
+
+const EMPTY_UNITS: WikiUnitsStatus = { total: 0, done: 0, failed: 0, pending: 0 }
+const wikiUnits = computed<WikiUnitsStatus>(() => wikiStatus.value?.units ?? EMPTY_UNITS)
+
+/** done/total 百分比（total=0 无意义——投影缺失走警示文案）。 */
+const wikiStatusPercent = computed(() => {
+  const u = wikiUnits.value
+  return u.total > 0 ? Math.round((u.done / u.total) * 100) : 0
+})
+
+const wikiStatusText = computed(() => {
+  const u = wikiUnits.value
+  if (u.total === 0) {
+    return '检索投影缺失（0 个切片）——发布后置投影未落地，可修复重建'
+  }
+  if (u.failed > 0) {
+    return `切片向量 ${u.done}/${u.total}（${wikiStatusPercent.value}%），`
+      + `${u.failed} 个失败——向量检索可能不完整`
+  }
+  if (u.pending > 0) {
+    return `向量处理中 ${u.done}/${u.total}（${wikiStatusPercent.value}%）`
+  }
+  return `检索就绪 ${u.done}/${u.total}（100%）`
+})
+
+/** 状态条是增强信息：拉取失败静默隐藏（不扰运行态主内容）。 */
+async function loadWikiStatus(): Promise<void> {
+  try {
+    wikiStatus.value = await api.getWikiStatus(props.artifactId)
+  } catch {
+    wikiStatus.value = null
+  }
+}
+
+/** 修复投影（editor+）：幂等重入——健康 no-op 后端自答；完成后刷新状态条。 */
+async function repairProjection(): Promise<void> {
+  wikiRepairing.value = true
+  try {
+    const result = await api.reprojectWiki(props.artifactId)
+    ElMessage.success(result.reprojected ? '投影已重建，向量处理中' : '投影状态健康，无需修复')
+    await loadWikiStatus()
+  } catch (error) {
+    ElMessage.error(`修复失败：${await apiErrorDetail(error)}`)
+  } finally {
+    wikiRepairing.value = false
+  }
+}
+
+// 制品（重新）加载后：wiki 已发布 → 拉检索状态；否则隐藏（rev0 无投影语义）
+watch(() => artifact.value, (a) => {
+  if (a?.kind === 'wiki' && a.current_revision > 0) void loadWikiStatus()
+  else wikiStatus.value = null
+})
+
 /** canWrite = my_role ∈ {owner, editor}（详情响应附带；admin 后端归一 owner）。 */
 const canWrite = computed(() => artifact.value?.my_role === 'owner' || artifact.value?.my_role === 'editor')
 /** 成员管理仅 owner（后端 ROLE_OWNER_ONLY）。 */
@@ -280,6 +494,38 @@ const isOwner = computed(() => artifact.value?.my_role === 'owner')
 /** 干净态 = draft 关闭且已有发布版 → 无待发布变更（后端 409 门禁镜像）。 */
 const hasPendingChanges = computed(() =>
   !!artifact.value && (artifact.value.draft_open || artifact.value.current_revision === 0))
+/** D01（66号 §5）：服务版本表述——有发布版且未停用时点明「rN 正在服务」；
+ *  停用后 Agent 侧不可见，不再宣称「正在服务」（rev0 无发布版，返回 null）。 */
+const servingRevisionLabel = computed(() => {
+  const a = artifact.value
+  if (!a || a.current_revision === 0 || a.status === 'deprecated') return null
+  return `r${a.current_revision} 正在服务`
+})
+
+// ── L01 空制品引导（66号 §4）──────────────────────────────────────────
+
+/** 引导文案（Record 键钉死 ArtifactKind 全集——四形态路线下新增 kind 时
+ *  TS 强制补齐文案，与列表 KIND_CREATE_HINTS 同风格）。 */
+const EMPTY_GUIDES: Record<ArtifactKind, { title: string; description: string }> = {
+  wiki: {
+    title: '空 Wiki——从知识库生成第一版内容',
+    description: '在下方「来源绑定」选择可访问的知识库目录并开始编译，生成页面后可人工修订，填写使用说明再发布。',
+  },
+  table: {
+    title: '空表格——上传 Excel 或编辑字段',
+    description: '在下方上传 Excel 走导入向导（列映射 → 预览确认 → 导入草稿），或先在「列定义」手工建列再录数据。',
+  },
+}
+
+/** 空制品判定：从未发布（rev0）且无未发布改动（draft_open=false——导入/
+ *  编译完成/建列/建页都会检出草稿，首次实质操作后引导自然消失）；表格
+ *  再要求无列定义。viewer 无操作入口，不显示操作引导。 */
+const emptyGuide = computed(() => {
+  const a = artifact.value
+  if (!a || !canWrite.value || a.current_revision > 0 || a.draft_open) return null
+  if (a.kind !== 'wiki' && a.schema.length > 0) return null
+  return EMPTY_GUIDES[a.kind]
+})
 
 async function reload() {
   loading.value = true
@@ -349,7 +595,10 @@ function loadRuntimeData() {
 }
 
 watch(activeTab, (tab) => {
-  if (tab === 'runtime' && !runtimeLoaded.value) loadRuntimeData()
+  // wiki 守卫保留：无表格运行态，不触发 table 列/行懒加载（阅读器面板自加载）
+  if (tab === 'runtime' && !runtimeLoaded.value && artifact.value?.kind !== 'wiki') {
+    loadRuntimeData()
+  }
 })
 
 function onRowsPageChange(page: number) {
@@ -508,8 +757,22 @@ defineExpose({ reloadAll })
 .artifact-detail__desc { margin: 8px 0 12px; color: var(--kb-text-tertiary); font-size: 13px; }
 .artifact-detail__missing { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .artifact-detail__meta-bar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+/* 说明卡占位（desc-card 名字保留——class 传给子组件根元素继承 flex 占位） */
 .artifact-detail__desc-card { flex: 1; max-width: 720px; }
-.artifact-detail__usage-missing { color: var(--el-color-warning); }
 .artifact-detail__visibility-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; line-height: 1.5; }
+.artifact-detail__empty-guide { margin-bottom: 14px; }
+/* wiki 内容区「页面｜图谱」切换（D03.1）：运行态入口组与面板间距 */
+.artifact-detail__wiki-views { margin-bottom: 10px; }
+/* Q01 检索状态条（66号批次5）：运行态 wiki 顶部一行；警示=黄边淡底 */
+.artifact-detail__search-status {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px; padding: 6px 10px; border-radius: 6px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+}
+.artifact-detail__search-status.is-warning {
+  border-color: var(--el-color-warning-light-5, #f3d19e);
+  background: var(--el-color-warning-light-9, #fdf6ec);
+}
+.artifact-detail__search-status-text { font-size: 12.5px; color: var(--kb-text-secondary, #606266); }
 .artifact-detail__pager { margin-top: 12px; justify-content: flex-end; }
 </style>

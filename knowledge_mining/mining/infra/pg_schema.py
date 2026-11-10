@@ -159,14 +159,34 @@ _KB_ARTIFACTS_DDL = (
     / "schemas"
     / "017_kb_artifacts.sql"
 )
+# 63号批次1：wiki 制品底座——来源绑定 + wiki 三表 + 检索单元 HNSW（自包含、
+# 身份列无 FK；batches 通道通用化折在 017；存量库同文版本化迁移
+# =core/20261021_010_wiki_artifacts；vector 扩展由链首 002_asset_core 保证）。
+_WIKI_ARTIFACTS_DDL = (
+    _REPO_ROOT
+    / "databases"
+    / "kb"
+    / "schemas"
+    / "018_wiki_artifacts.sql"
+)
+# 66号批次1：wiki 目录草稿持久化——kb_wiki_tocs 单表（自包含、身份列无 FK；
+# 存量库同文版本化迁移=core/20261103_011_wiki_toc）。
+_WIKI_TOC_DDL = (
+    _REPO_ROOT
+    / "databases"
+    / "kb"
+    / "schemas"
+    / "019_wiki_toc.sql"
+)
 # KB 硬删任务化（013）：status 加 deleting + kb_purge_tasks 进度表。
 _KB_PURGE_TASKS_DDL = (
     _REPO_ROOT / "databases" / "kb" / "schemas" / "013_kb_purge_tasks.sql"
 )
-# KB 整库导出任务（018）：打包下载通道的任务进度表（自包含，链尾安全；
-# 存量库同文版本化迁移=core/20261026_010_kb_export_tasks）。
+# KB 整库导出任务（020，原 018：与上游 wiki 的 018 撞号让位改号）：打包下载
+# 通道的任务进度表（自包含，链尾安全；存量库同文版本化迁移
+# =core/20261026_010_kb_export_tasks）。
 _KB_EXPORT_TASKS_DDL = (
-    _REPO_ROOT / "databases" / "kb" / "schemas" / "018_kb_export_tasks.sql"
+    _REPO_ROOT / "databases" / "kb" / "schemas" / "020_kb_export_tasks.sql"
 )
 _WORKFLOW_CONTROL_DDL = _REPO_ROOT / "databases" / "mining_control" / "schemas" / "001_mining_workflow_postgresql.sql"
 
@@ -277,7 +297,13 @@ def domain_schema_paths() -> tuple[Path, ...]:
         _KNOWLEDGE_ACCESS_RECORD_PAYLOADS_DDL,
         # 61号表格知识制品：六张自包含表，紧跟 016（链尾）。
         _KB_ARTIFACTS_DDL,
-        # KB 整库导出任务表（018）：自包含，链尾。
+        # 63号批次1：wiki 制品底座四表（自包含，挂链尾；HNSW 依赖 vector 扩展，
+        # 链首 002_asset_core 已 CREATE EXTENSION IF NOT EXISTS vector）。
+        _WIKI_ARTIFACTS_DDL,
+        # 66号批次1：wiki 目录草稿表（自包含，挂链尾）。
+        _WIKI_TOC_DDL,
+        # KB 整库导出任务表（020，原 018：与 wiki 的 018 撞号让位改号——启动链
+        # 无 ledger、按文件名无记账，改号安全；存量库迁移 id 不变）：自包含，链尾。
         _KB_EXPORT_TASKS_DDL,
     )
 

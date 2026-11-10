@@ -1,6 +1,7 @@
 package com.coremasterkb.serving.operator.api;
 
 import com.coremasterkb.serving.config.ServingProperties;
+import com.coremasterkb.serving.cachewarmup.RetrievalCacheWarmupService;
 import com.coremasterkb.serving.domain.EvidenceResponse;
 import com.coremasterkb.serving.domain.RetrievalCandidate;
 import com.coremasterkb.serving.domainpack.DomainPoolManager;
@@ -13,12 +14,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * Shared compile + execute + response-shaping for both inline ({@code /paradigm/run}) and stored
@@ -93,18 +97,38 @@ public class ParadigmExecutionService {
     private final DomainRegistry domainRegistry;
     private final DomainPoolManager domainPoolManager;
     private final String defaultDomain;
+    private final Consumer<String> requireRetrievalReady;
 
+    /** Compatibility constructor for tests that do not own a database warmup lifecycle. */
     public ParadigmExecutionService(
             ParadigmCompiler compiler,
             ParadigmExecutor executor,
             DomainRegistry domainRegistry,
             DomainPoolManager domainPoolManager,
             ServingProperties properties) {
+        this(compiler, executor, domainRegistry, domainPoolManager, properties, domain -> { });
+    }
+
+    /** Production wiring always requires the real warmup service. */
+    @Autowired
+    public ParadigmExecutionService(
+            ParadigmCompiler compiler, ParadigmExecutor executor, DomainRegistry domainRegistry,
+            DomainPoolManager domainPoolManager, ServingProperties properties,
+            RetrievalCacheWarmupService warmupService) {
+        this(compiler, executor, domainRegistry, domainPoolManager, properties,
+                Objects.requireNonNull(warmupService)::requireReady);
+    }
+
+    ParadigmExecutionService(
+            ParadigmCompiler compiler, ParadigmExecutor executor, DomainRegistry domainRegistry,
+            DomainPoolManager domainPoolManager, ServingProperties properties,
+            Consumer<String> requireRetrievalReady) {
         this.compiler = compiler;
         this.executor = executor;
         this.domainRegistry = domainRegistry;
         this.domainPoolManager = domainPoolManager;
         this.defaultDomain = properties.defaultDomain();
+        this.requireRetrievalReady = Objects.requireNonNull(requireRetrievalReady);
     }
 
     /**
@@ -118,6 +142,7 @@ public class ParadigmExecutionService {
         }
         String domain = (args.domain() != null && !args.domain().isBlank())
                 ? args.domain() : defaultDomain;
+        domainRegistry.resolve(domain);
         String channel = (args.channel() != null && !args.channel().isBlank())
                 ? args.channel() : domainRegistry.getDefaultChannel(domain);
 
@@ -125,6 +150,10 @@ public class ParadigmExecutionService {
 
         // Validate DB reachable (lazy pool build + connectivity check) before executing.
         domainPoolManager.getDataSource(domain);
+
+        // Outside the executor: operator SKIP_WITH_EMPTY must never turn warming into empty hits.
+        // Check each request so a PostgreSQL-only restart closes the gate again.
+        requireRetrievalReady.accept(domain);
 
         ExecContext ctx = new ExecContext(
                 UUID.randomUUID().toString(), domain, channel, args.debug(), args.username());

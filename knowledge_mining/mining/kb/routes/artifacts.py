@@ -15,7 +15,7 @@ import（plan 支持两种形态：build_mapping 产物，或
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from fastapi import (
@@ -63,6 +63,11 @@ router = APIRouter(prefix="/api/artifacts", tags=["artifacts"])
 #: multipart 开销预算（对齐 auth_guard 用户导入预检口径）。
 _UPLOAD_BODY_BUDGET = MAX_UPLOAD_BYTES + 256 * 1024
 
+#: serving ref 协议前缀（同 ArtifactQueryService.REF_PREFIX="art_"）：ref =
+#: 前缀 + artifact_id（DB id 本身含 art_，ref 形如 art_art_<hex>），serving
+#: 剥一个前缀即还原 DB id——66号 §13 C01 前端展示服务返回的 ref，不前端拼装。
+_REF_PREFIX = "art_"
+
 
 # ----------------------------------------------------------------- models
 
@@ -71,6 +76,7 @@ class ArtifactCreate(BaseModel):
     description: str | None = None
     domain_id: str | None = Field(default=None, max_length=128)
     visibility: str = Field(default="private", pattern="^(private|public)$")
+    kind: Literal["table", "wiki"] = "table"
 
 
 class ArtifactMetaPatch(BaseModel):
@@ -183,6 +189,23 @@ def _map_error(exc: ArtifactError) -> HTTPException:
                 "code": "artifact_not_deprecated",
                 "message": "必须先停用（deprecate）制品才能删除——删除是级联硬删且不可恢复",
             })
+        if str(exc).startswith("publish_validation_failed"):
+            # 63号批次3决策7：wiki 发布校验阻断（rev0 页 provenance 缺失/
+            # 悬空引用）——同 wiki_no_pages 状态冲突族 409；详情（页键+原因）
+            # 在 message 中携带（结构化账在页 flags/status 端点）。仅 kind=wiki
+            # 走 WikiLifecycle，表格路径永不产生该码。
+            detail = str(exc).split(":", 1)[1] if ":" in str(exc) else ""
+            return HTTPException(409, {
+                "code": "publish_validation_failed",
+                "message": "发布校验未通过（机器页来源账/引用悬空）：" + detail,
+            })
+        if str(exc) == "wiki_no_pages":
+            # 63号批次2 wiki 发布门禁（rev0 零页）：状态冲突族，与
+            # no_pending_changes 同为发布门禁 409；表格路径永不产生该码。
+            return HTTPException(409, {
+                "code": "wiki_no_pages",
+                "message": "wiki 无页面可发布（rev0 至少一页）",
+            })
         return HTTPException(400, str(exc))
     return HTTPException(500, str(exc))
 
@@ -208,6 +231,12 @@ async def _require_editor(
         await svc.list_columns(user=user, artifact_id=artifact_id)
     except ArtifactError as exc:
         raise _map_error(exc) from None
+
+
+def _with_ref(artifact: dict[str, Any]) -> dict[str, Any]:
+    """list/get 共用：补 artifact_ref（与 serving REF_PREFIX 同源拼法，
+    不做第二种 ref 形态）。"""
+    return {**artifact, "artifact_ref": _REF_PREFIX + artifact["artifact_id"]}
 
 
 # ------------------------------------------------------------ 制品 CRUD
@@ -237,7 +266,7 @@ async def create_artifact(
         raise HTTPException(403, f"domain_not_bound:{domain_id}")
     try:
         return await svc.create_artifact(
-            user=user, domain_id=domain_id, kind="table",
+            user=user, domain_id=domain_id, kind=body.kind,
             title=body.title, description=body.description,
             visibility=body.visibility,
         )
@@ -252,8 +281,10 @@ async def list_artifacts(
     svc: ArtifactService = Depends(get_artifact_service),
 ):
     try:
-        return {"artifacts": await svc.list_artifacts(
-            user=user, domain_id=domain_id)}
+        return {"artifacts": [
+            _with_ref(a) for a in await svc.list_artifacts(
+                user=user, domain_id=domain_id)
+        ]}
     except ArtifactError as exc:
         raise _map_error(exc) from None
 
@@ -276,7 +307,8 @@ async def get_artifact(
                 user=user, artifact_id=artifact_id, runtime=True)
             rows = await svc.list_rows(
                 user=user, artifact_id=artifact_id, page=1, size=5)
-        return {**artifact, "schema": schema, "sample_rows": rows["rows"]}
+        return {**_with_ref(artifact), "schema": schema,
+                "sample_rows": rows["rows"]}
     except ArtifactError as exc:
         raise _map_error(exc) from None
 

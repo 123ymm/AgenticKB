@@ -62,8 +62,9 @@ def test_convergence_contract_has_exact_retired_table_set() -> None:
     assert set(RETIRED_TABLES) == EXPECTED_RETIRED_TABLES
     assert len(RETIRED_TABLES) == 22
     # 2026-10-26 整库导出：kb_export_tasks 入 FORMAL_TABLES（60→61）。
-    assert EXPECTED_FORMAL_TABLES == 61
-    assert EXPECTED_PHYSICAL_TABLES == 62
+    # 2026-11-10 合并 fzl194/master：wiki 五表并入（61/65 分叉 → 66）。
+    assert EXPECTED_FORMAL_TABLES == 66
+    assert EXPECTED_PHYSICAL_TABLES == 67
     assert CURRENT_SCHEMA_VERSION
 
 

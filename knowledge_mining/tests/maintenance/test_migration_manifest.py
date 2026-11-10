@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
 
 import pytest
 
 from knowledge_mining.mining.maintenance.database_upgrade.manifest import (
+    _SQL_COMMENT_PATTERN,
     AppliedMigrationMismatch,
     ManifestError,
     Migration,
@@ -17,8 +19,12 @@ from knowledge_mining.mining.maintenance.database_upgrade.manifest import (
 )
 from knowledge_mining.mining.maintenance.database_upgrade.contract import (
     CURRENT_SCHEMA_CHECKSUM,
+    FORMAL_TABLES,
     LEGACY_COMPAT_TABLES,
     RETIRED_TABLES,
+)
+from knowledge_mining.mining.maintenance.database_upgrade.validation import (
+    REQUIRED_INDEXES,
 )
 
 
@@ -317,29 +323,63 @@ def test_all_migrations_are_transactional_no_concurrently() -> None:
 
 
 def test_hnsw_migration_targets_formal_table_with_guards() -> None:
-    """009（1.1.15 性能修复）守卫：HNSW 索引只允许落在正式表——staging 是挖掘
-    写入面（每批次 DELETE+INSERT，LIKE INCLUDING ALL 克隆），带近邻索引会反复
-    付建图代价；且必须带 pgvector>=0.8 与 vector(1024) 列形态两个前置守卫
-    （fail-closed，给运维可读错误而不是建图中途的晦涩报错）。"""
+    """HNSW 迁移守卫（009 起泛化为遍历制：当前 009+010，未来新增自动覆盖）：
+    HNSW 索引只允许落在正式表——staging 是挖掘写入面（每批次 DELETE+INSERT，
+    LIKE INCLUDING ALL 克隆），带近邻索引会反复付建图代价；且必须带 pgvector>=0.8
+    与 vector(1024) 列形态两个前置守卫（fail-closed，给运维可读错误而不是建图中途
+    的晦涩报错）。"""
     repo_root = Path(__file__).resolve().parents[3]
     manifest = load_manifest(repo_root / "databases" / "migrations" / "manifest.yaml")
-    item = next(
-        entry
-        for entry in manifest.migrations
-        if entry.migration_id.endswith("retrieval_v2_hnsw_index")
-    )
-    assert item.mode is MigrationMode.ONLINE_EXPAND
+    # 发现与扫描统一口径：归一换行（含孤 \r）→ 剥注释（先例同
+    # test_all_migrations_are_transactional_no_concurrently，防"此处不用 USING
+    # hnsw"类注释造成假阳性）→ 小写。发现用 \s+ 正则与 create_pattern 同宽——
+    # 字面量单空格匹配不到 using\nhnsw/双空格的迁移会静默逃逸（守卫零应用但
+    # 测试照绿）。
+    hnsw_entries: list[tuple[Migration, str]] = []
+    for entry in manifest.migrations:
+        raw = entry.path.read_text(encoding="utf-8")
+        raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+        sql = _SQL_COMMENT_PATTERN.sub(" ", raw).lower()
+        if re.search(r"using\s+hnsw", sql):
+            hnsw_entries.append((entry, sql))
+    assert hnsw_entries, "manifest 应至少含一条 HNSW 迁移（009/010）"
 
-    sql = item.path.read_text(encoding="utf-8").replace("\r\n", "\n").lower()
-    assert "on asset_retrieval_embeddings_v2\n" in sql
-    assert "on asset_retrieval_embeddings_v2_staging" not in sql
-    assert "vector_cosine_ops" in sql
-    # 前置守卫：pgvector >= 0.8（带过滤查询的迭代索引扫描自 0.8.0 起）+ 列形态
-    assert "array[0, 8, 0]" in sql
-    assert "vector(1024)" in sql
-    # 自愈：同名无效/漂移索引先 DROP 再重建（失败的 CONCURRENTLY 残留）
-    assert "drop index public.idx_are_v2_vec_hnsw" in sql
-    # 2026-10-20 内网实测坑：PG 容器默认 ShmSize=64MB，PG15 并行建索引的共享
-    # 排序区按 maintenance_work_mem 申请动态共享内存（/dev/shm）会 ENOSPC——
-    # 必须串行建索引（后端本地内存+临时文件，不依赖 /dev/shm）。
-    assert "set max_parallel_maintenance_workers = 0" in sql
+    create_pattern = re.compile(
+        r"create\s+index\s+(?:if\s+not\s+exists\s+)?(\w+)\s+on\s+(?:\w+\.)?(\w+)\s+using\s+hnsw",
+        re.IGNORECASE,
+    )
+    staging_pattern = re.compile(
+        r"\bon\s+(?:\w+\.)?\w*staging\w*\s+using\s+hnsw", re.IGNORECASE
+    )
+    for item, sql in hnsw_entries:
+        assert item.mode is MigrationMode.ONLINE_EXPAND, item.migration_id
+
+        targets = create_pattern.findall(sql)
+        assert targets, (
+            f"{item.migration_id}: 正则未捕获 CREATE INDEX ... USING hnsw"
+            "（检查 schema 前缀/书写格式）"
+        )
+        for index_name, table_name in targets:
+            assert table_name in FORMAL_TABLES, (item.migration_id, table_name)
+            assert "_staging_" not in table_name, (item.migration_id, table_name)
+            # 闭环交叉校验：HNSW 索引过了本守卫却漏登 REQUIRED_INDEXES =
+            # "升级成功却没有 ANN 索引"校验缺位（validation.py 009 注释记的
+            # 历史病根），两处登记必须同步。
+            assert index_name in REQUIRED_INDEXES, (item.migration_id, index_name)
+            # 自愈：同名无效/漂移索引先 DROP 再重建（失败的 CONCURRENTLY 残留）；
+            # schema 前缀与 IF EXISTS 按迁移书写习惯可选，不钉死。
+            drop_pattern = re.compile(
+                rf"drop\s+index\s+(?:if\s+exists\s+)?(?:\w+\.)?{index_name}\b",
+                re.IGNORECASE,
+            )
+            assert drop_pattern.search(sql), (item.migration_id, index_name)
+        # 任何位置（含未在 CREATE 语句里的）都不允许以 staging 表为近邻索引目标
+        assert not staging_pattern.search(sql), item.migration_id
+        assert "vector_cosine_ops" in sql, item.migration_id
+        # 前置守卫：pgvector >= 0.8（带过滤查询的迭代索引扫描自 0.8.0 起）+ 列形态
+        assert "array[0, 8, 0]" in sql, item.migration_id
+        assert "vector(1024)" in sql, item.migration_id
+        # 2026-10-20 内网实测坑：PG 容器默认 ShmSize=64MB，PG15 并行建索引的共享
+        # 排序区按 maintenance_work_mem 申请动态共享内存（/dev/shm）会 ENOSPC——
+        # 必须串行建索引（后端本地内存+临时文件，不依赖 /dev/shm）。
+        assert "set max_parallel_maintenance_workers = 0" in sql, item.migration_id

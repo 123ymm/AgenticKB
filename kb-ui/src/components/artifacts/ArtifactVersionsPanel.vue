@@ -11,7 +11,7 @@
           >当前</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="row_count" label="行数" width="90" />
+      <el-table-column prop="row_count" :label="countColumnLabel" width="90" align="right" />
       <el-table-column prop="change_summary" label="变更摘要" min-width="200" show-overflow-tooltip />
       <el-table-column prop="published_by" label="发布人" width="140" />
       <el-table-column label="发布时间" width="170">
@@ -37,12 +37,12 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
-import type { RevisionInfo } from '@/types/artifacts'
+import type { ArtifactKind, RevisionInfo } from '@/types/artifacts'
 
 const props = defineProps<{
   artifactId: string
@@ -50,9 +50,15 @@ const props = defineProps<{
   currentRevision: number
   /** 乐观锁令牌（artifact.updated_at）。 */
   expectedUpdatedAt?: string
+  /** V01（66号）：计数列头按类型——wiki 的 revisions.row_count 由
+   *  db_wiki.publish 写入发布页数，列头须「页数」；缺省 table=行数。 */
+  kind?: ArtifactKind
 }>()
 
 const emit = defineEmits<{ changed: [] }>()
+
+/** 计数列头：wiki→页数 / table（含缺省）→行数。 */
+const countColumnLabel = computed(() => (props.kind === 'wiki' ? '页数' : '行数'))
 
 const api = useArtifactsApi()
 

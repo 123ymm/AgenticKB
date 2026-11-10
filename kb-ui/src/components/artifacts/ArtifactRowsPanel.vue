@@ -11,7 +11,9 @@
       <span class="rows-panel__count">共 {{ total }} 行</span>
       <div v-if="canWrite" class="rows-panel__bar-actions">
         <el-button size="small" data-test="rows-batch-assign" @click="openAssign">批量赋值</el-button>
-        <el-button size="small" data-test="rows-add" @click="openAdd">新增行</el-button>
+        <el-button size="small" type="primary" plain data-test="rows-add" @click="openAdd">
+          <el-icon class="rows-panel__add-icon"><Plus /></el-icon>新增行
+        </el-button>
       </div>
     </div>
 
@@ -57,6 +59,12 @@
             size="small"
             effect="plain"
           >{{ String(row.data?.[col.column_name]) }}</el-tag>
+          <el-tag
+            v-else-if="isBoolColumn(col) && row.data?.[col.column_name] !== null && row.data?.[col.column_name] !== undefined"
+            size="small"
+            :type="row.data?.[col.column_name] ? 'success' : 'info'"
+            effect="plain"
+          >{{ row.data?.[col.column_name] ? '是' : '否' }}</el-tag>
           <span v-else>{{ cellText(row.data?.[col.column_name]) }}</span>
         </template>
       </el-table-column>
@@ -172,6 +180,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
@@ -264,6 +273,10 @@ function onPageChange(next: number): void {
 
 function isEnumColumn(col: ArtifactColumn): boolean {
   return col.column_type === 'enum'
+}
+
+function isBoolColumn(col: ArtifactColumn): boolean {
+  return col.column_type === 'bool'
 }
 
 /** 行键展示：有主键 → hex 解码回原文；无主键（uuid 行）原样。 */
@@ -509,6 +522,9 @@ defineExpose({
 .rows-panel__bar-label { font-size: 13px; }
 .rows-panel__hint { font-size: 12px; color: var(--el-color-warning, #e6a23c); }
 .rows-panel__count { font-size: 12.5px; color: var(--kb-text-tertiary); }
+.rows-panel__bar-actions { display: flex; gap: 8px; }
+.rows-panel__bar-actions .el-button + .el-button { margin-left: 0; }
+.rows-panel__add-icon { margin-right: 4px; }
 .rows-panel__expanded { padding: 8px 16px; display: flex; flex-direction: column; gap: 8px; }
 .rows-panel__rowkey { font-family: var(--el-font-family, inherit); cursor: default; }
 .rows-panel__pager { justify-content: flex-end; }

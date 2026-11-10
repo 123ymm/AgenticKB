@@ -145,6 +145,24 @@ async def test_create_list_detail_patch_delete(env):
     assert r.status_code == 404
 
 
+async def test_list_and_get_expose_artifact_ref(env):
+    """66号 §13 C01：list 与 get 响应均带 artifact_ref，拼法与 serving
+    REF_PREFIX="art_"（ArtifactQueryService 发现端点构造 ref 处）同源——
+    ref = art_ + artifact_id（DB id 本身含 art_ 前缀，ref 形如 art_art_<hex>，
+    serving 侧剥一个前缀即还原 DB id，往返一致）。前端只展示/复制服务
+    返回的 ref，不在前端拼装。"""
+    aid = await _create_artifact(env)
+
+    r = await env.client.get("/api/artifacts")
+    assert r.status_code == 200
+    [item] = r.json()["artifacts"]
+    assert item["artifact_ref"] == f"art_{aid}"
+
+    r = await env.client.get(f"/api/artifacts/{aid}")
+    assert r.status_code == 200
+    assert r.json()["artifact_ref"] == f"art_{aid}"
+
+
 async def test_create_requires_domain_grant(env):
     env.holder["user"] = _user("u-stranger")
     r = await env.client.post("/api/artifacts", json={"title": "无域制品"})
@@ -153,6 +171,35 @@ async def test_create_requires_domain_grant(env):
     r = await env.client.post(
         "/api/artifacts", json={"title": "无域制品", "domain_id": DOMAIN})
     assert r.status_code == 403
+
+
+# ------------------------------------------------------------- kind 放开
+
+async def test_create_artifact_wiki_kind(env):
+    """wiki 制品创建（路由层透传 kind；service/db 61号已支持）。"""
+    r = await env.client.post("/api/artifacts", json={
+        "title": "云核命令Wiki", "domain_id": DOMAIN, "kind": "wiki",
+    })
+    assert r.status_code == 201, r.text
+    assert r.json()["kind"] == "wiki"
+
+
+async def test_create_artifact_invalid_kind_rejected(env):
+    """非法 kind 在 pydantic Literal 层即被拦截（422），不进 service。"""
+    r = await env.client.post("/api/artifacts", json={
+        "title": "x", "domain_id": DOMAIN, "kind": "graph",
+    })
+    assert r.status_code == 422  # pydantic Literal 层拦截
+    assert r.json()["detail"][0]["loc"] == ["body", "kind"]  # 定位到 kind 字段
+
+
+async def test_create_artifact_default_kind_is_table(env):
+    """不传 kind 的既有调用方零破坏——默认仍为 table。"""
+    r = await env.client.post("/api/artifacts", json={
+        "title": "y", "domain_id": DOMAIN,
+    })
+    assert r.status_code == 201, r.text
+    assert r.json()["kind"] == "table"
 
 
 # ------------------------------------------------------- 向导全链（核心）
@@ -334,6 +381,22 @@ async def test_stale_updated_at_maps_409(env):
         json={"title": "新名", "expected_updated_at": "2000-01-01T00:00:00Z"})
     assert r.status_code == 409
     assert r.json()["detail"]["code"] == "stale_artifact"
+
+
+async def test_map_error_wiki_no_pages_maps_409():
+    """63号批次2 状态码归一：wiki 空页发布门禁经 lifecycle 翻译为
+    InvalidOperation("wiki_no_pages")（publish 走本路由），_map_error 特判
+    409（发布门禁族，对齐 no_pending_changes）——表格路径永不产生该码。"""
+    from knowledge_mining.mining.kb.routes.artifacts import _map_error
+    from knowledge_mining.mining.kb.services.artifact_service import (
+        InvalidOperation,
+    )
+
+    mapped = _map_error(InvalidOperation("wiki_no_pages"))
+    assert mapped.status_code == 409
+    assert mapped.detail["code"] == "wiki_no_pages"
+    # 其他 InvalidOperation 码不受特判影响（仍 400 裸串）
+    assert _map_error(InvalidOperation("row_not_found")).status_code == 400
 
 
 async def test_preview_unknown_token_maps_410(env):

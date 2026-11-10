@@ -78,13 +78,13 @@
         <div>
           <h4 class="mkey-panel__title">开放的知识制品（{{ key.domain }} 域）</h4>
           <p class="mkey-panel__desc">
-            Agent 通过这把钥匙只能查到勾选的表格制品（art_ 说明卡与行查询）。
+            Agent 通过这把钥匙只能查到勾选的知识制品（表格：说明卡与行查询；Wiki：说明卡、搜页、整页读取与链接导航）。
             候选=你在本域能看到的制品（公开+你是成员）；不勾=制品通道对这把钥匙关闭。
           </p>
         </div>
         <el-button size="small" :loading="savingArtifacts" :disabled="readonly || !artifactsDirty" data-test="save-open-artifacts" @click="saveOpenArtifacts">保存</el-button>
       </div>
-      <el-checkbox-group v-model="selectedArtifacts" class="mkey-panel__kbs" :disabled="readonly">
+      <el-checkbox-group v-model="selectedArtifacts" class="mkey-panel__kbs" :disabled="readonly || savingArtifacts">
         <el-checkbox v-for="a in domainArtifacts" :key="a.artifact_id" :value="a.artifact_id" :label="a.artifact_id">
           {{ a.title }}
           <span class="mkey-panel__kb-meta">
@@ -446,10 +446,18 @@ async function saveOpenKbs() {
 async function saveOpenArtifacts() {
   savingArtifacts.value = true
   try {
-    const r = await kbApi.putMcpKeyOpenArtifacts(props.keyItem.id, selectedArtifacts.value)
+    const submitted = [...selectedArtifacts.value]
+    const r = await kbApi.putMcpKeyOpenArtifacts(props.keyItem.id, submitted)
     selectedArtifacts.value = [...r.open_artifact_ids]
     emit('updated', { ...props.keyItem, open_artifact_ids: r.open_artifact_ids })
-    ElMessage.success('开放制品已更新')
+    const saved = new Set(r.open_artifact_ids)
+    const omitted = submitted.filter(id => !saved.has(id))
+    if (omitted.length) {
+      const titles = omitted.map(id => props.domainArtifacts.find(a => a.artifact_id === id)?.title ?? id)
+      ElMessage.warning(`部分制品未保存：${titles.join('、')}。请刷新页面并检查制品权限后重试。`)
+    } else {
+      ElMessage.success('开放制品已更新')
+    }
   } catch (e) {
     ElMessage.error(await apiErrorDetail(e))
   } finally {

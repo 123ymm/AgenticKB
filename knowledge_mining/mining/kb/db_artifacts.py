@@ -199,6 +199,9 @@ class ArtifactDB:
     async def delete_artifact(self, artifact_id: str) -> None:
         """owner 硬删（service 层已门禁 status=deprecated）：显式级联（列约定
         无 FK，删除顺序自底向上；钥匙开放行无 artifact 侧 FK，一并显式清）。
+        63号批次2补批次1遗留缺口①：wiki 四表（units→links→pages 自底向上）
+        与通用来源表 kb_artifact_sources 同入级联——对 table 制品为空删零
+        副作用（制品删除是 units 唯一清理点，批次2决策①按版本保留不随发布删）。
         级联后清本制品动态表达式索引（对抗审查修复⑤：idx_kbtr_{art}_* 不随
         行表清空）。"""
         async with self._pool.connection() as conn:
@@ -213,6 +216,28 @@ class ArtifactDB:
                 )
                 await conn.execute(
                     "DELETE FROM kb_artifact_batches WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM kb_wiki_page_units WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM kb_wiki_page_links WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM kb_wiki_pages WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                # 66号批次1审查 I-1：toc 草稿行同入级联（无 FK 的清理责任在
+                # 管线；对非 wiki 制品为空删零副作用）。
+                await conn.execute(
+                    "DELETE FROM kb_wiki_tocs WHERE artifact_id = %s",
+                    (artifact_id,),
+                )
+                await conn.execute(
+                    "DELETE FROM kb_artifact_sources WHERE artifact_id = %s",
                     (artifact_id,),
                 )
                 await conn.execute(
@@ -288,20 +313,30 @@ class ArtifactDB:
         self, artifact_id: str, user_id: str,
     ) -> str | None:
         """钥匙开放集候选校验（008）：用户对制品的**读可见面**——成员/owner/
-        public 三者之一，且当前绑定在制品域内。可读 → 返回 domain_id（供
+        public、域管理员且绑定域，或有效站点管理员。可读 → 返回 domain_id（供
         key.domain 一致性校验）；不可读/不存在 → None（调用方静默丢弃）。"""
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """SELECT a.domain_id
                    FROM kb_artifacts a
                    WHERE a.artifact_id = %(a)s
-                     AND (a.owner_user_id = %(u)s OR a.visibility = 'public'
-                          OR EXISTS (SELECT 1 FROM kb_artifact_members m
-                                     WHERE m.artifact_id = a.artifact_id
-                                       AND m.user_id = %(u)s))
-                     AND EXISTS (SELECT 1 FROM user_domains ud
-                                 WHERE ud.user_id = %(u)s
-                                   AND ud.domain = a.domain_id)""",
+                     AND (EXISTS (SELECT 1 FROM kb_users u
+                                  WHERE u.id = %(u)s AND u.status = 'active'
+                                    AND u.deleted_at IS NULL AND u.site_role = 'admin')
+                          OR (EXISTS (SELECT 1 FROM user_domains ud
+                                      WHERE ud.user_id = %(u)s
+                                        AND ud.domain = a.domain_id)
+                              AND (a.owner_user_id = %(u)s OR a.visibility = 'public'
+                                   OR EXISTS (SELECT 1 FROM kb_artifact_members m
+                                              WHERE m.artifact_id = a.artifact_id
+                                                AND m.user_id = %(u)s)
+                                   OR EXISTS (SELECT 1 FROM user_domains ud
+                                              JOIN kb_users u ON u.id = ud.user_id
+                                              WHERE ud.user_id = %(u)s
+                                                AND ud.domain = a.domain_id
+                                                AND ud.domain_role = 'admin'
+                                                AND u.status = 'active'
+                                                AND u.deleted_at IS NULL))))""",
                 {"a": artifact_id, "u": user_id},
             )
             row = await cur.fetchone()
@@ -1470,7 +1505,7 @@ class ArtifactDB:
         self, artifact_id: str, *, channel: str, file_name: str,
         sheet_name: str, row_count: int, created_by: str,
     ) -> dict[str, Any]:
-        if channel not in ("upload", "kb_import"):
+        if channel not in ("upload", "kb_import", "wiki_compile"):
             raise ArtifactError("invalid_channel")
         batch_id = f"bat_{uuid.uuid4().hex}"
         async with self._pool.connection() as conn:

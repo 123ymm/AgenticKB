@@ -22,7 +22,8 @@ const PART_RANGES = [
   { key: 'intro', label: '开篇', from: 1, to: 3 },
   { key: 'user', label: '用户篇', from: 10, to: 21 },
   { key: 'dev', label: '开发篇', from: 30, to: 34 },
-  { key: 'ops', label: '运维篇', from: 40, to: 42 },
+  // 43 起为新增章顺延（43=知识制品，内容面向业务用户，编号顺延 40-42 组）
+  { key: 'ops', label: '运维篇', from: 40, to: 43 },
 ]
 
 const SKIP_FILES = new Set(['00-目录.md'])

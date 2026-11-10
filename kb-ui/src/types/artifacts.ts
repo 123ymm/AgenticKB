@@ -30,6 +30,9 @@ export interface Artifact {
   updated_at: string
   /** 列表与详情口径附带（get_artifact 附 my_role；admin 归一 owner）。 */
   my_role?: ArtifactRole | null
+  /** 稳定引用键（66号 Task 1.6：list/get 已返回；与 serving REF_PREFIX
+   * 同源拼法 "art:"+artifact_id——MCP/检索视图的制品寻址口径）。 */
+  artifact_ref?: string
 }
 
 /** GET /{id} = 元信息 + schema + sample_rows（同体展开）。 */
@@ -96,6 +99,43 @@ export interface DiffResult {
   added: string[]
   removed: string[]
   changed: DiffCellChange[]
+  added_count: number
+  removed_count: number
+  changed_count: number
+}
+
+// ── Wiki 页级差异（66号 Task 1.5：wiki 制品 GET /diff 的 changed 元素）──
+
+/** 单字段变化两形态：非 body 字段（title/frontmatter/page_type/origin）
+ * 旧新直给 {old=current, new=draft}；body_md 长正文不全量进载荷——
+ * old/new_preview 各截前 200 字 + unified_diff 行级 hunks（截前 100 行，
+ * 超限带 truncated）。line_truncated 为口径预留键（后端当前以行尾后缀
+ * 「…[行超长已截断]」标记行截断，不携带该键）。 */
+export type WikiPageDiffFieldChange =
+  | { old: unknown; new: unknown }
+  | {
+      old_preview: string
+      new_preview: string
+      diff_hunks: string[]
+      truncated?: boolean
+      line_truncated?: boolean
+    }
+
+/** wiki diff 的 changed 元素：fields=变更字段名清单（diff 参与字段全集
+ * title/body_md/frontmatter/page_type/origin——origin 翻 manual 也算真实
+ * 待发布变更）；changes 键=字段名（样例窗口内的页才装配 changes）。 */
+export interface WikiPageDiffChange {
+  page_key: string
+  fields: string[]
+  changes: Record<string, WikiPageDiffFieldChange>
+}
+
+/** wiki 制品 GET /diff 返回体（六平键与表格 DiffResult 同名同构；
+ * added/removed=page_key 清单，changed=页级形态，counts 恒全量）。 */
+export interface WikiDiffResult {
+  added: string[]
+  removed: string[]
+  changed: WikiPageDiffChange[]
   added_count: number
   removed_count: number
   changed_count: number
@@ -171,4 +211,230 @@ export interface ImportReport {
   /** 追加模式 schema 有文件无（该批置 null）的列。 */
   missing_columns?: Array<{ column_id: string; column_name: string }>
   [key: string]: unknown
+}
+
+// ── Wiki 制品（63号 §2 对象层 / §4.3 页型）──
+
+/** 页面类型全集（63号 §4.3，与后端 PAGE_TYPES 对齐）。 */
+export type WikiPageType = 'topic' | 'glossary' | 'contradiction' | 'open_question'
+/** 页面来源（63号 §3.2）：machine=编译管线产物；manual=人工编辑。 */
+export type WikiPageOrigin = 'machine' | 'manual'
+
+/** 页面轻量清单行（GET /wiki/pages 信封 {pages}；不含 body_md/frontmatter，
+ * aliases 自 frontmatter.aliases 派生为 list[str]——阅读器链接解析兜底用）。 */
+export interface WikiPageMeta {
+  page_key: string
+  title: string
+  page_type: WikiPageType
+  origin: WikiPageOrigin
+  ordinal: number
+  flags: Record<string, unknown> | null
+  aliases: string[]
+  updated_at: string
+  updated_by: string
+}
+
+/** 单页全字段（GET/PUT /wiki/page/{hex} 同形——PUT 返回 get_page 结果，
+ * page_key 为后端归一定稿键）。 */
+export interface WikiPage extends WikiPageMeta {
+  frontmatter: Record<string, unknown>
+  body_md: string
+  provenance?: unknown[] | null
+}
+
+/** 页面边（GET /wiki/links 信封；to_page 已按 page_key ∪ aliases
+ * 归一到 canonical 键——反向链接与阅读器跳转的正确性前提）。 */
+export interface WikiLink {
+  from_page: string
+  to_page: string
+  anchor_text: string
+  status: 'valid' | 'broken'
+}
+
+/** GET /wiki/pages 信封（D03.1）：revision=服务端实际读取版本（draft 视图
+ * rev0 / runtime current_revision / 显式历史 N）——图谱 pages/links 两请求
+ * 混版判定用（两请求间发生发布可检出）。 */
+export interface WikiPagesEnvelope {
+  revision: number
+  pages: WikiPageMeta[]
+}
+
+/** GET /wiki/links 信封（D03.1）：revision 口径同 WikiPagesEnvelope。 */
+export interface WikiLinksEnvelope {
+  revision: number
+  links: WikiLink[]
+}
+
+/** units embedding 进度四计数（GET /wiki/status 的 units 面）。 */
+export interface WikiUnitsStatus {
+  total: number
+  done: number
+  failed: number
+  pending: number
+}
+
+/** GET /wiki/status 返回体：{revision, units 四计数}。 */
+export interface WikiStatus {
+  revision: number
+  units: WikiUnitsStatus
+}
+
+// ── Q01 溯源回原文 / 投影修复（66号批次5 Task 5.2/5.3）──
+
+/** GET /wiki/unit-source 返回体：来源单元原文截读（后端截前 500 字）+
+ * kb/快照定位。404 反探测单码 unit_not_found（无权与不存在同面）。 */
+export interface WikiUnitSource {
+  unit_id: string
+  content_text: string
+  kb_id: string
+  snapshot_id: string
+  section_ref: string | null
+}
+
+/** POST /wiki/reproject 返回体：reprojected=false 即健康 no-op（连调幂等）。 */
+export interface WikiReprojectResult {
+  artifact_id: string
+  revision: number
+  reprojected: boolean
+}
+
+// ── Wiki 检索（63号批次4：web 搜索框 → mining 转发 serving 三通道）──
+
+/** 三通道检索单条命中（serving wiki_search 视图 results 项，snake_case 透传）。 */
+export interface WikiSearchHit {
+  page_key: string
+  title: string
+  unit_key: string
+  snippet: string
+  /** 融合/单通道得分（排序依据，前端不展示）。 */
+  score: number
+  channels: string[]
+}
+
+/** GET /wiki/search 返回体：serving wiki_search 视图原样透传。 */
+export interface WikiSearchResult {
+  view?: string
+  artifact_ref?: string
+  revision: number
+  /** 向量通道降级留痕（dense 无可用向量该通道空，关键词/融合照常返回）。 */
+  degraded_dense: boolean
+  results: WikiSearchHit[]
+}
+
+// ── Wiki 编译管线（63号批次3：sources 三端点 + compile 四端点）──
+
+/**
+ * 绑定源行（GET /wiki/sources 信封 {sources}）。dirty 三态（63号批次3
+ * 裁定）：true=绑定范围内语料已变化（建议重编译）；false=与指纹一致；
+ * null=库已不可读，无法判定（前端显示「未知」，行仍可见只隐库元数据）。
+ * dirty/kb_title/unreadable 为列表端点计算字段——PUT 响应不带（可选）。
+ */
+export interface WikiSource {
+  kb_id: string
+  /** 决策6 契约：{"directories": ["a/b", ...]}（空数组=全库）。 */
+  scope: { directories?: string[] } & Record<string, unknown>
+  status: string | null
+  fingerprint: Record<string, unknown> | null
+  created_by?: string | null
+  created_at: string
+  dirty?: boolean | null
+  kb_title?: string | null
+  unreadable?: boolean
+}
+
+/** 目录页提示（toc 树叶子；POST /wiki/compile/toc 请求体同构）。 */
+export interface WikiTocPageHint {
+  title: string
+  cluster_ids: string[]
+  page_type: string
+}
+
+/** 目录节（awaiting_toc 时 status.toc 数组元素 / 确认请求体元素）。 */
+export interface WikiTocSection {
+  section_title: string
+  page_hints: WikiTocPageHint[]
+}
+
+/** 编译状态机全集（批次3 决策1；无批时后端 404 compile_not_found）。 */
+export type WikiCompileState =
+  | 'preparing' | 'awaiting_toc' | 'writing'
+  | 'completed' | 'failed' | 'cancelled'
+
+/** 编译报告计数（prepare 与 writing 两段合并；缺项由端点补 0/省略）。 */
+export interface WikiCompileStats {
+  /** prepare 段：取材单元数 / 聚类数 / 向量覆盖率。 */
+  unit_count?: number
+  cluster_count?: number
+  embedded_ratio?: number
+  /** writing 段。 */
+  pages_written?: number
+  failed_pages?: number
+  dropped_pages?: number
+  broken_links?: number
+  dangling_pages?: number
+  /** 专页计数（质量调用 + 术语表派生）。 */
+  contradiction_pages?: number
+  open_question_pages?: number
+  glossary_pages?: number
+  /** 机器页与人工页同键冲突数（conflicts 明细的长度口径）。 */
+  conflicts_n?: number
+  [key: string]: unknown
+}
+
+/** origin 冲突明细行（机器页撞 manual 键被跳过——人工裁决后重编译）。 */
+export interface WikiCompileConflict {
+  page_key?: string
+  manual_title?: string
+  machine_title?: string
+  [key: string]: unknown
+}
+
+/**
+ * GET /wiki/compile/status 返回体（design-only；无批 → 404
+ * compile_not_found，前端映射 idle）。toc 仅 awaiting_toc 时附带。
+ */
+export interface WikiCompileStatus {
+  batch_id: string
+  state: WikiCompileState | string
+  progress?: { batch?: string; pages_done?: number }
+  stats?: WikiCompileStats
+  conflicts?: WikiCompileConflict[]
+  toc?: WikiTocSection[]
+  error?: string | null
+}
+
+// ── Wiki 目录（66号批次1 Task 1.4：toc 行读写，page_key 级定版形态）──
+
+/** 定版目录节（设计态 toc 行与运行态快照共用形态；与编译确认用的
+ * 提示级 WikiTocSection/WikiTocPageHint 是两回事，勿混用）。 */
+export interface WikiTocSnapshotResolved {
+  section_title: string
+  page_keys: string[]
+}
+
+/**
+ * GET /wiki/toc 返回体（三口径共享，字段按口径出现）：
+ * - 缺省（runtime）/ ?revision=N：sections + flat + revision
+ *   （未发布 rev0 → 404 toc_not_found 反探测；旧快照 toc=null 回落空目录）；
+ * - ?draft=true：sections + flat + pages_total，toc 行已存在时附
+ *   updated_at/updated_by——**updated_at 是目录编辑的乐观锁令牌**
+ *   （toc 写不推进 kb_artifacts.updated_at）。
+ * 无 toc 行 / 空目录 → {sections: [], flat: true}（平铺）。
+ */
+export interface WikiTocSnapshot {
+  sections: WikiTocSnapshotResolved[]
+  flat?: boolean
+  revision?: number
+  pages_total?: number
+  updated_at?: string
+  updated_by?: string
+}
+
+/** PUT /wiki/toc 请求体（整体替换草稿目录）。toc 行已存在时
+ * expected_updated_at 必传（缺 → 409 stale_artifact，后端锁内强制）；
+ * 畸形 → 422 invalid_toc_shape；页键不在 rev0 → 422
+ * toc_unknown_page_keys。页键全集唯一（跨节重复 → 422）。 */
+export interface WikiTocPutPayload {
+  sections: WikiTocSnapshotResolved[]
+  expected_updated_at?: string
 }

@@ -46,14 +46,14 @@ describe('HelpView', () => {
     for (const label of ['开篇', '用户篇', '开发篇', '运维篇']) {
       expect(wrapper.text()).toContain(label)
     }
-    expect(wrapper.findAll('.help-view__link')).toHaveLength(23)
+    expect(wrapper.findAll('.help-view__link')).toHaveLength(24)
   })
 
   it('关键词过滤只留命中的章（标题匹配）', async () => {
     const wrapper = await mountAt({ chapterId: '01' })
     await vi.waitFor(() => {
       // 等全书预取完成（正文也进入过滤源）
-      expect(wrapper.vm.chapterCount).toBe(23)
+      expect(wrapper.vm.chapterCount).toBe(24)
     })
     wrapper.vm.keyword = 'MCP'
     await flushPromises()

@@ -182,27 +182,37 @@ def _truncate_all(conn):
     if os.environ.get("KB_ALLOW_TEST_TRUNCATE") != "1":
         return
 
-    conn.execute("TRUNCATE TABLE mining_workflow_node_events CASCADE")
-    conn.execute("TRUNCATE TABLE mining_run_stage_events CASCADE")
-    conn.execute("TRUNCATE TABLE mining_run_documents CASCADE")
-    conn.execute("TRUNCATE TABLE mining_runs CASCADE")
-    conn.execute("TRUNCATE TABLE asset_raw_segment_relations CASCADE")
-    conn.execute("TRUNCATE TABLE asset_raw_segments CASCADE")
-    conn.execute("TRUNCATE TABLE asset_retrieval_embeddings CASCADE")
-    conn.execute("TRUNCATE TABLE asset_retrieval_units CASCADE")
-    conn.execute("TRUNCATE TABLE asset_build_document_snapshots CASCADE")
-    conn.execute("TRUNCATE TABLE asset_publish_releases CASCADE")
-    conn.execute("TRUNCATE TABLE asset_builds CASCADE")
-    conn.execute("TRUNCATE TABLE asset_document_snapshot_links CASCADE")
-    conn.execute("TRUNCATE TABLE asset_document_snapshots CASCADE")
-    conn.execute("TRUNCATE TABLE asset_documents CASCADE")
-    conn.execute("TRUNCATE TABLE asset_source_batches CASCADE")
-    # 解析运行行（009/010 表）：幂等键跨测试残留会让 upsert 命中旧行。
-    conn.execute("TRUNCATE TABLE asset_parse_runs CASCADE")
-
-    # 对象存储地基表：注册行必须与（每进程重建的）测试对象存储同步清空，
-    # 否则跨进程复用指向不存在对象的注册行（download/解析全炸）。
-    conn.execute("TRUNCATE TABLE asset_storage_objects CASCADE")
+    # 清单容错化（2026-10-23 wiki 批次5 真库执行发现）：固定清单里含多张已退役表
+    # （迁移 001 drop_retired_tables 已 DROP asset_raw_segment_relations /
+    # asset_retrieval_embeddings / asset_retrieval_units / asset_publish_releases），
+    # 在按当前 schema 全新建出的测试库上 TRUNCATE 直接 UndefinedTable。改为
+    # 逐表容错——表不存在（退役/更老库缺表/domain-only 库）静默跳过，存在的照清。
+    for tbl in (
+        "mining_workflow_node_events",
+        "mining_run_stage_events",
+        "mining_run_documents",
+        "mining_runs",
+        "asset_raw_segment_relations",
+        "asset_raw_segments",
+        "asset_retrieval_embeddings",
+        "asset_retrieval_units",
+        "asset_build_document_snapshots",
+        "asset_publish_releases",
+        "asset_builds",
+        "asset_document_snapshot_links",
+        "asset_document_snapshots",
+        "asset_documents",
+        "asset_source_batches",
+        # 解析运行行（009/010 表）：幂等键跨测试残留会让 upsert 命中旧行。
+        "asset_parse_runs",
+        # 对象存储地基表：注册行必须与（每进程重建的）测试对象存储同步清空，
+        # 否则跨进程复用指向不存在对象的注册行（download/解析全炸）。
+        "asset_storage_objects",
+    ):
+        try:
+            conn.execute(f"TRUNCATE TABLE {tbl} CASCADE")
+        except Exception:
+            pass
 
     # KB 管理表（asset_documents 已清，knowledge_bases 无 FK 引用残留，安全）。
     # 顺序：子表先（kb_members → knowledge_bases → kb_users）。

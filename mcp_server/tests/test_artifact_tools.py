@@ -361,3 +361,58 @@ def test_browse_top_artifacts_unreachable_also_degrades(monkeypatch, calls):
     out = server.get_knowledge()
     assert out["view"] == "kb_tree"
     assert "artifacts" not in out
+
+
+# ── 63号批次4 T3：wiki query 形态透传契约 ────────────────────────────────
+
+# wiki 三种 dict 形态 + 表格最小 where 形态（对照）。第四种形态 query=None（说明
+# 卡）已由 test_query_artifact_card_sends_null_query / test_art_ref_card_view_
+# passthrough 覆盖；表格全量 DSL 转发契约见 test_query_artifact_forwards_dsl_contract。
+WIKI_QUERY_CASES = [
+    ({"q": "网络集成方案"}, "wiki_search"),
+    # mode/top_k 写在 query dict 内部——不是顶层 mode 参数，不得触发 art_ 分支
+    # 对顶层 mode 的拒绝
+    ({"q": "核心交换机选型", "mode": "dense", "top_k": 5}, "wiki_search"),
+    ({"page": "网络集成方案/总体设计"}, "wiki_page"),
+    ({"links": "网络集成方案/总体设计", "direction": "in"}, "wiki_links"),
+    # 对照：表格 DSL 最小 dict 形态不受 wiki 分流影响
+    ({"where": [{"field": "端口数", "op": "gte", "value": 8}]}, "artifact_rows"),
+]
+
+
+@pytest.mark.parametrize("query,upstream_view", WIKI_QUERY_CASES)
+def test_art_ref_query_shapes_pass_through_untouched(
+        monkeypatch, calls, query, upstream_view):
+    """wiki query dict（{"q"} / {"page"} / {"links"}）与表格 DSL 均经 get_knowledge
+    art_ 分支**原样**到达 POST /api/internal/artifact-query 的 payload["query"]。
+
+    契约要点：art_ 分支只拒顶层 relation/mode 参数，不做 query 结构预校验——
+    kind 分流的权威在 Java ArtifactQueryService；未来改 query_artifact 时不得
+    吞 wiki 形态的键（mode/top_k/direction）、不得增删改 query 内容。
+
+    局限（勿踩坑）：本测试直接调 Python 函数，不过 FastMCP 的 pydantic 入参
+    校验——字符串形态由 get_knowledge 签名（query: dict | None）在 MCP 入口
+    排除，直接传字符串会绕过该签名校验，加字符串形态契约测试会假绿，勿加。
+    """
+    def responder(request):
+        return ok({"view": upstream_view, "artifact_ref": "art_wk01",
+                   "results": [], "degraded_dense": False, "revision": 3})
+
+    install(monkeypatch, handler_for(calls, responder), calls)
+    ident_server(monkeypatch)
+    out = server.get_knowledge(ref="art_wk01", query=query)
+
+    req = calls[0]
+    assert req.url.path == "/api/internal/artifact-query"
+    assert req.headers["X-Internal-Auth"] == "serving-internal-secret"
+    # 整包断言：query 原样 + 既有转发契约键一个不多一个不少
+    assert json.loads(req.content) == {
+        "artifact_ref": "art_wk01",
+        "domain": "cloud_core_network",  # 钥匙域自动填充
+        "username": "alice",
+        "is_admin": False,
+        "key_id": "key-1",
+        "query": query,
+    }
+    # 上游 view 自标识原样透传（wiki_* / artifact_*），不被覆写
+    assert out["view"] == upstream_view
