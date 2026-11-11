@@ -131,7 +131,7 @@ def _is_date_like(value: Any) -> bool:
 
 
 def _infer_column_type(values: list[Any]) -> tuple[str, list[str]]:
-    """抽样 cast（int→float→date 试探）→ distinct ≤50 非全数值 → enum → text。"""
+    """抽样 cast（int→float→date 试探）→ 2～50 个不同文本值推枚举，否则文本。"""
     non_blank = [v for v in values if not _is_blank(v)]
     if not non_blank:
         return "text", []
@@ -142,7 +142,7 @@ def _infer_column_type(values: list[Any]) -> tuple[str, list[str]]:
     if all(_is_date_like(v) for v in non_blank):
         return "date", []
     distinct = sorted({str(v).strip() for v in non_blank})
-    if len(distinct) <= ENUM_MAX_DISTINCT:
+    if 2 <= len(distinct) <= ENUM_MAX_DISTINCT:
         return "enum", distinct
     return "text", []
 

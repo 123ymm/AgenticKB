@@ -160,6 +160,21 @@ async def test_parse_upload_numeric_and_date_inference(tmp_path):
     assert columns["备注"]["inferred_type"] == "text"
 
 
+async def test_single_distinct_text_value_is_not_inferred_as_enum(tmp_path):
+    _, _, imp = _make_service()
+    data = _write_xlsx(
+        tmp_path / "single-value.xlsx", ["编号", "状态"],
+        [("A", "固定"), ("B", "固定"), ("C", None)],
+    )
+    columns = {
+        c["source_name"]: c
+        for c in imp.parse_upload(data, "single-value.xlsx")["preview"]["columns"]
+    }
+    assert columns["状态"] == {
+        "source_name": "状态", "inferred_type": "text", "enum_candidates": [],
+    }
+
+
 async def test_parse_upload_rejects_bad_files():
     _, _, imp = _make_service()
     with pytest.raises(ArtifactImportError) as excinfo:
