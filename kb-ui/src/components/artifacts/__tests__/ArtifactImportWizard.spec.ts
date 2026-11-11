@@ -143,9 +143,79 @@ describe('ArtifactImportWizard', () => {
     await vm.runImport()
     expect(state.ui.alert).toHaveBeenCalledWith(
       expect.stringContaining('第 7 行「说明」列（B7）'),
-      '无法导入：发现公式风险',
+      '无法导入：请检查指定单元格',
       expect.objectContaining({ type: 'warning' }),
     )
+    expect(state.ui.error).not.toHaveBeenCalled()
+  })
+
+  it('shows a Chinese dialog for a legacy formula code without a cell location', async () => {
+    const wrapper = mountWizard()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as WizardVm
+    await vm.doUpload(new File(['x'], 'A.xlsx'))
+    state.api.importTable.mockRejectedValueOnce({ response: {
+      status: 422, data: { detail: 'formula_not_allowed' },
+    } })
+
+    await vm.runImport()
+    const [message, title] = state.ui.alert.mock.calls[0]
+    expect(title).toContain('Excel 公式')
+    expect(message).toContain('未返回具体单元格位置')
+    expect(message).not.toContain('formula_not_allowed')
+    expect(state.ui.error).not.toHaveBeenCalled()
+  })
+
+  it('shows the exact cell for a type error and a readable reason for a global error', async () => {
+    const wrapper = mountWizard()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as WizardVm
+    await vm.doUpload(new File(['x'], 'A.xlsx'))
+    state.api.importTable.mockRejectedValueOnce({ response: { status: 409, data: { detail: {
+      code: 'primary_key_conflict', reason: 'type_error', cell: 'B3',
+      message: '工作表「Sheet1」第 3 行「数量」列（B3）无法按整数导入。',
+    } } } })
+    await vm.runImport()
+    expect(state.ui.alert.mock.calls[0][0]).toContain('B3')
+
+    state.api.importTable.mockRejectedValueOnce({ response: {
+      status: 400, data: { detail: 'schema_already_exists' },
+    } })
+    await vm.runImport()
+    const [message] = state.ui.alert.mock.calls[1]
+    expect(message).toContain('已有列定义')
+    expect(message).toContain('不对应单个表头或单元格')
+    expect(state.ui.error).not.toHaveBeenCalled()
+  })
+
+  it('explains preview expiry in a dialog and resets the wizard', async () => {
+    const wrapper = mountWizard()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as WizardVm
+    await vm.doUpload(new File(['x'], 'A.xlsx'))
+    state.api.importTable.mockRejectedValueOnce({ response: {
+      status: 410, data: { detail: 'preview_expired' },
+    } })
+
+    await vm.runImport()
+    expect(state.ui.alert.mock.calls[0][0]).toContain('重新上传')
+    expect(vm.envelope).toBeNull()
+    expect(state.ui.error).not.toHaveBeenCalled()
+  })
+
+  it('uses a readable dialog for an unexpected import failure', async () => {
+    const wrapper = mountWizard()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as WizardVm
+    await vm.doUpload(new File(['x'], 'A.xlsx'))
+    state.api.importTable.mockRejectedValueOnce({ response: {
+      status: 500, data: { detail: 'internal_error' },
+    } })
+
+    await vm.runImport()
+    const [message] = state.ui.alert.mock.calls[0]
+    expect(message).toContain('服务未提供可定位的表头或单元格信息')
+    expect(message).not.toContain('internal_error')
     expect(state.ui.error).not.toHaveBeenCalled()
   })
 
@@ -337,7 +407,8 @@ describe('ArtifactImportWizard', () => {
     await vm.runImport()
     await flushPromises()
 
-    expect(state.ui.error).toHaveBeenCalledWith(expect.stringContaining('重新上传'))
+    expect(state.ui.alert.mock.calls[0][0]).toContain('重新上传')
+    expect(state.ui.error).not.toHaveBeenCalled()
     expect(vm.envelope).toBeNull()
     expect(vm.mappings).toHaveLength(0)
   })

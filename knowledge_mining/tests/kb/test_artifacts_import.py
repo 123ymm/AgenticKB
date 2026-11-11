@@ -616,6 +616,9 @@ async def test_key_conflict_block_then_keep_first(tmp_path):
             preview_token=out["preview_token"], plan=plan,
         )
     assert "duplicate_key" in str(excinfo.value)
+    assert excinfo.value.detail["cell"] == "A4"
+    assert "第 4 行" in excinfo.value.detail["message"]
+    assert "第 3 行重复" in excinfo.value.detail["message"]
     assert len(db.rev0_rows[aid]) == before
     # block 报错不消费 token → 换 keep_first 策略重试
     report = await imp.execute_import(
@@ -654,6 +657,9 @@ async def test_type_error_strict_blocks_and_tolerant_marks(tmp_path):
             preview_token=out["preview_token"], plan=plan,
         )
     assert "type_error" in str(excinfo.value)
+    assert excinfo.value.detail["cell"] == "B3"
+    assert "「数量」列" in excinfo.value.detail["message"]
+    assert "整数" in excinfo.value.detail["message"]
     assert db.rev0_rows[aid] == []
     assert db.batches.get(aid, []) == []
     # tolerant：失败格置 null + conflicts 标记

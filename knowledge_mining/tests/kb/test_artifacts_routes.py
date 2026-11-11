@@ -551,6 +551,8 @@ async def test_import_key_conflict_maps_409(env):
     )
     assert r.status_code == 409, r.text
     assert r.json()["detail"]["code"] == "primary_key_conflict"
+    assert r.json()["detail"]["cell"] == "A3"
+    assert "第 2 行重复" in r.json()["detail"]["message"]
     assert env.db.rev0_rows[aid] == []  # 不落任何行
 
 

@@ -41,6 +41,7 @@ from knowledge_mining.mining.kb.services.artifact_import_service import (
     MAX_UPLOAD_BYTES,
     ArtifactImportError,
     ArtifactImportService,
+    ImportValidationError,
 )
 from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactError,
@@ -179,6 +180,8 @@ def _map_error(exc: ArtifactError) -> HTTPException:
     if isinstance(exc, NoPendingChanges):
         return HTTPException(409, {"code": "no_pending_changes",
                                    "message": "无待发布变更（草稿已关闭，请先编辑检出草稿）"})
+    if isinstance(exc, ImportValidationError):
+        return HTTPException(409, exc.detail)
     if isinstance(exc, PrimaryKeyConflict):
         return HTTPException(409, {"code": "primary_key_conflict",
                                    "message": str(exc)})

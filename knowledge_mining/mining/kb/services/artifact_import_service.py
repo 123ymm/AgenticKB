@@ -80,6 +80,14 @@ class ArtifactImportError(ArtifactError):
         self.detail = detail
 
 
+class ImportValidationError(PrimaryKeyConflict):
+    """导入全量校验失败：保留 409 语义，并携带首个问题的可读位置。"""
+
+    def __init__(self, reason: str, detail: dict[str, Any]) -> None:
+        super().__init__(reason)
+        self.detail = detail
+
+
 # ---------------------------------------------------------------- helpers
 
 def _remove_file(path: str) -> None:
@@ -685,7 +693,15 @@ class ArtifactImportService:
         headers = self._read_headers(
             record["path"], sheet, header_row, check_formula=True,
             included_sources=included_sources)
+        source_positions = {name: index for index, name in enumerate(headers, start=1)}
+        unknown_sources = included_sources - source_positions.keys()
+        if unknown_sources:
+            raise InvalidOperation(f"unknown_source_column:{sorted(unknown_sources)[0]}")
         pk_names = self._primary_key_names(plan_columns, active, effective_mode)
+        pk_sources = [
+            next((source for source, target, _ in mapped if target == name), name)
+            for name in pk_names
+        ]
         # 追加导入 ordinal 起点 = 现有 rev0 行数 + 1（对抗审查修复⑧：追加批
         # 的行号接在存量之后，不再与已有行挤 1..N）。ensure_draft 已检出，
         # 此处计数即检出席。
@@ -728,6 +744,8 @@ class ArtifactImportService:
                 type_errors += 1
                 sample = {
                     "row_index": row_index, "row_key": None, "column": target,
+                    "source_column": source,
+                    "cell": f"{get_column_letter(source_positions[source])}{row_index}",
                     "message": f"type_error:{raw}",
                 }
                 if len(conflicts_sample) < CONFLICTS_SAMPLE_LIMIT:
@@ -745,8 +763,14 @@ class ArtifactImportService:
                 key_conflicts += 1
                 if policy["key_conflict"] == "block":
                     if len(block_samples) < CONFLICTS_SAMPLE_LIMIT:
+                        first_row = prepared[seen_keys[row_key]]["_row_index"]
+                        first_source = pk_sources[0] if pk_sources else ""
                         block_samples.append(
-                            {"row_index": row_index, "row_key": row_key})
+                            {"row_index": row_index, "row_key": row_key,
+                             "first_row_index": first_row,
+                             "column": "、".join(pk_sources),
+                             "cell": (f"{get_column_letter(source_positions[first_source])}{row_index}"
+                                      if first_source in source_positions else "")})
                     continue
                 kept = prepared[seen_keys[row_key]]
                 kept.setdefault("conflicts", {}).setdefault(
@@ -769,10 +793,37 @@ class ArtifactImportService:
             })
         # strict / block：全量校验失败 → 聚合样例报错，不落任何行
         if strict_type_samples:
-            raise PrimaryKeyConflict(
-                "type_error:" + repr(strict_type_samples[:10]))
+            first = strict_type_samples[0]
+            target_type = next(
+                (column_type for source, target, column_type in mapped
+                 if source == first["source_column"] and target == first["column"]),
+                "text",
+            )
+            type_label = {"int": "整数", "float": "小数", "date": "日期",
+                          "bool": "布尔值"}.get(target_type, target_type)
+            raise ImportValidationError("type_error", {
+                "code": "primary_key_conflict", "reason": "type_error",
+                "sheet": sheet, "kind": "data", "row": first["row_index"],
+                "column": first["source_column"], "cell": first["cell"],
+                "message": (
+                    f"工作表「{sheet}」第 {first['row_index']} 行「{first['source_column']}」列"
+                    f"（{first['cell']}）的值无法按「{type_label}」导入。"
+                    "请修改该单元格，或调整目标列类型；也可将「类型错误」设为「容错置空」。"
+                ),
+            })
         if block_samples:
-            raise PrimaryKeyConflict("duplicate_key:" + repr(block_samples[:10]))
+            first = block_samples[0]
+            raise ImportValidationError("duplicate_key", {
+                "code": "primary_key_conflict", "reason": "duplicate_key",
+                "sheet": sheet, "kind": "data", "row": first["row_index"],
+                "column": first["column"], "cell": first["cell"],
+                "message": (
+                    f"工作表「{sheet}」第 {first['row_index']} 行主键列「{first['column']}」"
+                    f"（{first['cell']}）与第 {first['first_row_index']} 行重复，"
+                    "当前策略会阻止整批导入。请修改重复的主键值，"
+                    "或将「主键冲突」设为「保留首行」。"
+                ),
+            })
 
         # 批次先建（provenance 引用 batch_id），再建列、落行
         batch = await self._db.create_batch(
