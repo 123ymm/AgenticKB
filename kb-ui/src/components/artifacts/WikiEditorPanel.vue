@@ -3,19 +3,28 @@
     <!-- 左栏：页面清单（ordinal 排序；徽标=页型色 + origin）｜目录编辑入口（D03） -->
     <aside class="wiki-editor__list">
       <div class="wiki-editor__list-head">
-        <el-button-group v-if="canWrite" size="small" class="wiki-editor__views">
-          <el-button
-            :type="leftView === 'pages' ? 'primary' : ''"
+        <div class="wiki-editor__list-meta">
+          <span class="wiki-editor__list-label">页面内容</span>
+          <span class="wiki-editor__count">共 {{ sortedPages.length }} 页</span>
+        </div>
+        <div v-if="canWrite" class="wiki-editor__views" role="tablist" aria-label="Wiki 编辑视图">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="leftView === 'pages'"
+            :class="{ active: leftView === 'pages' }"
             data-test="wiki-left-pages"
             @click="switchLeftView('pages')"
-          >页面清单</el-button>
-          <el-button
-            :type="leftView === 'toc' ? 'primary' : ''"
+          >页面清单</button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="leftView === 'toc'"
+            :class="{ active: leftView === 'toc' }"
             data-test="wiki-left-toc"
             @click="switchLeftView('toc')"
-          >目录</el-button>
-        </el-button-group>
-        <span class="wiki-editor__count">共 {{ sortedPages.length }} 页</span>
+          >目录</button>
+        </div>
       </div>
       <el-button
         v-if="canWrite && leftView === 'pages'"
@@ -452,9 +461,30 @@ defineExpose({ loadPages, selectPage })
 </script>
 
 <style scoped>
-.wiki-editor { display: flex; gap: 14px; min-height: 420px; }
-.wiki-editor__list { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
-.wiki-editor__list-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+.wiki-editor {
+  display: flex; gap: 14px; min-height: 420px; padding: 14px;
+  border: 1px solid var(--kb-border-light); border-radius: 8px;
+  background: var(--kb-bg-card);
+}
+.wiki-editor__list { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding-right: 14px; border-right: 1px solid var(--kb-border-light); }
+.wiki-editor__list-head { display: flex; flex-direction: column; gap: 10px; }
+.wiki-editor__list-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wiki-editor__list-label { color: var(--kb-text-primary); font-size: 13px; font-weight: 600; }
+.wiki-editor__views { display: flex; gap: 2px; padding: 3px; border-radius: 6px; background: var(--el-fill-color-light, #f5f7fa); }
+.wiki-editor__views button {
+  flex: 1; padding: 6px 10px;
+  border: 1px solid transparent; border-radius: 4px;
+  color: var(--kb-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+.wiki-editor__views button.active {
+  color: var(--kb-accent);
+  border-color: var(--kb-border-light);
+  background: var(--kb-bg-card);
+  font-weight: 600;
+}
+.wiki-editor__views button:focus-visible { outline: 2px solid var(--kb-accent); outline-offset: 1px; }
 .wiki-editor__new { align-self: stretch; }
 .wiki-editor__new-icon { margin-right: 4px; }
 .wiki-editor__count { font-size: 12.5px; color: var(--kb-text-tertiary); }

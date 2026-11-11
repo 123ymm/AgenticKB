@@ -396,6 +396,9 @@ export interface WikiCompileConflict {
 export interface WikiCompileStatus {
   batch_id: string
   state: WikiCompileState | string
+  /** 当前流程节点，复用批次 details JSONB；旧批次可缺省。 */
+  phase?: 'clustering' | 'toc_generation' | 'awaiting_toc' | 'writing_pages'
+    | 'quality_check' | 'finishing' | 'completed' | string
   progress?: { batch?: string; pages_done?: number }
   stats?: WikiCompileStats
   conflicts?: WikiCompileConflict[]

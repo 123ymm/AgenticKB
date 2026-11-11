@@ -216,7 +216,8 @@ class CompileService:
         if page_total > MAX_PAGES:
             raise WikiError("too_many_pages")
         ok = await self._inputs.update_batch_details(
-            batch_id, {"toc": normalized["toc"], "state": "writing"},
+            batch_id, {"toc": normalized["toc"], "state": "writing",
+                       "phase": "writing_pages"},
             guard_states=["awaiting_toc"])
         if not ok:
             raise WikiError("invalid_compile_state")
@@ -237,6 +238,7 @@ class CompileService:
         out: dict[str, Any] = {
             "batch_id": str(batch.get("batch_id") or ""),
             "state": str(details.get("state") or ""),
+            "phase": str(details.get("phase") or ""),
             "progress": details.get("progress")
             or {"batch": "0/0", "pages_done": 0},
             "stats": details.get("stats") or {},
@@ -298,9 +300,15 @@ class CompileService:
             if not units:
                 await self._fail(batch_id, "no_units", ("preparing",))
                 return
+            await self._inputs.update_batch_details(
+                batch_id, {"phase": "clustering"},
+                guard_states=["preparing"])
             result = cluster_units(units)
             units_lookup = {
                 str(u["representation_id"]): u for u in units}
+            await self._inputs.update_batch_details(
+                batch_id, {"phase": "toc_generation"},
+                guard_states=["preparing"])
             toc_obj = await self._toc_llm(artifact_id, result, units_lookup)
             if toc_obj is None:
                 await self._fail(batch_id, "toc_generation_failed",
@@ -328,6 +336,7 @@ class CompileService:
             )
             ok = await self._inputs.update_batch_details(batch_id, {
                 "state": "awaiting_toc",
+                "phase": "awaiting_toc",
                 "toc": toc_obj["toc"],
                 "glossary": toc_obj["glossary"],
                 "open_questions": toc_obj["open_questions"],
@@ -529,8 +538,15 @@ class CompileService:
                 self._pop_cache_if_mine(artifact_id, batch_id)
                 return
 
+            # 页级进度已落库；质量与专页仍在运行，不能将末批写完误报为完成。
+            await self._inputs.update_batch_details(
+                batch_id, {"phase": "quality_check"},
+                guard_states=["writing"])
             # 质量 LLM（一次）+ 专页生成（模板在 wiki_compile_pages）
             quality = await self._quality_llm(artifact_id, written)
+            await self._inputs.update_batch_details(
+                batch_id, {"phase": "finishing"},
+                guard_states=["writing"])
             derived = await write_derived_pages(
                 self._wdb, artifact_id, user, quality,
                 prepared.glossary, prepared.open_questions,
@@ -542,6 +558,7 @@ class CompileService:
                 batch_id,
                 {
                     "state": "completed",
+                    "phase": "completed",
                     "stats": {**prepared.stats, **stats},
                     "progress": {
                         "batch": f"{total_batches}/{total_batches}",

@@ -58,6 +58,19 @@
     <!-- ── 区块二：编译（状态机驱动）── -->
     <section class="wiki-compile__sec">
       <div class="wiki-compile__sec-head">编译</div>
+      <div v-if="status" class="wiki-compile__flow" data-test="wiki-compile-flow" aria-label="编译流程进度">
+        <div
+          v-for="(step, index) in compileSteps"
+          :key="step"
+          class="wiki-compile__step"
+          :class="stepClass(index)"
+          :aria-current="index === activeStep && !isTerminal ? 'step' : undefined"
+        >
+          <span class="wiki-compile__step-dot">{{ index < activeStep || state === 'completed' ? '✓' : index + 1 }}</span>
+          <span>{{ step }}</span>
+        </div>
+        <p class="wiki-compile__flow-detail" data-test="wiki-compile-flow-detail">{{ flowDetail }}</p>
+      </div>
 
       <!-- preparing：取材+聚类（后台任务，轮询推进） -->
       <div v-if="state === 'preparing'" class="wiki-compile__phase" data-test="wiki-compile-preparing">
@@ -81,7 +94,7 @@
       <div v-else-if="state === 'writing'" class="wiki-compile__phase" data-test="wiki-compile-writing">
         <el-icon class="is-loading"><Loading /></el-icon>
         <span data-test="wiki-compile-writing-progress">
-          页面写作中…… 批次 {{ status?.progress?.batch ?? '—' }} · 已写 {{ status?.progress?.pages_done ?? 0 }} 页
+          {{ flowDetail }}
         </span>
         <el-button
           v-if="canWrite"
@@ -137,6 +150,7 @@ import type { WikiCompileStatus, WikiSource, WikiTocSection } from '@/types/arti
 
 /** 轮询周期（批次3 口径：5s）。 */
 const POLL_MS = 5000
+const compileSteps = ['取材', '聚类', '生成目录', '确认目录', '页面写作', '质量收尾'] as const
 const IN_FLIGHT = new Set(['preparing', 'awaiting_toc', 'writing'])
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 /** 轮询态=preparing/writing——**不含 awaiting_toc**：该态服务端在等用户
@@ -178,6 +192,40 @@ const cancelling = ref(false)
 const state = computed(() => String(status.value?.state ?? ''))
 const isTerminal = computed(() => TERMINAL.has(state.value))
 const anyDirty = computed(() => sources.value.some(s => s.dirty === true))
+const activeStep = computed(() => {
+  const phase = status.value?.phase
+  if (state.value === 'completed') return compileSteps.length
+  if (state.value === 'awaiting_toc') return 3
+  if (state.value === 'writing') return phase === 'quality_check' || phase === 'finishing' ? 5 : 4
+  if (phase === 'clustering') return 1
+  if (phase === 'toc_generation') return 2
+  if (phase === 'awaiting_toc') return 3
+  if (phase === 'writing_pages') return 4
+  if (phase === 'quality_check' || phase === 'finishing') return 5
+  return 0
+})
+const flowDetail = computed(() => {
+  if (state.value === 'completed') return '编译完成'
+  if (state.value === 'failed') return '编译失败，详情见下方报告'
+  if (state.value === 'cancelled') return '编译已取消'
+  if (state.value === 'awaiting_toc') return '目录已生成，等待确认后继续写作'
+  if (state.value === 'writing') {
+    if (status.value?.phase === 'quality_check') return '页面写作已结束，正在检查内容质量'
+    if (status.value?.phase === 'finishing') return '质量检查已结束，正在生成专题页并收尾'
+    const batch = status.value?.progress?.batch
+    return `正在写作页面${batch && batch !== '0/0' ? ` · 批次 ${batch}` : ''} · 已写 ${status.value?.progress?.pages_done ?? 0} 页`
+  }
+  if (status.value?.phase === 'clustering') return '取材完成，正在聚类'
+  if (status.value?.phase === 'toc_generation') return '聚类完成，正在生成目录草案'
+  return '正在读取绑定来源的知识单元'
+})
+
+function stepClass(index: number): string {
+  if (state.value === 'completed' || index < activeStep.value) return 'is-done'
+  if (index === activeStep.value) return state.value === 'failed' || state.value === 'cancelled'
+    ? 'is-stopped' : 'is-current'
+  return 'is-pending'
+}
 
 const idleHint = computed(() => {
   if (state.value === 'completed') return '上一轮编译已完成'
@@ -380,6 +428,25 @@ function errorCode(error: unknown): string | undefined {
   font-weight: 600; font-size: 13.5px; color: var(--kb-text-primary, inherit);
   border-left: 3px solid var(--el-color-primary, #2563eb); padding-left: 8px;
 }
+.wiki-compile__flow {
+  display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px;
+  padding: 12px; border: 1px solid var(--kb-border-light); border-radius: 8px;
+  background: var(--kb-bg-card);
+}
+.wiki-compile__step { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--kb-text-tertiary); font-size: 12.5px; }
+.wiki-compile__step-dot {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 22px;
+  height: 22px; border: 1px solid var(--kb-border-light); border-radius: 50%;
+  font-size: 11px; font-weight: 600;
+}
+.wiki-compile__step.is-done { color: var(--kb-accent); }
+.wiki-compile__step.is-done .wiki-compile__step-dot { border-color: var(--kb-accent); }
+.wiki-compile__step.is-current { color: var(--kb-accent); font-weight: 600; }
+.wiki-compile__step.is-current .wiki-compile__step-dot { color: white; background: var(--kb-accent); border-color: var(--kb-accent); }
+.wiki-compile__step.is-stopped { color: var(--kb-text-secondary); font-weight: 600; }
+.wiki-compile__flow-detail { grid-column: 1 / -1; margin: 2px 0 0; color: var(--kb-text-secondary); font-size: 12.5px; }
+@media (max-width: 1100px) { .wiki-compile__flow { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 650px) { .wiki-compile__flow { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .wiki-compile__sources { display: flex; flex-direction: column; gap: 4px; }
 .wiki-compile__src { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 6px; }
 .wiki-compile__src-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
