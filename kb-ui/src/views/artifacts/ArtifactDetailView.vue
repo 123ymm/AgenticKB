@@ -106,20 +106,24 @@
             :expected-updated-at="artifact.updated_at"
             @changed="reloadAll"
           />
-          <el-divider content-position="left">
-            <el-button-group size="small" class="artifact-detail__wiki-views">
-              <el-button
-                :type="designWikiView === 'pages' ? 'primary' : ''"
-                data-test="wiki-design-view-pages"
-                @click="setWikiView('design', 'pages')"
-              >页面</el-button>
-              <el-button
-                :type="designWikiView === 'graph' ? 'primary' : ''"
-                data-test="wiki-design-view-graph"
-                @click="setWikiView('design', 'graph')"
-              >图谱</el-button>
-            </el-button-group>
-          </el-divider>
+          <div class="artifact-detail__wiki-views" role="tablist" aria-label="设计态内容视图">
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="designWikiView === 'pages'"
+              :class="{ active: designWikiView === 'pages' }"
+              data-test="wiki-design-view-pages"
+              @click="setWikiView('design', 'pages')"
+            >页面</button>
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="designWikiView === 'graph'"
+              :class="{ active: designWikiView === 'graph' }"
+              data-test="wiki-design-view-graph"
+              @click="setWikiView('design', 'graph')"
+            >图谱</button>
+          </div>
           <!-- v-show 常驻：切图谱不丢编辑器状态（目录未保存修改守卫在面板内） -->
           <WikiEditorPanel
             v-show="designWikiView === 'pages'"
@@ -203,18 +207,24 @@
               @click="repairProjection"
             >修复投影</el-button>
           </div>
-          <el-button-group size="small" class="artifact-detail__wiki-views">
-            <el-button
-              :type="runtimeWikiView === 'pages' ? 'primary' : ''"
+          <div class="artifact-detail__wiki-views" role="tablist" aria-label="运行态内容视图">
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="runtimeWikiView === 'pages'"
+              :class="{ active: runtimeWikiView === 'pages' }"
               data-test="wiki-runtime-view-pages"
               @click="setWikiView('runtime', 'pages')"
-            >页面</el-button>
-            <el-button
-              :type="runtimeWikiView === 'graph' ? 'primary' : ''"
+            >页面</button>
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="runtimeWikiView === 'graph'"
+              :class="{ active: runtimeWikiView === 'graph' }"
               data-test="wiki-runtime-view-graph"
               @click="setWikiView('runtime', 'graph')"
-            >图谱</el-button>
-          </el-button-group>
+            >图谱</button>
+          </div>
           <WikiReaderPanel
             v-show="runtimeWikiView === 'pages'"
             ref="wikiReaderRef"
@@ -761,8 +771,30 @@ defineExpose({ reloadAll })
 .artifact-detail__desc-card { flex: 1; max-width: 720px; }
 .artifact-detail__visibility-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; line-height: 1.5; }
 .artifact-detail__empty-guide { margin-bottom: 14px; }
-/* wiki 内容区「页面｜图谱」切换（D03.1）：运行态入口组与面板间距 */
-.artifact-detail__wiki-views { margin-bottom: 10px; }
+/* 内容区切换与检索记录页保持一致。 */
+.artifact-detail__wiki-views {
+  display: flex;
+  gap: 4px;
+  margin: 14px 0 10px;
+  border-bottom: 1px solid var(--kb-border-light);
+}
+.artifact-detail__wiki-views button {
+  padding: 9px 16px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--kb-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+.artifact-detail__wiki-views button.active {
+  color: var(--kb-accent);
+  border-bottom-color: var(--kb-accent);
+  font-weight: 600;
+}
+.artifact-detail__wiki-views button:focus-visible {
+  outline: 2px solid var(--kb-accent);
+  outline-offset: -2px;
+}
 /* Q01 检索状态条（66号批次5）：运行态 wiki 顶部一行；警示=黄边淡底 */
 .artifact-detail__search-status {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

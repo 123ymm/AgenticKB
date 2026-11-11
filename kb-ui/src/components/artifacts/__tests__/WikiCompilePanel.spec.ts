@@ -213,6 +213,31 @@ describe('WikiCompilePanel', () => {
     expect(wrapper.find('[data-test="wiki-compile-cancel"]').exists()).toBe(true)
   })
 
+  it('流程节点跟随后端阶段；旧批次无 phase 时仍展示当前大阶段', async () => {
+    state.api.compileStatus.mockResolvedValue({
+      batch_id: 'b1', state: 'preparing', phase: 'toc_generation',
+    } as WikiCompileStatus)
+    const wrapper = mountPanel()
+    await flush()
+    expect(wrapper.find('[data-test="wiki-compile-flow"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-current="step"]').text()).toContain('生成目录')
+    expect(wrapper.find('[data-test="wiki-compile-flow-detail"]').text()).toContain('目录草案')
+
+    state.api.compileStatus.mockResolvedValue({
+      batch_id: 'b1', state: 'writing', phase: 'quality_check',
+      progress: { batch: '2/2', pages_done: 31 },
+    } as WikiCompileStatus)
+    await vi.advanceTimersByTimeAsync(5000)
+    await flush()
+    expect(wrapper.find('[aria-current="step"]').text()).toContain('质量收尾')
+    expect(wrapper.find('[data-test="wiki-compile-flow-detail"]').text()).toContain('质量')
+
+    state.api.compileStatus.mockResolvedValue({ batch_id: 'b1', state: 'writing' } as WikiCompileStatus)
+    await vi.advanceTimersByTimeAsync(5000)
+    await flush()
+    expect(wrapper.find('[aria-current="step"]').text()).toContain('页面写作')
+  })
+
   it('awaiting_toc：渲染目录编辑器；确认提交编辑后 toc 并转 writing', async () => {
     const toc: WikiTocSection[] = [{
       section_title: '网络',

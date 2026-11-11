@@ -525,6 +525,7 @@ async def test_full_state_machine_happy_path(env):
     batch = await _wait_state(env, "awaiting_toc")
     det = _details(batch)
     assert det["state"] == "awaiting_toc"
+    assert det["phase"] == "awaiting_toc"
     assert [p["title"] for p in det["toc"][0]["page_hints"]] == titles
     stats = det["stats"]
     assert stats["unit_count"] == 12 and stats["cluster_count"] == 1
@@ -540,6 +541,7 @@ async def test_full_state_machine_happy_path(env):
     batch = await _wait_state(env, "completed")
     det = _details(batch)
     assert det["state"] == "completed"
+    assert det["phase"] == "completed"
     assert det["stats"]["pages_written"] == 3
     assert len(env.gen.calls) == 5
     assert all(c["knowledge_domain"] == DOMAIN for c in env.gen.calls)
@@ -1627,6 +1629,7 @@ async def test_status_endpoint_design_only_and_shape(env):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["state"] == "awaiting_toc"
+    assert body["phase"] == "awaiting_toc"
     assert body["toc"][0]["page_hints"][0]["title"] == "页A"
     assert body["progress"] == {"batch": "0/0", "pages_done": 0}
     assert body["conflicts"] == [] and body["error"] is None

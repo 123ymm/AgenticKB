@@ -22,15 +22,27 @@ from knowledge_mining.mining.kb.deps import (
     get_artifact_import_service,
     get_artifact_service,
 )
-from knowledge_mining.mining.kb.routes.artifacts import router as artifacts_router
+from knowledge_mining.mining.kb.routes.artifacts import _map_error, router as artifacts_router
 from knowledge_mining.mining.kb.services.artifact_import_service import (
     _PREVIEW_TOKENS,
+    ArtifactImportError,
     ArtifactImportService,
 )
 from knowledge_mining.mining.kb.services.artifact_service import ArtifactService
 from knowledge_mining.tests.kb.test_artifacts_service import FakeArtifactDB, _user
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_formula_import_error_keeps_cell_location_in_api_detail():
+    detail = {
+        "code": "formula_not_allowed", "sheet": "Sheet1", "cell": "B7",
+        "kind": "data", "column": "说明", "row": 7,
+        "message": "工作表「Sheet1」第 7 行「说明」列（B7）可能被当作公式执行。",
+    }
+    response = _map_error(ArtifactImportError("formula_not_allowed", detail=detail))
+    assert response.status_code == 422
+    assert response.detail == detail
 
 
 @pytest.fixture(autouse=True)
@@ -422,9 +434,8 @@ async def test_publish_clean_state_maps_409_no_pending_changes(env):
     assert r.status_code == 200 and r.json()["revision"] == 2
 
 
-async def test_row_write_defenses_map_400(env):
-    """对抗审查修复⑩路由级：公式注入 400 / 未知列 400（update_cell 与
-    batch-assign 双入口）。"""
+async def test_row_write_accepts_text_prefix_and_unknown_column_maps_400(env):
+    """API 文本前缀放行；未知列仍由 update_cell / batch-assign 拒绝。"""
     aid = await _create_artifact(env)
     token = await _upload_a(env, aid)
     r = await env.client.post(
@@ -441,7 +452,7 @@ async def test_row_write_defenses_map_400(env):
     r = await env.client.patch(
         f"/api/artifacts/{aid}/table/rows/4e433230323630363031303030323935",
         json={"column": "L1分类", "value": "=SUM(A1)"})
-    assert r.status_code == 400 and "formula_not_allowed" in r.text
+    assert r.status_code == 200, r.text
     r = await env.client.patch(
         f"/api/artifacts/{aid}/table/rows/4e433230323630363031303030323935",
         json={"column": "不存在列", "value": "x"})
@@ -450,10 +461,10 @@ async def test_row_write_defenses_map_400(env):
         f"/api/artifacts/{aid}/table/rows/batch-assign",
         json={"column": "不存在列", "value": "x", "where": []})
     assert r.status_code == 400 and "unknown_column" in r.text
-    # 行增：公式 / 未知键同样 400
+    # 行增：正号前缀作为普通文本放行，未知键仍拒绝。
     r = await env.client.post(
         f"/api/artifacts/{aid}/table/rows", json={"data": {"MOP": "+1"}})
-    assert r.status_code == 400 and "formula_not_allowed" in r.text
+    assert r.status_code == 201, r.text
     r = await env.client.post(
         f"/api/artifacts/{aid}/table/rows", json={"data": {"幽灵列": "x"}})
     assert r.status_code == 400 and "unknown_column" in r.text
@@ -540,6 +551,8 @@ async def test_import_key_conflict_maps_409(env):
     )
     assert r.status_code == 409, r.text
     assert r.json()["detail"]["code"] == "primary_key_conflict"
+    assert r.json()["detail"]["cell"] == "A3"
+    assert "第 2 行重复" in r.json()["detail"]["message"]
     assert env.db.rev0_rows[aid] == []  # 不落任何行
 
 

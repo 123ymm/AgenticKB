@@ -160,6 +160,21 @@ async def test_parse_upload_numeric_and_date_inference(tmp_path):
     assert columns["备注"]["inferred_type"] == "text"
 
 
+async def test_single_distinct_text_value_is_not_inferred_as_enum(tmp_path):
+    _, _, imp = _make_service()
+    data = _write_xlsx(
+        tmp_path / "single-value.xlsx", ["编号", "状态"],
+        [("A", "固定"), ("B", "固定"), ("C", None)],
+    )
+    columns = {
+        c["source_name"]: c
+        for c in imp.parse_upload(data, "single-value.xlsx")["preview"]["columns"]
+    }
+    assert columns["状态"] == {
+        "source_name": "状态", "inferred_type": "text", "enum_candidates": [],
+    }
+
+
 async def test_parse_upload_rejects_bad_files():
     _, _, imp = _make_service()
     with pytest.raises(ArtifactImportError) as excinfo:
@@ -192,6 +207,11 @@ async def test_parse_allows_formula_but_execute_rejects(tmp_path):
             svc, user=OWNER, artifact_id=aid,
             preview_token=out["preview_token"], plan=plan)
     assert excinfo.value.code == "formula_not_allowed"
+    assert excinfo.value.detail["cell"] == "A2"
+    assert excinfo.value.detail["column"] == "MOP"
+    assert excinfo.value.detail["kind"] == "data"
+    assert "Excel 公式" in excinfo.value.detail["message"]
+    assert "粘贴为值" in excinfo.value.detail["message"]
     assert db.rev0_rows[aid] == []
     # 表头本身是公式：parse 放行、execute 表头重读时拒绝
     data = _write_xlsx(tmp_path / "F2.xlsx", ["=SUM(A1)"], [["x"]])
@@ -206,6 +226,60 @@ async def test_parse_allows_formula_but_execute_rejects(tmp_path):
             svc, user=OWNER, artifact_id=aid,
             preview_token=out["preview_token"], plan=plan)
     assert excinfo.value.code == "formula_not_allowed"
+    assert excinfo.value.detail["cell"] == "A1"
+    assert excinfo.value.detail["kind"] == "header"
+    assert "表头「=SUM(A1)」" in excinfo.value.detail["message"]
+
+
+async def test_dropped_formula_column_is_not_checked_and_plus_minus_are_values(tmp_path):
+    db, svc, imp = _make_service()
+    art = await svc.create_artifact(user=OWNER, domain_id="plant-a", title="丢弃公式列")
+    aid = art["artifact_id"]
+    data = _write_xlsx(
+        tmp_path / "drop.xlsx", ["型号", "=SUM(A1)", "说明"],
+        [("+SFP-10G", "=1+1", "-40°C"), ("-SFP-1G", "@cmd", "+支持")],
+    )
+    out = imp.parse_upload(data, "drop.xlsx")
+    plan = imp.build_mapping(out["preview_token"], column_ops=[
+        {"source": "型号", "action": "new", "target_name": "型号",
+         "column_type": "text", "is_primary_key": True},
+        {"source": "=SUM(A1)", "action": "drop"},
+        {"source": "说明", "action": "new", "target_name": "说明",
+         "column_type": "text"},
+    ])
+    report = await imp.execute_import(
+        svc, user=OWNER, artifact_id=aid,
+        preview_token=out["preview_token"], plan=plan)
+    assert report["inserted"] == 2
+    assert {row["data"]["型号"] for row in db.rev0_rows[aid]} == {"+SFP-10G", "-SFP-1G"}
+    assert {row["data"]["说明"] for row in db.rev0_rows[aid]} == {"-40°C", "+支持"}
+    assert all("=SUM(A1)" not in row["data"] for row in db.rev0_rows[aid])
+
+
+async def test_formula_like_text_is_imported_when_excel_marks_it_as_text(tmp_path):
+    db, svc, imp = _make_service()
+    art = await svc.create_artifact(user=OWNER, domain_id="plant-a", title="公式样文本")
+    aid = art["artifact_id"]
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sheet1"
+    sheet["A1"] = "=型号"
+    sheet["A1"].data_type = "s"
+    sheet["A2"] = "=SFP-10G"
+    sheet["A2"].data_type = "s"
+    sheet["A3"] = "@SFP-1G"
+    path = tmp_path / "literal.xlsx"
+    workbook.save(path)
+    out = imp.parse_upload(path.read_bytes(), path.name)
+    plan = imp.build_mapping(out["preview_token"], column_ops=[
+        {"source": "=型号", "action": "new", "target_name": "型号",
+         "column_type": "text", "is_primary_key": True},
+    ])
+    report = await imp.execute_import(
+        svc, user=OWNER, artifact_id=aid,
+        preview_token=out["preview_token"], plan=plan)
+    assert report["inserted"] == 2
+    assert {row["data"]["型号"] for row in db.rev0_rows[aid]} == {"=SFP-10G", "@SFP-1G"}
 
 
 async def test_formula_rejection_scoped_to_selected_sheet(tmp_path):
@@ -542,6 +616,9 @@ async def test_key_conflict_block_then_keep_first(tmp_path):
             preview_token=out["preview_token"], plan=plan,
         )
     assert "duplicate_key" in str(excinfo.value)
+    assert excinfo.value.detail["cell"] == "A4"
+    assert "第 4 行" in excinfo.value.detail["message"]
+    assert "第 3 行重复" in excinfo.value.detail["message"]
     assert len(db.rev0_rows[aid]) == before
     # block 报错不消费 token → 换 keep_first 策略重试
     report = await imp.execute_import(
@@ -580,6 +657,9 @@ async def test_type_error_strict_blocks_and_tolerant_marks(tmp_path):
             preview_token=out["preview_token"], plan=plan,
         )
     assert "type_error" in str(excinfo.value)
+    assert excinfo.value.detail["cell"] == "B3"
+    assert "「数量」列" in excinfo.value.detail["message"]
+    assert "整数" in excinfo.value.detail["message"]
     assert db.rev0_rows[aid] == []
     assert db.batches.get(aid, []) == []
     # tolerant：失败格置 null + conflicts 标记
