@@ -16,11 +16,10 @@
 （对抗审查修复⑬——token 跨制品/跨用户不可用，失配 404）；每 uploader 活跃
 登记 ≤5（修复⑭，超限清最旧 + 429）；启动无清扫要求（MVP，TTL 惰性清理足够）。
 
-公式注入防御与 55号 user_import_service 同口径：以 ``= + - @`` 开头的文本
-格一律拒绝（data_only=False 下公式格本身就是 "=..." 字符串）。codex三审
-P2-3：拒绝只在 execute_import 重读**所选 sheet** 时执行——parse 预览只读
-展示合法（汇总 sheet 带公式不影响数据 sheet 的导入）；文件级护栏（zip 炸弹/
-行列上限）仍在 parse 层（安全护栏不放松）。
+公式风险只检查所选 sheet 中实际导入的列（drop 列不检查），以 Excel
+单元格类型 ``data_type='f'`` 区分真实公式和普通文本；文本内容的首字符
+不参与判定。拒绝只在 execute_import 重读所选 sheet 时执行——parse 预览
+只读展示合法；文件级护栏（zip 炸弹/行列上限）仍在 parse 层。
 """
 from __future__ import annotations
 
@@ -35,6 +34,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 from knowledge_mining.mining.kb.db_artifacts import _encode_key_parts
 from knowledge_mining.mining.kb.services.artifact_service import (
@@ -43,7 +43,6 @@ from knowledge_mining.mining.kb.services.artifact_service import (
     ArtifactService,
     InvalidOperation,
     PrimaryKeyConflict,
-    _is_formula,
     _try_float,
     _try_int,
 )
@@ -75,9 +74,10 @@ class ArtifactImportError(ArtifactError):
     preview_expired→410、其余（invalid_xlsx/unsupported_file_type/
     too_many_rows/too_many_columns/formula_not_allowed/...）→422。"""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, detail: dict[str, Any] | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.detail = detail
 
 
 # ---------------------------------------------------------------- helpers
@@ -92,7 +92,30 @@ def _remove_file(path: str) -> None:
 def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
-# _is_formula 定义在 artifact_service（行写三入口共用），此处 import 复用。
+def _is_excel_formula(cell: Any) -> bool:
+    """只认工作簿单元格的真实公式类型，普通文本（含 =/@ 前缀）放行。"""
+    return getattr(cell, "data_type", None) == "f"
+
+
+def _formula_error(*, sheet: str, row: int, column_index: int,
+                   column_name: str, kind: str) -> ArtifactImportError:
+    """返回可供前端定位与解释的公式风险错误（不回传单元格完整内容）。"""
+    cell = f"{get_column_letter(column_index)}{row}"
+    location = (f"工作表「{sheet}」表头「{column_name[:40]}」的单元格（{cell}）"
+                if kind == "header" else
+                f"工作表「{sheet}」第 {row} 行「{column_name}」列（{cell}）")
+    return ArtifactImportError("formula_not_allowed", detail={
+        "code": "formula_not_allowed",
+        "message": (
+            f"{location}是 Excel 公式，不是普通文本。公式可能在表格软件中执行，"
+            "也可能使导入结果与看到的值不一致。请将公式结果粘贴为值后重新上传文件。"
+        ),
+        "sheet": sheet,
+        "cell": cell,
+        "row": row,
+        "column": column_name,
+        "kind": kind,
+    })
 
 
 def _is_date_like(value: Any) -> bool:
@@ -454,24 +477,30 @@ class ArtifactImportService:
     def _read_headers(
         path: str, sheet: str, header_row: int, *,
         check_formula: bool = False,
+        included_sources: set[str] | None = None,
     ) -> list[str]:
         """指定 sheet / 表头行 → 清洗后的表头（build_mapping 与 execute 共用）。
-        check_formula=True（execute_import 重读所选 sheet 时，codex三审 P2-3）：
-        表头公式格拒绝 formula_not_allowed；build_mapping 预计算不查。"""
+        check_formula=True 时仅检查实际导入的表头；build_mapping 预计算不查。"""
         workbook = _open_workbook(path)
         try:
             if sheet not in workbook.sheetnames:
                 raise ArtifactImportError("unknown_sheet")
             headers = None
             for index, row in enumerate(
-                workbook[sheet].iter_rows(values_only=True), start=1,
+                workbook[sheet].iter_rows(values_only=False), start=1,
             ):
                 if index == header_row:
+                    headers = _dedupe_headers(tuple(cell.value for cell in row))
                     if check_formula:
-                        for cell in row:
-                            if _is_formula(cell):
-                                raise ArtifactImportError("formula_not_allowed")
-                    headers = _dedupe_headers(row)
+                        for column_index, (name, cell) in enumerate(
+                            zip(headers, row), start=1,
+                        ):
+                            if (included_sources is None or name in included_sources) \
+                                    and _is_excel_formula(cell):
+                                raise _formula_error(
+                                    sheet=sheet, row=header_row,
+                                    column_index=column_index,
+                                    column_name=name, kind="header")
                     break
                 if index > header_row:
                     break
@@ -487,13 +516,13 @@ class ArtifactImportService:
     def _iter_data_rows(
         path: str, sheet: str, header_row: int,
     ) -> Iterator[tuple[int, tuple]]:
-        """表头行之后的数据行流式迭代（Excel 物理行号, 原始行元组）。"""
+        """表头行之后流式迭代单元格，保留 data_type 供公式判断。"""
         workbook = _open_workbook(path)
         try:
             if sheet not in workbook.sheetnames:
                 raise ArtifactImportError("unknown_sheet")
             for index, row in enumerate(
-                workbook[sheet].iter_rows(values_only=True), start=1,
+                workbook[sheet].iter_rows(values_only=False), start=1,
             ):
                 if index > header_row:
                     yield index, row
@@ -651,10 +680,11 @@ class ArtifactImportService:
 
         mapped, create_specs, append_specs = self._build_column_specs(
             plan_columns, active, effective_mode)
-        # codex三审 P2-3：公式拒绝限定所选 sheet——表头在此查，数据值在下方
-        # 行流内逐格查（行为不变：拒绝 → formula_not_allowed，零写入）。
+        # 只检查映射到目标的源列；drop 列完全不参与公式风险校验。
+        included_sources = {source for source, _, _ in mapped}
         headers = self._read_headers(
-            record["path"], sheet, header_row, check_formula=True)
+            record["path"], sheet, header_row, check_formula=True,
+            included_sources=included_sources)
         pk_names = self._primary_key_names(plan_columns, active, effective_mode)
         # 追加导入 ordinal 起点 = 现有 rev0 行数 + 1（对抗审查修复⑧：追加批
         # 的行号接在存量之后，不再与已有行挤 1..N）。ensure_draft 已检出，
@@ -669,15 +699,21 @@ class ArtifactImportService:
         type_errors = 0
         key_conflicts = 0
         scanned = 0
-        for row_index, raw_row in self._iter_data_rows(
+        for row_index, cells in self._iter_data_rows(
             record["path"], sheet, header_row,
         ):
             scanned += 1
             if scanned > MAX_ROWS:
                 raise ArtifactImportError("too_many_rows")
-            for cell in raw_row:
-                if _is_formula(cell):
-                    raise ArtifactImportError("formula_not_allowed")
+            for column_index, (name, cell) in enumerate(
+                zip(headers, cells), start=1,
+            ):
+                if name in included_sources and _is_excel_formula(cell):
+                    raise _formula_error(
+                        sheet=sheet, row=row_index,
+                        column_index=column_index,
+                        column_name=name, kind="data")
+            raw_row = tuple(cell.value for cell in cells)
             if all(_is_blank(value) for value in raw_row):
                 continue  # 全空行跳过（Excel 常见尾随空行）
             values = dict(zip(headers, raw_row))

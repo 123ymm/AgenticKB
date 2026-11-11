@@ -8,7 +8,7 @@ const state = vi.hoisted(() => ({
     uploadTable: vi.fn(),
     importTable: vi.fn(),
   },
-  ui: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+  ui: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), alert: vi.fn() },
 }))
 
 vi.mock('@/api/artifacts', () => ({ useArtifactsApi: () => state.api }))
@@ -17,6 +17,7 @@ vi.mock('element-plus', () => ({
   ElMessage: {
     success: state.ui.success, error: state.ui.error, warning: state.ui.warning,
   },
+  ElMessageBox: { alert: state.ui.alert },
 }))
 
 import ArtifactImportWizard from '../ArtifactImportWizard.vue'
@@ -123,9 +124,31 @@ beforeEach(() => {
   state.ui.success.mockReset()
   state.ui.error.mockReset()
   state.ui.warning.mockReset()
+  state.ui.alert.mockReset().mockResolvedValue(undefined)
 })
 
 describe('ArtifactImportWizard', () => {
+  it('shows the exact formula-risk cell and reason in a dialog', async () => {
+    const wrapper = mountWizard()
+    await flushPromises()
+    const vm = wrapper.vm as unknown as WizardVm
+    await vm.doUpload(new File(['x'], 'A.xlsx'))
+    state.api.importTable.mockRejectedValueOnce({
+      response: { status: 422, data: { detail: {
+        code: 'formula_not_allowed', sheet: 'Sheet1', cell: 'B7',
+        message: '工作表「Sheet1」第 7 行「说明」列（B7）是 Excel 公式，可能在表格软件中执行。',
+      } } },
+    })
+
+    await vm.runImport()
+    expect(state.ui.alert).toHaveBeenCalledWith(
+      expect.stringContaining('第 7 行「说明」列（B7）'),
+      '无法导入：发现公式风险',
+      expect.objectContaining({ type: 'warning' }),
+    )
+    expect(state.ui.error).not.toHaveBeenCalled()
+  })
+
   it('hides mapping card until a preview arrives (progressive disclosure)', async () => {
     const wrapper = mountWizard()
     await flushPromises()

@@ -35,31 +35,30 @@
       </div>
     </el-card>
 
-    <!-- 卡② 列映射：左=文件列推断；右=逐列映射（已有列→map_to/新建/丢弃） -->
+    <!-- 卡② 列映射：每个文件列与对应目标映射共用一行，长枚举值也不串行。 -->
     <el-card v-if="envelope" class="import-wizard__step" shadow="never">
       <template #header>
         <b>② 列映射</b>
         <span class="import-wizard__hint">（{{ hasExisting ? '追加模式：至少一列映射到已有列；文件新列可新建' : '建表模式：为每列选择目标类型，建议指定主键' }}）</span>
       </template>
       <div class="import-wizard__map">
-        <div class="import-wizard__sources">
+        <div class="import-wizard__map-head">
           <div class="import-wizard__pane-title">文件列（类型推断：{{ sheet }}）</div>
-          <div v-for="col in activeSheetColumns" :key="col.source_name" class="import-wizard__source">
-            <span class="import-wizard__source-name">{{ col.source_name }}</span>
-            <el-tag size="small" effect="plain" :type="typeTagType(col.inferred_type)">
-              {{ typeLabel(col.inferred_type) }}
+          <div class="import-wizard__pane-title">目标映射（{{ mappings.length }} 列）</div>
+        </div>
+        <div
+          v-for="(m, index) in mappings"
+          :key="m.source"
+          class="import-wizard__map-row"
+          :class="{ 'import-wizard__map-row--drop': m.action === 'drop' }"
+        >
+          <div class="import-wizard__source">
+            <span class="import-wizard__source-name" :title="m.source">{{ m.source }}</span>
+            <el-tag size="small" effect="plain" :type="typeTagType(activeSheetColumns[index]?.inferred_type ?? '')">
+              {{ typeLabel(activeSheetColumns[index]?.inferred_type ?? '') }}
             </el-tag>
           </div>
-        </div>
-        <div class="import-wizard__targets">
-          <div class="import-wizard__pane-title">目标映射（{{ mappings.length }} 列）</div>
-          <div
-            v-for="m in mappings"
-            :key="m.source"
-            class="import-wizard__map-row"
-            :class="{ 'import-wizard__map-row--drop': m.action === 'drop' }"
-          >
-            <span class="import-wizard__map-source">{{ m.source }}</span>
+          <div class="import-wizard__map-controls">
             <el-select
               v-model="m.action"
               size="small"
@@ -222,7 +221,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
 import { apiErrorDetail } from '@/api/proxyClient'
@@ -480,10 +479,21 @@ async function runImport(): Promise<void> {
     emit('imported', result)
     ElMessage.success(`导入完成：新增 ${result.inserted ?? 0} / 更新 ${result.updated ?? 0}`)
   } catch (error) {
-    const status = (error as { response?: { status?: number } })?.response?.status
+    const response = (error as { response?: { status?: number; data?: { detail?: unknown } } })?.response
+    const status = response?.status
+    const detail = response?.data?.detail
     if (status === 410) {
       ElMessage.error('预览已过期（1 小时 TTL），请重新上传文件')
       resetWizard()
+    } else if (detail === 'formula_not_allowed'
+      || (detail && typeof detail === 'object' && 'code' in detail && detail.code === 'formula_not_allowed')) {
+      const message = detail && typeof detail === 'object' && 'message' in detail
+        && typeof detail.message === 'string'
+        ? detail.message
+        : '所选工作表的待导入列包含 Excel 公式。请将公式结果粘贴为值后重新上传文件。'
+      await ElMessageBox.alert(message, '无法导入：发现公式风险', {
+        type: 'warning', confirmButtonText: '知道了',
+      }).catch(() => {})
     } else {
       ElMessage.error(`导入失败：${await apiErrorDetail(error)}`)
     }
@@ -528,13 +538,15 @@ defineExpose({
 .import-wizard__hint { font-size: 12px; color: var(--kb-text-tertiary); font-weight: normal; }
 .import-wizard__file { margin-left: 10px; font-size: 12.5px; color: var(--kb-text-tertiary); }
 .import-wizard__sheet-row { margin-top: 10px; display: flex; align-items: center; gap: 6px; }
-.import-wizard__map { display: grid; grid-template-columns: 220px 1fr; gap: 14px; }
+.import-wizard__map { min-width: 0; }
+.import-wizard__map-head, .import-wizard__map-row { display: grid; grid-template-columns: 220px minmax(0, 1fr); column-gap: 14px; }
 .import-wizard__pane-title { font-size: 12.5px; color: var(--kb-text-tertiary); margin-bottom: 6px; }
-.import-wizard__source { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--kb-border-light, #eee); }
-.import-wizard__source-name { font-size: 13px; }
-.import-wizard__map-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--kb-border-light, #eee); flex-wrap: wrap; }
+.import-wizard__map-row { align-items: start; padding: 6px 0; border-bottom: 1px dashed var(--kb-border-light, #eee); }
+.import-wizard__source { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 24px; }
+.import-wizard__source-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.import-wizard__source :deep(.el-tag) { flex-shrink: 0; }
+.import-wizard__map-controls { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 24px; flex-wrap: wrap; }
 .import-wizard__map-row--drop { opacity: 0.5; }
-.import-wizard__map-source { min-width: 120px; font-size: 13px; }
 .import-wizard__enum { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .import-wizard__check { display: inline-flex; align-items: center; gap: 3px; font-size: 12.5px; color: var(--kb-text-tertiary); }
 .import-wizard__missing { margin-top: 10px; }

@@ -1238,38 +1238,33 @@ async def test_update_cell_int_float_cast_marks_conflict() -> None:
 # --------------------------------------------- 对抗审查修复回归（61号 21项）
 
 @pytest.mark.asyncio
-async def test_row_write_defenses_formula_and_unknown_column() -> None:
-    """修复⑩回归：三个行写入口（update_cell/batch_assign/insert_single_row）
-    统一防线——公式注入（=+-@ 前缀）400 / 未知列 400。"""
+async def test_row_write_accepts_formula_like_text_and_rejects_unknown_column() -> None:
+    """API 行写入的是普通文本；没有 Excel 公式单元格类型，前缀不应误拦。"""
     db = await _seeded_db()
     await db.upsert_column(AID, "c003", {"column_name": "数量", "column_type": "int"})
     svc = ArtifactService(db)
     owner = _user("u-owner")
 
-    # update_cell：公式 400（= + - @ 四前缀）
-    for formula in ("=SUM(A1)", "+1", " -1+1 ", "@x"):
-        with pytest.raises(InvalidOperation, match="formula_not_allowed"):
-            await svc.update_cell(
-                user=owner, artifact_id=AID, row_key="MOP-1",
-                column="L1", value=formula)
+    for value in ("=SUM(A1)", "@x", "+1", " -1+1 "):
+        await svc.update_cell(
+            user=owner, artifact_id=AID, row_key="MOP-1",
+            column="L1", value=value)
     # update_cell：未知列 400（不再照写影子键）
     with pytest.raises(InvalidOperation, match="unknown_column"):
         await svc.update_cell(
             user=owner, artifact_id=AID, row_key="MOP-1", column="不存在列", value="x")
-    # batch_assign：公式 400 / 未知列 400 / int 列 cast 失败 strict 400
-    with pytest.raises(InvalidOperation, match="formula_not_allowed"):
-        await svc.batch_assign(
-            user=owner, artifact_id=AID, column="L1", value="@cmd", where_clauses=[])
+    # batch_assign：文本放行；未知列 400 / int 列 cast 失败 strict 400。
+    await svc.batch_assign(
+        user=owner, artifact_id=AID, column="L1", value="@cmd", where_clauses=[])
     with pytest.raises(InvalidOperation, match="unknown_column"):
         await svc.batch_assign(
             user=owner, artifact_id=AID, column="不存在列", value="x", where_clauses=[])
     with pytest.raises(InvalidOperation, match="type_error"):
         await svc.batch_assign(
             user=owner, artifact_id=AID, column="数量", value="abc", where_clauses=[])
-    # insert_single_row：公式 400 / 未知键 400
-    with pytest.raises(InvalidOperation, match="formula_not_allowed"):
-        await svc.insert_single_row(
-            user=owner, artifact_id=AID, data={"MOP": "=1+1"})
+    # insert_single_row：前缀文本放行，未知键仍 400。
+    await svc.insert_single_row(
+        user=owner, artifact_id=AID, data={"MOP": "=1+1"})
     with pytest.raises(InvalidOperation, match="unknown_column"):
         await svc.insert_single_row(
             user=owner, artifact_id=AID, data={"幽灵列": "x"})

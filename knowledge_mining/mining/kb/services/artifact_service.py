@@ -170,13 +170,6 @@ def _try_float(value: Any) -> float | None:
     return None
 
 
-def _is_formula(value: Any) -> bool:
-    """公式注入防御（对抗审查修复⑩，与 55号 user_import_service 同口径）：
-    以 ``= + - @`` 开头的文本一律拒绝。定义在本模块、artifact_import_service
-    反向 import——单向依赖（import→service），避免循环导入。"""
-    return isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@"))
-
-
 def _cast_cell(value: Any, column_type: str) -> tuple[bool, Any]:
     """单格写入的类型校验（§7.2 + 对抗审查修复⑫）：int/float/date/bool 设卡
     （date=fromisoformat 可解、bool=严格 true/false/1/0，与导入 _cast_value
@@ -736,16 +729,13 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str, row_key: str,
         column: str, value: Any, expected_updated_at: Any = None,
     ) -> dict[str, Any]:
-        """单格更新（§7.2 + 对抗审查修复⑨⑩）。行写防线：①值过 _is_formula
-        （=+-@ 前缀 400）；②列必须存在（name/alias 可寻址，未知 400）且以
-        规范 column_name 落库（防 alias 旧名写影子键）；③主键列禁改
-        （codex二审批号⑦——primary_key_immutable 400）；④类型 cast 失败 →
+        """单格更新（§7.2）。行写防线：①列必须存在（name/alias 可寻址，未知 400）
+        且以规范 column_name 落库（防 alias 旧名写影子键）；②主键列禁改
+        （primary_key_immutable 400）；③类型 cast 失败 →
         值置 null + conflicts[column]="type_error:值"（与导入 tolerant 路径
         对称），不阻断。乐观锁：expected 透传 db 层原子校验（FOR UPDATE +
         写 + touch 同事务，codex二审批号⑥b），service 不再单独 touch。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
-        if value is not None and _is_formula(value):
-            raise InvalidOperation("formula_not_allowed")
         column_def = await self._find_column(artifact_id, column)
         if column_def is None:
             raise InvalidOperation(f"unknown_column:{column}")
@@ -778,14 +768,12 @@ class ArtifactService:
         value: Any, where_clauses: list[dict[str, Any]],
         expected_updated_at: Any = None,
     ) -> dict[str, int]:
-        """批量赋值（§7.2 + 对抗审查修复⑥⑩）。校验前置（批量场景 intolerant）：
-        ①值过 _is_formula（400）；②目标列必须存在（unknown_column 400，alias
-        解析为规范名）；③主键列禁改（codex二审批号⑦）；④int/float/date/bool
+        """批量赋值（§7.2）。校验前置（批量场景 intolerant）：
+        ①目标列必须存在（unknown_column 400，alias
+        解析为规范名）；②主键列禁改；③int/float/date/bool
         列值 cast 失败直接 400（strict——批量写坏多行无逃生门，与单格
         tolerant 语义刻意不同）。乐观锁同 update_cell（db 层原子，⑥b）。"""
         await self._require_design_session(user, artifact_id, expected_updated_at)
-        if value is not None and _is_formula(value):
-            raise InvalidOperation("formula_not_allowed")
         column_def = await self._find_column(artifact_id, column)
         if column_def is None:
             raise InvalidOperation(f"unknown_column:{column}")
@@ -840,9 +828,8 @@ class ArtifactService:
         self, *, user: dict[str, Any], artifact_id: str,
         data: dict[str, Any], expected_updated_at: Any = None,
     ) -> dict[str, Any]:
-        """手工行增（§7.2 行增 + 对抗审查修复⑩）。行写防线：①每值过
-        _is_formula（400）；②data 键必须是 active 列（name/alias 可寻址，
-        未知键 400，alias 归一到规范名）；③类型 cast 复用 _cast_cell（失败置
+        """手工行增（§7.2 行增）。行写防线：①data 键必须是 active 列（name/alias 可寻址，
+        未知键 400，alias 归一到规范名）；②类型 cast 复用 _cast_cell（失败置
         null + conflicts 标记——与 update_cell tolerant 同口径）。主键：有
         主键 → 规范名取值拼接，rev0 已有同键 → 409、主键值缺失 → 400；
         无主键 → row_key=uuid。provenance 记 manual 来源。"""
@@ -856,8 +843,6 @@ class ArtifactService:
         canonical_data: dict[str, Any] = {}
         conflicts: dict[str, Any] = {}
         for raw_key, raw_value in data.items():
-            if raw_value is not None and _is_formula(raw_value):
-                raise InvalidOperation(f"formula_not_allowed:{raw_key}")
             column_def = self._match_column(columns, str(raw_key))
             if column_def is None:
                 raise InvalidOperation(f"unknown_column:{raw_key}")

@@ -167,6 +167,8 @@ def _map_error(exc: ArtifactError) -> HTTPException:
             return HTTPException(
                 429, "preview_limit: 预览登记过多（每用户 ≤5），已清最旧，请重试",
             )
+        if exc.code == "formula_not_allowed" and exc.detail:
+            return HTTPException(422, exc.detail)
         return HTTPException(422, exc.code)
     if isinstance(exc, ArtifactNotFound):
         return HTTPException(404, str(exc) or "not_found")
