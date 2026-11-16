@@ -240,6 +240,26 @@ class WorkspaceRunDB:
     async def mark_cancelled(self, run_id: str) -> bool:
         return await self._transition(run_id, "cancelled")
 
+    async def reconcile_stale_running(self, *, stale_minutes: int) -> int:
+        """崩溃恢复账（67号 Task 6 决策 6；Task 7 质量收口 B 自 executor
+        裸 SQL 下沉）：status='running' 且 started_at 超过 stale_minutes 的
+        run 判 failed(error='interrupted: executor restart suspected')，
+        返回判定行数。幂等（running 行判定后不复存在；残 run 只认账不复
+        活）。started_at 是 TEXT ISO，比较经 ::timestamptz 显式转型（不同
+        偏移写法的字典序不可靠）。"""
+        async with self._use_conn(None) as c:
+            cur = await c.execute(
+                """UPDATE kb_workspace_runs
+                   SET status = 'failed', finished_at = %s,
+                       error = 'interrupted: executor restart suspected'
+                   WHERE status = 'running'
+                     AND started_at IS NOT NULL
+                     AND started_at::timestamptz
+                         < now() - (%s * interval '1 minute')""",
+                (_utcnow(), int(stale_minutes)),
+            )
+            return int(cur.rowcount or 0)
+
     async def _transition(
         self, run_id: str, target: str, *, error: str | None = None,
     ) -> bool:

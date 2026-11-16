@@ -53,7 +53,7 @@ stale 标志定点清除 / trial 试跑不落库 / cancel / 崩溃恢复 reconci
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import logging
 from typing import Any
 
 from knowledge_mining.mining.kb.db_workspaces import (
@@ -82,6 +82,8 @@ __all__ = [
     "reconcile_stale_running",
 ]
 
+logger = logging.getLogger(__name__)
+
 #: running 残留判定阈值（分钟）——见模块 docstring 决策 6。
 STALE_RUNNING_MINUTES = 30
 
@@ -91,29 +93,26 @@ _RUNNING_TASKS: set["asyncio.Task[None]"] = set()
 _TERMINAL_STATUSES = ("completed", "partial", "failed", "cancelled")
 
 
-def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _log_and_discard(task: "asyncio.Task[None]") -> None:
+    """后台任务 done 回调（Task 7 质量收口 A）：弃引用前取一次 exception——
+    消化 asyncio「exception was never retrieved」告警噪音；异常理论上不可达
+    （_execute 全函数体引擎级兜底，见模块 docstring 决策），到即记 error。"""
+    _RUNNING_TASKS.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "workspace run 后台任务未捕获异常退出（run 应已被兜底落"
+            " failed）: %s: %s", type(exc).__name__, exc)
 
 
 async def reconcile_stale_running(pool: Any) -> int:
-    """崩溃恢复（决策 6）：status='running' 且 started_at 超过
-    STALE_RUNNING_MINUTES 的 run 判 failed(error='interrupted: executor
-    restart suspected')，返回判定行数。幂等（running 行判定后不复存在）。
-
-    started_at 是 TEXT ISO，比较经 ::timestamptz 显式转型（不同偏移写法
-    的字典序不可靠）。"""
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            """UPDATE kb_workspace_runs
-               SET status = 'failed', finished_at = %s,
-                   error = 'interrupted: executor restart suspected'
-               WHERE status = 'running'
-                 AND started_at IS NOT NULL
-                 AND started_at::timestamptz
-                     < now() - (%s * interval '1 minute')""",
-            (_utcnow(), STALE_RUNNING_MINUTES),
-        )
-        return int(cur.rowcount or 0)
+    """崩溃恢复（决策 6；Task 7 质量收口 B：SQL 下沉
+    WorkspaceRunDB.reconcile_stale_running，本入口保留既有调用面——模块级
+    函数 + STALE_RUNNING_MINUTES 常量权威仍在执行器层）。"""
+    return await WorkspaceRunDB(pool).reconcile_stale_running(
+        stale_minutes=STALE_RUNNING_MINUTES)
 
 
 def _descendants(nodes: list[dict[str, Any]], node_id: str) -> set[str]:
@@ -214,7 +213,7 @@ class WorkspaceExecutor:
             self._execute(str(run["id"]), workspace_id, graph, exec_set,
                           started_revision))
         _RUNNING_TASKS.add(task)
-        task.add_done_callback(_RUNNING_TASKS.discard)
+        task.add_done_callback(_log_and_discard)
         return str(run["id"])
 
     # ------------------------------------------------------------ 后台执行
@@ -227,20 +226,25 @@ class WorkspaceExecutor:
 
         终态判定：执行集全成 → completed；部分成 → partial（失败清单在
         progress.node_errors）；全败 → failed（error 摘要带首错节点）。
-        引擎级异常（如 DB 不可用）兜底 mark_failed——run 不许永挂
-        running（reconcile 是 30 分钟级的最后防线，这里是即时的）。"""
-        if not await self._rdb.mark_running(run_id):
-            return  # queued 期间已被取消/判残：终态已定，不再执行
-        nodes: list[dict[str, Any]] = graph["nodes"]
-        by_id = {n["id"]: n for n in nodes}
-        order = [nid for nid in topological_order(nodes) if nid in exec_set]
-        sources = {row["node_id"]: row for row in
-                   await self._wdb.list_sources(workspace_id=workspace_id)}
-        current = await self._rdb.get_current_outputs(workspace_id)
-        run_new: dict[str, dict[str, Any]] = {}  # "node:port" -> dataset
-        node_errors: dict[str, str] = {}
-
+        引擎级异常兜底 mark_failed **覆盖全函数体**（Task 7 质量收口 A：
+        含 mark_running/list_sources/get_current_outputs 等前置 DB 调用与
+        终态落账本身——后台 task 不许带异常死掉把 run 挂在 running；reconcile
+        是 30 分钟级的最后防线，这里是即时的；mark_failed 自身再失败才交给
+        reconcile 收账）。"""
         try:
+            if not await self._rdb.mark_running(run_id):
+                return  # queued 期间已被取消/判残：终态已定，不再执行
+            nodes: list[dict[str, Any]] = graph["nodes"]
+            by_id = {n["id"]: n for n in nodes}
+            order = [nid for nid in topological_order(nodes)
+                     if nid in exec_set]
+            sources = {row["node_id"]: row for row in
+                       await self._wdb.list_sources(
+                           workspace_id=workspace_id)}
+            current = await self._rdb.get_current_outputs(workspace_id)
+            run_new: dict[str, dict[str, Any]] = {}  # "node:port" -> dataset
+            node_errors: dict[str, str] = {}
+
             for i, nid in enumerate(order):
                 # 取消点（决策 8）：一切非 running 外部终态写入即停
                 row = await self._rdb.get_run(run_id)
@@ -265,7 +269,8 @@ class WorkspaceExecutor:
                                 "llm_extract 未接线")
                         else:
                             written = await self._exec_operator(
-                                run_id, workspace_id, node, run_new, current)
+                                run_id, workspace_id, node, run_new,
+                                current)
                         run_new.update(
                             {f"{nid}:{port}": ds
                              for port, ds in written.items()})
@@ -282,25 +287,24 @@ class WorkspaceExecutor:
                                   if i + 1 < len(order) else None),
                     node_error=(nid, node_errors[nid])
                     if nid in node_errors else None)
-        except Exception as exc:  # 引擎级兜底
+
+            failed = [nid for nid in order if nid in node_errors]
+            if not failed:
+                await self._rdb.mark_completed(run_id)
+            elif len(failed) == len(order):
+                await self._rdb.mark_failed(
+                    run_id,
+                    error=f"全部 {len(order)} 个节点失败；"
+                          f"首个错误[{failed[0]}]: {node_errors[failed[0]]}")
+            else:
+                await self._rdb.mark_partial(run_id)
+        except Exception as exc:  # 引擎级兜底（覆盖全函数体）
             try:
                 await self._rdb.mark_failed(
                     run_id,
                     error=f"executor error: {type(exc).__name__}: {exc}")
             except Exception:  # DB 也不可用：run 残 running 由 reconcile 收账
                 pass
-            return
-
-        failed = [nid for nid in order if nid in node_errors]
-        if not failed:
-            await self._rdb.mark_completed(run_id)
-        elif len(failed) == len(order):
-            await self._rdb.mark_failed(
-                run_id,
-                error=f"全部 {len(order)} 个节点失败；"
-                      f"首个错误[{failed[0]}]: {node_errors[failed[0]]}")
-        else:
-            await self._rdb.mark_partial(run_id)
 
     async def _exec_source(
         self, run_id: str, workspace_id: str, node: dict[str, Any],
@@ -380,8 +384,10 @@ class WorkspaceExecutor:
         """节点成功后的两笔账（决策 4/5）：
         ① stale 传播——严格后代端口的 current 行（排除本 run 刚写的）打
         stale_since_run=本 run；
-        ② pending/stale 定点清——jsonb_set 只动该节点两键，WHERE
-        graph_revision=启动值守卫（被改图则整次跳过）。"""
+        ② pending/stale 定点清——Task 7 质量收口 B：SQL 下沉
+        WorkspaceDB.clear_node_flags（jsonb_set 只动该节点两键，WHERE
+        graph_revision=启动值守卫——被改图则整次跳过；返回 False 不视为
+        节点失败）。"""
         by_id = {n["id"]: n for n in nodes}
         node_ports = [
             (d, p["id"]) for d in _descendants(nodes, node_id)
@@ -391,19 +397,8 @@ class WorkspaceExecutor:
             await self._rdb.set_stale(
                 None, workspace_id=workspace_id, node_ports=node_ports,
                 since_run_id=run_id)
-        idx = next(i for i, n in enumerate(nodes) if n["id"] == node_id)
-        async with self._pool.connection() as conn:
-            await conn.execute(
-                """UPDATE kb_workspaces
-                   SET graph_json = jsonb_set(
-                         jsonb_set(graph_json,
-                                   ARRAY['nodes', %s, 'pending'],
-                                   'false'::jsonb, false),
-                         ARRAY['nodes', %s, 'stale'],
-                         'false'::jsonb, false)
-                   WHERE id = %s AND graph_revision = %s""",
-                (str(idx), str(idx), workspace_id, started_revision),
-            )
+        await self._wdb.clear_node_flags(
+            workspace_id, node_id, started_revision)
 
     # ------------------------------------------------------------ 试跑
 

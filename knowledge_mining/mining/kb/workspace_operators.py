@@ -73,6 +73,9 @@ _NUMERIC_CONDS = ("gt", "gte", "lt", "lte")
 #: split_sections 输入/输出的固定列名（Task 5 kb_dir 底表契约）。
 _DOC_CONTENT_COL = "文档内容_JSON"
 _FILE_COL = "文件"
+#: split_sections 输出的两列固定名（Task 7 质量收口 C 常量化）。
+_SECTION_COL = "章节"
+_CONTENT_COL = "内容"
 
 #: join 右列与左列名冲突时的前缀（B.3：合并双方来源、冲突列可辨识）。
 _RIGHT_PREFIX = "右表_"
@@ -345,6 +348,52 @@ def _run_filter(
 # ------------------------------------------------------------ join 算子
 
 
+def _join_right_index(
+    right: dict[str, Any], rkey: str,
+) -> dict[Any, dict[str, Any]]:
+    """右表索引（Task 7 质量收口 C 自 _run_join 拆出）：null 键不参与匹配
+    也不参与重复判定；非标量键不可 hash 拒；右键值重复 → Validation 且不产
+    出任何输出（B.3 铁律：一对多膨胀必须显式声明，不做）。"""
+    index: dict[Any, dict[str, Any]] = {}
+    for row in right.get("rows", []):
+        key = row.get(rkey)
+        if key is None:
+            continue
+        try:
+            hash(key)
+        except TypeError:
+            raise WorkspaceValidationError(
+                f"join: key values must be scalar: {key!r}") from None
+        if key in index:
+            raise WorkspaceValidationError(
+                f"join: duplicate right key {key!r} (one-to-many expansion"
+                f" is undeclared; normalize or aggregate first — B.3)")
+        index[key] = row
+    return index
+
+
+def _join_out_col_names(
+    lcols: list[str], rcols: list[str],
+) -> tuple[list[str], dict[str, str]]:
+    """输出列命名（同上拆出）：左列原序 + 右列（与左冲突 → 右表_ 前缀，
+    仍冲突再前缀一次，再撞即拒——无法构造唯一列名）；返回 (右列输出名序
+    列, 右列原名→输出名映射)。"""
+    taken = set(lcols)
+    r_out_names: list[str] = []
+    r_name_map: dict[str, str] = {}
+    for col in rcols:
+        out = col if col not in taken else f"{_RIGHT_PREFIX}{col}"
+        if out in taken:
+            out = f"{_RIGHT_PREFIX}{out}"
+        if out in taken:
+            raise WorkspaceValidationError(
+                f"join: cannot derive a unique output column for {col!r}")
+        taken.add(out)
+        r_name_map[col] = out
+        r_out_names.append(out)
+    return r_out_names, r_name_map
+
+
 def _run_join(
     config: dict[str, Any], inputs: list[dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
@@ -364,38 +413,8 @@ def _run_join(
     if rkey not in rcols:
         raise WorkspaceValidationError(
             f"join: right_key not in right columns: {rkey!r}")
-
-    # 右表索引：null 键不参与匹配也不参与重复判定；非标量键不可 hash 拒
-    index: dict[Any, dict[str, Any]] = {}
-    for row in right.get("rows", []):
-        key = row.get(rkey)
-        if key is None:
-            continue
-        try:
-            hash(key)
-        except TypeError:
-            raise WorkspaceValidationError(
-                f"join: key values must be scalar: {key!r}") from None
-        if key in index:
-            raise WorkspaceValidationError(
-                f"join: duplicate right key {key!r} (one-to-many expansion"
-                f" is undeclared; normalize or aggregate first — B.3)")
-        index[key] = row
-
-    # 输出列：左列原序 + 右列（与左冲突 → 右表_ 前缀，仍冲突再前缀一次）
-    taken = set(lcols)
-    r_out_names: list[str] = []
-    r_name_map: dict[str, str] = {}
-    for col in rcols:
-        out = col if col not in taken else f"{_RIGHT_PREFIX}{col}"
-        if out in taken:
-            out = f"{_RIGHT_PREFIX}{out}"
-        if out in taken:
-            raise WorkspaceValidationError(
-                f"join: cannot derive a unique output column for {col!r}")
-        taken.add(out)
-        r_name_map[col] = out
-        r_out_names.append(out)
+    index = _join_right_index(right, rkey)
+    r_out_names, r_name_map = _join_out_col_names(lcols, rcols)
 
     matched = unmatched = 0
     rows_out: list[dict[str, Any]] = []
@@ -429,18 +448,62 @@ def _run_join(
 # ------------------------------------------------------------ split_sections
 
 
+def _split_row(row: dict[str, Any], level: int) -> list[dict[str, Any]]:
+    """单文档行展开（Task 7 质量收口 C 自 _run_split_sections 拆出）：载荷
+    三态——字符串 → 原样进「内容」列（章节空串、_id=文档_id:全文——计划
+    明文）；dict 且 sections 为列表 → 逐节展开（一行一节，_id=文档_id:章节
+    标题，同文档同级别同标题多节追加出现序后缀 #2/#3 防撞号——首个不带；
+    B.3：新行身份由来源文档和章节定位组合）；其余（非 dict 非字符串 /
+    dict 无 sections 键 / sections 非列表 / 无该级别有效节）→ 空列表，
+    由调用方记 no_section_docs。_source 继承文档来源。"""
+    file_name = row.get(_FILE_COL)
+    payload = row.get(_DOC_CONTENT_COL)
+    if isinstance(payload, str):
+        return [{
+            "_id": f"{row['_id']}:全文",
+            "_source": row["_source"],
+            _FILE_COL: file_name,
+            _SECTION_COL: "",
+            _CONTENT_COL: payload,
+        }]
+    sections = payload.get("sections") if isinstance(payload, dict) else None
+    if not isinstance(sections, list):
+        return []
+    out: list[dict[str, Any]] = []
+    title_seen: dict[str, int] = {}  # 只计本级命中节的出现序
+    for item in sections:
+        if not isinstance(item, dict):
+            continue
+        item_level = item.get("level")
+        if isinstance(item_level, bool) \
+                or not isinstance(item_level, int) \
+                or item_level != level:
+            continue
+        title = item.get("title")
+        if not isinstance(title, str) or not title:
+            continue
+        occurrence = title_seen.get(title, 0) + 1
+        title_seen[title] = occurrence
+        out_id = f"{row['_id']}:{title}" if occurrence == 1 \
+            else f"{row['_id']}:{title}#{occurrence}"
+        text = item.get("text")
+        out.append({
+            "_id": out_id,
+            "_source": row["_source"],
+            _FILE_COL: file_name,
+            _SECTION_COL: title,
+            _CONTENT_COL: text if isinstance(text, str) else "",
+        })
+    return out
+
+
 def _run_split_sections(
     config: dict[str, Any], inputs: list[dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """拆章节（B.3：按声明级别展开，一文件可多行）：输入必须含
-    文档内容_JSON 与 文件 列。载荷三态：dict 且 sections 为列表 → 逐节
-    展开（一行一节）；字符串 → 原样进「内容」列（章节空串、
-    _id=文档_id:全文——计划明文）；其余畸形（非 dict 非字符串 / dict 无
-    sections 键 / sections 非列表）进问题账 no_section_docs，不阻断其余
-    文档。输出长表 cols=[文件,章节,内容]；_id=文档_id:章节标题——同文档
-    同级别同标题多节追加出现序后缀 #2/#3 防撞号（首个不带；B.3：新行身份
-    由来源文档和章节定位组合）、_source 继承文档来源；无该级别章节的文档
-    同样只进 no_section_docs。"""
+    文档内容_JSON 与 文件 列。逐行展开逻辑在 _split_row（Task 7 质量收口
+    C 拆出）；零产出文档进问题账 no_section_docs（畸形/无该级别章节），
+    不阻断其余文档。输出长表 cols=[文件,章节,内容]。"""
     ds = inputs[0]
     cols = ds.get("cols", [])
     if _DOC_CONTENT_COL not in cols:
@@ -456,50 +519,13 @@ def _run_split_sections(
     for row in ds.get("rows", []):
         file_name = row.get(_FILE_COL)
         account = file_name if isinstance(file_name, str) else str(file_name)
-        payload = row.get(_DOC_CONTENT_COL)
-        emitted = 0
-        if isinstance(payload, str):
-            rows_out.append({
-                "_id": f"{row['_id']}:全文",
-                "_source": row["_source"],
-                _FILE_COL: file_name,
-                "章节": "",
-                "内容": payload,
-            })
-            emitted += 1
-        else:
-            sections = payload.get("sections") \
-                if isinstance(payload, dict) else None
-            if isinstance(sections, list):
-                title_seen: dict[str, int] = {}  # 只计本级命中节的出现序
-                for item in sections:
-                    if not isinstance(item, dict):
-                        continue
-                    item_level = item.get("level")
-                    if isinstance(item_level, bool) \
-                            or not isinstance(item_level, int) \
-                            or item_level != level:
-                        continue
-                    title = item.get("title")
-                    if not isinstance(title, str) or not title:
-                        continue
-                    occurrence = title_seen.get(title, 0) + 1
-                    title_seen[title] = occurrence
-                    out_id = f"{row['_id']}:{title}" if occurrence == 1 \
-                        else f"{row['_id']}:{title}#{occurrence}"
-                    text = item.get("text")
-                    rows_out.append({
-                        "_id": out_id,
-                        "_source": row["_source"],
-                        _FILE_COL: file_name,
-                        "章节": title,
-                        "内容": text if isinstance(text, str) else "",
-                    })
-                    emitted += 1
-        if emitted == 0:
+        emitted = _split_row(row, level)
+        rows_out.extend(emitted)
+        if not emitted:
             no_section.append(account)  # 畸形/无该级章节：不产出行，记账
     return ({"main": {"kind": "table",
-                      "cols": [_FILE_COL, "章节", "内容"], "rows": rows_out}},
+                      "cols": [_FILE_COL, _SECTION_COL, _CONTENT_COL],
+                      "rows": rows_out}},
             {"no_section_docs": no_section})
 
 

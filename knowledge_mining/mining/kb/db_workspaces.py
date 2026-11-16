@@ -557,6 +557,42 @@ class WorkspaceDB:
                     "updated_at": out["updated_at"],
                 }
 
+    async def clear_node_flags(
+        self, workspace_id: str, node_id: str, expected_revision: int,
+    ) -> bool:
+        """节点 pending/stale 标志定点清除（67号 Task 6 决策 4②/5；Task 7
+        质量收口 B 自 executor 的 jsonb_set 裸 SQL 下沉）：只动目标节点两键
+        （jsonb_set create_if_missing=false——键不存在不动），WHERE
+        graph_revision=expected_revision 守卫——运行中被并发 put_graph 推过
+        版本则 UPDATE 落空返回 False（既不撞乐观锁，也绝不把新图的标志抹
+        掉）。节点下标按当前图定位（revision 相等 ⟹ 当前图与 run 快照逐字
+        节一致——一切图写路径都经 put_graph 推 revision，决策 5）；节点不
+        存在 / revision 失配 → False。返回是否命中清除。"""
+        async with self._use_conn(None) as c:
+            cur = await c.execute(
+                """WITH target AS (
+                       SELECT (ord - 1)::text AS node_idx
+                       FROM kb_workspaces w,
+                            LATERAL jsonb_array_elements(
+                                w.graph_json -> 'nodes')
+                                WITH ORDINALITY AS t(node_obj, ord)
+                       WHERE w.id = %s
+                         AND t.node_obj ->> 'id' = %s
+                   )
+                   UPDATE kb_workspaces w
+                   SET graph_json = jsonb_set(
+                           jsonb_set(w.graph_json,
+                                     ARRAY['nodes', target.node_idx,
+                                           'pending'],
+                                     'false'::jsonb, false),
+                           ARRAY['nodes', target.node_idx, 'stale'],
+                           'false'::jsonb, false)
+                   FROM target
+                   WHERE w.id = %s AND w.graph_revision = %s""",
+                (workspace_id, node_id, workspace_id, int(expected_revision)),
+            )
+            return bool(cur.rowcount or 0)
+
     # ------------------------------------------------------------ 成员
 
     async def list_members(
