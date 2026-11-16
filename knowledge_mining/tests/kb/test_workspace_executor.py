@@ -260,6 +260,107 @@ async def test_node_scope_rerun_stale_and_flag_clear(async_pool) -> None:
     assert after["graph_revision"] == rev2  # 定点清不推 revision
 
 
+async def test_source_node_rerun_same_weight_stale_and_flag_clear(
+        async_pool) -> None:
+    """决策 4 钉测：重跑 source 节点与算子同权——下游 current 行
+    stale_since_run=新 run + source 自身 pending 定点清；未执行后代
+    stale 标志保留。"""
+    ex, wdb, ws, owner = await _seed_chain(async_pool)
+    rdb = WorkspaceRunDB(async_pool)
+    run1 = await _wait_terminal(
+        rdb, await ex.start_run(ws["id"], scope="workspace",
+                                created_by=owner))
+    assert run1["status"] == "completed"
+
+    # 改 source 节点 config → diff：sp pending、s/sd stale（sp 的严格后代）
+    rev1 = (await wdb.get_workspace(workspace_id=ws["id"]))["graph_revision"]
+    put2 = await _put_graph(
+        wdb, ws["id"],
+        [_node("sp", "source", config={"refresh": "manual"}),
+         *_chain_nodes()[1:]],
+        expected_revision=rev1)
+    flags0 = {n["id"]: (n.get("pending"), n.get("stale"))
+              for n in put2["graph"]["nodes"]}
+    assert flags0["sp"] == (True, False)   # 预置条件自检
+    assert flags0["s"] == (False, True)
+    assert flags0["sd"] == (False, True)
+
+    run2_id = await ex.start_run(ws["id"], scope="node", target_node_id="sp",
+                                 created_by=owner)
+    run2 = await _wait_terminal(rdb, run2_id)
+    assert run2["status"] == "completed"
+    assert run2["progress_json"]["done"] == ["sp"]
+
+    outputs = await rdb.get_current_outputs(ws["id"])
+    assert outputs["sp:main"]["run_id"] == run2_id       # 重新取冻结数
+    assert outputs["sp:main"]["stale_since_run"] is None
+    assert outputs["s:main"]["run_id"] == run1["id"]     # 下游 stale 由
+    assert outputs["s:main"]["stale_since_run"] == run2_id  # source 重跑打上
+    assert outputs["sd:main"]["stale_since_run"] == run2_id
+
+    after = await wdb.get_workspace(workspace_id=ws["id"])
+    flags = {n["id"]: (n.get("pending"), n.get("stale"))
+             for n in after["graph_json"]["nodes"]}
+    assert flags["sp"] == (False, False)  # source 自身 pending 定点清
+    assert flags["s"] == (False, True)    # 未执行后代保留 stale
+    assert flags["sd"] == (False, True)
+
+
+async def test_after_node_success_revision_mismatch_skips_flag_clear(
+        async_pool) -> None:
+    """决策 5 钉测（M1）：started_revision 与当前 graph_revision 不匹配
+    （错值 / -1 逃生值）→ jsonb_set UPDATE 落空、节点标志原样；stale 传播
+    不受 revision 守卫（账记输出行，不碰 graph）；revision 匹配时同方法可
+    正常清除（对照侧）。"""
+    ex, wdb, ws, owner = await _seed_chain(async_pool)
+    rdb = WorkspaceRunDB(async_pool)
+    run1 = await _wait_terminal(
+        rdb, await ex.start_run(ws["id"], scope="workspace",
+                                created_by=owner))
+    assert run1["status"] == "completed"
+    rev1 = (await wdb.get_workspace(workspace_id=ws["id"]))["graph_revision"]
+    put2 = await _put_graph(
+        wdb, ws["id"],
+        _chain_nodes(s_columns=[{"id": "型号", "name": "型号"}]),
+        expected_revision=rev1)
+    rev2 = put2["graph_revision"]
+    snapshot_nodes = put2["graph"]["nodes"]
+
+    def _flags(row: dict) -> dict:
+        return {n["id"]: (n.get("pending"), n.get("stale"))
+                for n in row["graph_json"]["nodes"]}
+
+    # 错值 revision：UPDATE 落空，标志不动
+    await ex._after_node_success(run1["id"], ws["id"], "s",
+                                 snapshot_nodes, started_revision=99,
+                                 run_new={})
+    after = await wdb.get_workspace(workspace_id=ws["id"])
+    assert _flags(after)["s"] == (True, False)
+    assert _flags(after)["sd"] == (False, True)
+    assert after["graph_revision"] == rev2
+    # stale 传播不被 revision 守卫：s 的后代 sd 的 current 行已记账
+    outputs = await rdb.get_current_outputs(ws["id"])
+    assert outputs["sd:main"]["stale_since_run"] == run1["id"]
+    assert outputs["s:main"]["stale_since_run"] is None  # 自身不打
+
+    # -1 逃生值（读取与落锁间被并发 PUT 推版本）：同样全程跳过
+    await ex._after_node_success(run1["id"], ws["id"], "s",
+                                 snapshot_nodes, started_revision=-1,
+                                 run_new={})
+    after = await wdb.get_workspace(workspace_id=ws["id"])
+    assert _flags(after)["s"] == (True, False)
+
+    # 对照侧：revision 匹配 → 同方法正常定点清（正向路径另有 node_scope
+    # 用例覆盖，此处证明方法本身可清、错值确因守卫落空）
+    await ex._after_node_success(run1["id"], ws["id"], "s",
+                                 snapshot_nodes, started_revision=rev2,
+                                 run_new={})
+    after = await wdb.get_workspace(workspace_id=ws["id"])
+    assert _flags(after)["s"] == (False, False)
+    assert _flags(after)["sd"] == (False, True)  # 未执行节点不受牵连
+    assert after["graph_revision"] == rev2
+
+
 # ------------------------------------------------------------ trial
 
 
@@ -285,6 +386,25 @@ async def test_trial_no_db_writes(async_pool) -> None:
     outputs_after = await rdb.get_current_outputs(ws["id"])
     assert {k: v["created_at"] for k, v in outputs_after.items()} == \
         {k: v["created_at"] for k, v in outputs_before.items()}
+
+
+async def test_trial_input_rows_short_input(async_pool) -> None:
+    """L2：不足 3 行的输入 → input_rows=切片后实际行数（2 行输入→2）。"""
+    wdb, ws, owner = await _seed(async_pool)
+    await _put_graph(wdb, ws["id"], _chain_nodes())
+    short = _products()
+    short["rows"] = short["rows"][:2]
+    await _put_source(wdb, ws["id"], "sp", short)
+    ex = WorkspaceExecutor(async_pool)
+    rdb = WorkspaceRunDB(async_pool)
+    await _wait_terminal(
+        rdb, await ex.start_run(ws["id"], scope="workspace",
+                                created_by=owner))
+
+    result = await ex.trial_node(ws["id"], "s")
+    assert result["trial"] is True
+    assert result["input_rows"] == 2
+    assert len(result["outputs"]["main"]["rows"]) == 2
 
 
 async def test_trial_requires_current_input(async_pool) -> None:
