@@ -439,9 +439,10 @@ async def test_put_graph_node_cap(async_pool) -> None:
 
 async def test_put_graph_rejects_nonfinite_coords(async_pool) -> None:
     """x/y 非有限值（NaN/±inf）拒绝——json.dumps 能带出 NaN，DB jsonb 也
-    存得进，必须在形态校验层拦下。"""
+    存得进，必须在形态校验层拦下；10**400 巨型 int 走 math.isfinite 的
+    OverflowError 分支（Task 3 规格审查 M1 携带补口）。"""
     db, ws, _ = await _seed(async_pool)
-    for bad in (float("nan"), float("inf"), float("-inf")):
+    for bad in (float("nan"), float("inf"), float("-inf"), 10 ** 400):
         for axis in ("x", "y"):
             graph = _graph({**_node("A", "source"), axis: bad})
             with pytest.raises(WorkspaceValidationError):

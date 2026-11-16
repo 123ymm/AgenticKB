@@ -7,7 +7,8 @@
 再变，重复调用返回 False 不抛）/ update_progress 增量合并（done 追加去
 重、failed_rows 按节点并集）/ write_outputs（首写即 current、同
 (workspace,node,port) 二写翻转旧 current——部分唯一索引下的合法翻转、
-行数护栏拒整批、run·workspace 归属校验）/ set_stale 幂等（同 run 二次
+行数护栏拒整批、run·workspace 归属校验、hashes 形参逐 port 落
+content_hash——Task 4 dataset_hash 接线）/ set_stale 幂等（同 run 二次
 0 行、IS DISTINCT FROM 允许改指更新 run）/ 读四件（get_run / list_runs
 DESC+limit / get_current_outputs 解析 content_inline / get_run_outputs）/
 绑定 UPSERT / 导出 request_id 幂等与结果回写守卫。
@@ -31,6 +32,7 @@ from knowledge_mining.mining.kb.db_workspace_runs import (
     MAX_ROWS_PER_PORT,
     WorkspaceRunDB,
 )
+from knowledge_mining.mining.kb.workspace_dataset import dataset_hash
 
 pytestmark = [pytest.mark.postgres, pytest.mark.asyncio]
 
@@ -321,8 +323,7 @@ async def test_write_outputs_current_pointer_flip(async_pool) -> None:
         is True
 
 
-async def test_write_outputs_multi_port_single_transaction(
-        async_pool) -> None:
+async def test_write_outputs_multi_port(async_pool) -> None:
     rdb, _, ws, owner = await _seed(async_pool)
     run = await _start(rdb, ws["id"], owner)
     rows = await rdb.write_outputs(
@@ -336,6 +337,41 @@ async def test_write_outputs_multi_port_single_transaction(
     assert by_port["extra"]["row_count"] == 1
     current = await rdb.get_current_outputs(workspace_id=ws["id"])
     assert set(current) == {"C:main", "C:extra"}
+
+
+async def test_write_outputs_persists_content_hashes(async_pool) -> None:
+    """Task 4 接线（Task 3 遗留 LOW）：write_outputs 的 hashes 形参收
+    workspace_dataset.dataset_hash，逐 port 落 content_hash 并随
+    get_current_outputs 往返；第二跑（新 run 翻转旧 current）只给部分
+    port 的哈希——缺项保持缺省空串口径。"""
+    rdb, _, ws, owner = await _seed(async_pool)
+    run1 = await _start(rdb, ws["id"], owner)
+    ds_main, ds_extra = _dataset(2), _dataset(1)
+    rows = await rdb.write_outputs(
+        None, run_id=run1["id"], workspace_id=ws["id"], node_id="B",
+        outputs={"main": {"dataset": ds_main, "quality": {}},
+                 "extra": {"dataset": ds_extra, "quality": {}}},
+        hashes={"main": dataset_hash(ds_main),
+                "extra": dataset_hash(ds_extra)})
+    by_port = {r["port_id"]: r for r in rows}
+    assert by_port["main"]["content_hash"] == dataset_hash(ds_main)
+    assert by_port["extra"]["content_hash"] == dataset_hash(ds_extra)
+    current = await rdb.get_current_outputs(workspace_id=ws["id"])
+    assert current["B:main"]["content_hash"] == dataset_hash(ds_main)
+    assert current["B:extra"]["content_hash"] == dataset_hash(ds_extra)
+
+    # 第二跑只给部分 port 的哈希：缺项空串、重写 port 换新哈希
+    await rdb.mark_completed(run1["id"])
+    run2 = await _start(rdb, ws["id"], owner)
+    ds2 = _dataset(1)
+    rows2 = await rdb.write_outputs(
+        None, run_id=run2["id"], workspace_id=ws["id"], node_id="B",
+        outputs={"main": {"dataset": ds2, "quality": {}},
+                 "extra": {"dataset": _dataset(2), "quality": {}}},
+        hashes={"main": dataset_hash(ds2)})
+    by_port2 = {r["port_id"]: r for r in rows2}
+    assert by_port2["main"]["content_hash"] == dataset_hash(ds2)
+    assert by_port2["extra"]["content_hash"] == ""
 
 
 async def test_write_outputs_row_guard_rejects_entire_batch(
