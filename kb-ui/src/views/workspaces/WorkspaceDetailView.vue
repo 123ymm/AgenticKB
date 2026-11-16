@@ -1,6 +1,6 @@
 <template>
   <div class="ws-detail">
-    <!-- 顶栏：名称+描述 | 运行 / 导出（导出 Task 12-13 接线，先禁用占位） -->
+    <!-- 顶栏：名称+描述 | 运行 / 导出 -->
     <header class="ws-detail__header">
       <div class="ws-detail__head-left">
         <router-link
@@ -24,11 +24,11 @@
           :disabled="!canWrite || !hasNodes"
           @click="runWorkspace"
         >运行工作区</el-button>
-        <el-tooltip content="导出制品草稿将在下一步开放（Task 12 接线）" placement="bottom">
-          <span>
-            <el-button data-test="export-drafts" disabled>导出制品草稿</el-button>
-          </span>
-        </el-tooltip>
+        <el-button
+          data-test="export-drafts"
+          :disabled="!canWrite || !hasNodes || running"
+          @click="exportDialogOpen = true"
+        >导出制品草稿</el-button>
       </div>
     </header>
 
@@ -59,7 +59,7 @@
       <el-button type="primary" @click="router.push({ name: 'workspaces' })">返回列表</el-button>
     </div>
 
-    <!-- 三栏：来源+结果树（左约 180px）｜步骤流+输出区（中）｜Inspector 占位（右约 320px） -->
+    <!-- 三栏：来源+结果树（左约 180px）｜步骤流+输出区（中）｜Inspector（右约 320px） -->
     <div v-else class="ws-detail__body">
       <aside class="ws-detail__left">
         <section class="ws-detail__panel">
@@ -106,43 +106,85 @@
             :outputs="outputs"
             :selected-ref="selectedRef"
             @select="ref => (selectedRef = ref)"
-            @add-source="toastNextStep"
-            @add-operator="toastNextStep"
+            @add-source="sourceDialogOpen = true"
+            @add-operator="nodeDialogOpen = true"
           />
         </section>
         <section class="ws-detail__output">
           <header class="ws-detail__output-head">
             <span class="ws-detail__output-eyebrow">输出预览</span>
-            <span class="ws-detail__output-ref">{{ selectedRef ?? '未选择输出' }}</span>
+            <span class="ws-detail__output-ref">{{ displayedRefLabel }}</span>
           </header>
+          <!-- 试跑横幅：选中输出被试跑结果顶替（stale 横幅让位） -->
           <el-alert
-            v-if="selectedOutput?.stale_since_run"
+            v-if="trialResult"
+            type="info"
+            :closable="false"
+            class="ws-detail__stale-banner"
+            data-test="trial-banner"
+          >
+            <template #title>
+              试跑预览 · {{ trialResult.inputRows }} 条输入 · 不落库
+              <el-button size="small" text data-test="exit-trial" @click="trialResult = null">退出试跑</el-button>
+            </template>
+          </el-alert>
+          <el-alert
+            v-else-if="selectedOutput?.stale_since_run"
             type="warning"
             :closable="false"
             class="ws-detail__stale-banner"
             title="该输出已过期（上游有新批次），重新运行后刷新"
           />
-          <div v-loading="outputsLoading" class="ws-detail__output-body">
-            <WorkspaceOutputTable :output="selectedOutput" />
+          <div v-loading="outputsLoading || trialing" class="ws-detail__output-body">
+            <WorkspaceOutputTable :output="displayedOutput" />
           </div>
         </section>
       </main>
 
       <aside class="ws-detail__right">
-        <div class="ws-detail__inspector" data-test="inspector-placeholder">
-          <el-icon :size="22" class="ws-detail__inspector-icon"><Setting /></el-icon>
-          <p class="ws-detail__inspector-title">配置面板</p>
-          <p class="ws-detail__inspector-hint">将于下步开放——节点参数配置、试跑与执行入口（Task 12）</p>
-        </div>
+        <WorkspaceInspector
+          :node="selectedNode"
+          :candidates="inspectorCandidates"
+          :port-cols="portCols"
+          :source-row="selectedSourceRow"
+          :can-write="canWrite"
+          :running="running"
+          @save="onInspectorSave"
+          @trial="onTrial"
+          @execute="onExecuteNode"
+        />
       </aside>
     </div>
+
+    <!-- 对话框三件：接入资料 / 添加算子 / 导出草稿 -->
+    <WorkspaceSourceDialog
+      v-model="sourceDialogOpen"
+      :workspace-id="workspaceId"
+      :domain="workspace?.domain_id ?? ''"
+      :nodes="nodes"
+      :graph-revision="graphRevision"
+      @created="onSourceCreated"
+      @graph-conflict="onGraphConflict"
+    />
+    <WorkspaceNodeDialog
+      v-model="nodeDialogOpen"
+      :port-options="allPortOptions"
+      :default-ref="selectedRef"
+      @confirm="onAddOperator"
+    />
+    <WorkspaceExportDialog
+      v-model="exportDialogOpen"
+      :workspace-id="workspaceId"
+      :ports="exportPorts"
+      :owner-label="workspace?.owner_user_id ?? ''"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft, Loading, Setting } from '@element-plus/icons-vue'
+import { ArrowLeft, Loading } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useWorkspacesApi } from '@/api/workspaces'
 import { apiErrorDetail } from '@/api/proxyClient'
@@ -151,6 +193,11 @@ import { usePolling } from '@/composables/usePolling'
 import EmptyState from '@/components/common/EmptyState.vue'
 import WorkspaceStepFlow from '@/components/workspaces/WorkspaceStepFlow.vue'
 import WorkspaceOutputTable from '@/components/workspaces/WorkspaceOutputTable.vue'
+import WorkspaceInspector from '@/components/workspaces/WorkspaceInspector.vue'
+import WorkspaceSourceDialog from '@/components/workspaces/WorkspaceSourceDialog.vue'
+import WorkspaceNodeDialog from '@/components/workspaces/WorkspaceNodeDialog.vue'
+import WorkspaceExportDialog, { type ExportPortOption } from '@/components/workspaces/WorkspaceExportDialog.vue'
+import { isTerminalRunStatus, runStatusLabel } from './runStatus'
 import type {
   GraphNode,
   RunSummary,
@@ -160,10 +207,11 @@ import type {
 } from '@/api/workspaces'
 
 /**
- * 工作台主页（67号 Task 11）：三栏骨架——左来源+加工结果树 / 中步骤流+
- * 输出区 / 右 Inspector 占位。执行交互本任务只做「运行工作区」全图跑
- * （scope=workspace，轮询 run status 至终态刷新图与输出）；试跑/单节点
- * 执行/Inspector 表单/导出对话框归 Task 12-13。
+ * 工作台主页（67号 Task 11 三栏骨架 + Task 12 交互接线）：左来源+加工
+ * 结果树 / 中步骤流+输出区（含试跑态）/ 右 Inspector 节点配置。执行交互
+ * =运行工作区（scope=workspace）与执行此节点（scope=node）共用一套轮询
+ * 机制（终态口径见 ./runStatus）；保存配置走整图 PUT（乐观锁 409 刷新
+ * 重拉）；接入资料/添加算子/导出草稿三对话框挂页面级。
  */
 const props = defineProps<{ workspaceId: string }>()
 
@@ -177,8 +225,13 @@ const sources = ref<WorkspaceSource[]>([])
 const loading = ref(false)
 const loadError = ref('')
 const outputsLoading = ref(false)
+const graphRevision = ref(0)
 
 const selectedRef = ref<string | null>(null)
+
+const sourceDialogOpen = ref(false)
+const nodeDialogOpen = ref(false)
+const exportDialogOpen = ref(false)
 
 useDocumentTitle(() => workspace.value?.name || '制作工作台')
 
@@ -193,8 +246,72 @@ const hasNodes = computed(() => nodes.value.length > 0)
 const selectedOutput = computed(() =>
   selectedRef.value ? (outputs.value[selectedRef.value] ?? null) : null)
 
+/** 选中端口所属节点（Inspector 的配置对象）。 */
+const selectedNode = computed<GraphNode | null>(() => {
+  const nodeId = selectedRef.value?.split(':')[0]
+  return nodeId ? (nodes.value.find(n => n.id === nodeId) ?? null) : null
+})
+
+/** source 节点的来源行（只读展示用）。 */
+const selectedSourceRow = computed<WorkspaceSource | null>(() => {
+  const node = selectedNode.value
+  if (!node || node.op !== 'source') return null
+  return sources.value.find(s => s.node_id === node.id) ?? null
+})
+
 /** 拓扑序（与步骤流同算法口径：依赖在前、同层保持原序）。 */
 const orderedNodes = computed(() => topoSort(nodes.value))
+
+/** Inspector 输入候选：全图端口剔除「自身+全部下游」——引用剩余者不成环。 */
+const inspectorCandidates = computed(() => {
+  const target = selectedNode.value
+  if (!target) return []
+  const blocked = new Set<string>([target.id])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const node of nodes.value) {
+      if (blocked.has(node.id)) continue
+      const consumesBlocked = node.inputs.some(ref => blocked.has(ref.split(':')[0]))
+      if (consumesBlocked) {
+        blocked.add(node.id)
+        changed = true
+      }
+    }
+  }
+  return nodes.value
+    .filter(n => !blocked.has(n.id))
+    .flatMap(n => n.ports.map(p => ({ ref: `${n.id}:${p.id}`, label: `${n.name} · ${p.name}` })))
+})
+
+/** 各端口当前输出的列（Inspector 列候选/默认值）。 */
+const portCols = computed<Record<string, string[]>>(() => {
+  const map: Record<string, string[]> = {}
+  for (const [ref, out] of Object.entries(outputs.value)) {
+    const cols = (out.content_inline as Record<string, unknown> | null)?.cols
+    if (Array.isArray(cols)) map[ref] = cols.map(String)
+  }
+  return map
+})
+
+/** 全部端口选项（添加算子对话框输入候选）。 */
+const allPortOptions = computed(() =>
+  nodes.value.flatMap(n => n.ports.map(p => ({ ref: `${n.id}:${p.id}`, label: `${n.name} · ${p.name}` }))))
+
+// ── 试跑态（选中输出被试跑结果顶替） ──
+
+const trialResult = ref<{ inputRows: number; output: WorkspaceOutput } | null>(null)
+const trialing = ref(false)
+
+const displayedOutput = computed<WorkspaceOutput | null>(() =>
+  trialResult.value ? trialResult.value.output : selectedOutput.value)
+
+const displayedRefLabel = computed(() =>
+  trialResult.value ? `${trialResult.value.output.node_id}:${trialResult.value.output.port_id}（试跑）`
+    : (selectedRef.value ?? '未选择输出'))
+
+// 切换选中端口即退出试跑（试跑结果只对着发起时的端口）
+watch(selectedRef, () => { trialResult.value = null })
 
 function topoSort(graphNodes: GraphNode[]): GraphNode[] {
   const byId = new Map(graphNodes.map(n => [n.id, n]))
@@ -263,6 +380,11 @@ async function refreshOutputs(): Promise<void> {
 async function refreshGraph(): Promise<void> {
   const envelope = await api.getGraph(props.workspaceId)
   nodes.value = envelope.graph.nodes ?? []
+  graphRevision.value = envelope.graph_revision
+}
+
+async function refreshSources(): Promise<void> {
+  sources.value = await api.listSources(props.workspaceId)
 }
 
 async function load(): Promise<void> {
@@ -277,6 +399,7 @@ async function load(): Promise<void> {
     ])
     workspace.value = detail
     nodes.value = graph.graph.nodes ?? []
+    graphRevision.value = graph.graph_revision
     outputs.value = outputsEnvelope.outputs ?? {}
     sources.value = sourcesEnvelope
     selectedRef.value = defaultSelectedRef()
@@ -291,29 +414,14 @@ async function load(): Promise<void> {
   }
 }
 
-// ── 运行（scope=workspace 全图跑；轮询 run status 至终态） ──
-
-/** 后端终态集（db_workspace_runs 生命周期：queued/running → 四种终态）。 */
-const TERMINAL_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancelled'])
+// ── 运行面（workspace 全图 / node 单节点共用；轮询 run status 至终态） ──
 
 const running = ref(false)
 const activeRunId = ref<string | null>(null)
+const activeRunScope = ref<'workspace' | 'node'>('workspace')
 const lastRun = ref<RunSummary | null>(null)
 /** progress_json.current_node（节点 id）→ 展示名。 */
 const currentNodeLabel = ref('')
-
-const RUN_STATUS_LABELS: Record<string, string> = {
-  queued: '排队中',
-  running: '运行中',
-  succeeded: '上次运行成功',
-  partial: '上次运行部分完成',
-  failed: '上次运行失败',
-  cancelled: '上次运行已取消',
-}
-
-function runStatusLabel(status: string): string {
-  return RUN_STATUS_LABELS[status] ?? `上次运行 ${status}`
-}
 
 async function pollRunStatus(): Promise<void> {
   const runId = activeRunId.value
@@ -325,26 +433,36 @@ async function pollRunStatus(): Promise<void> {
       typeof envelope.run.progress_json?.current_node === 'string'
         ? nodeNameOf(envelope.run.progress_json.current_node)
         : ''
-    if (TERMINAL_STATUSES.has(envelope.run.status)) {
+    if (isTerminalRunStatus(envelope.run.status)) {
       running.value = false
       activeRunId.value = null
       currentNodeLabel.value = ''
-      if (envelope.run.status === 'succeeded') {
-        ElMessage.success('运行完成')
+      trialResult.value = null
+      const isNodeScope = activeRunScope.value === 'node'
+      if (envelope.run.status === 'completed') {
+        ElMessage.success(isNodeScope ? '节点执行完成' : '运行完成')
       } else if (envelope.run.status === 'partial') {
         ElMessage.warning('运行部分完成——部分节点失败，可在下次运行重试')
       } else {
         ElMessage.error(`运行未完成：${envelope.run.error || runStatusLabel(envelope.run.status)}`)
       }
       // 终态后统一刷新：批次号（workspace）+ pending/stale 标志（graph）+ 输出面
-      await Promise.allSettled([
+      const settled = await Promise.allSettled([
         api.getWorkspace(props.workspaceId).then(d => { workspace.value = d }),
         refreshGraph(),
         refreshOutputs(),
       ])
+      reportRefreshFailures(settled)
     }
   } catch {
     // 瞬时网络抖动：静默跳过本次，等下个轮询周期（终态由后端落库）
+  }
+}
+
+/** 终态刷新的 rejected 分支不静默（allSettled 吞错 → 补 toast 提示手刷）。 */
+function reportRefreshFailures(settled: PromiseSettledResult<unknown>[]): void {
+  if (settled.some(r => r.status === 'rejected')) {
+    ElMessage.error('运行完成，但刷新数据失败——请手动刷新页面')
   }
 }
 
@@ -354,11 +472,15 @@ const { start: startRunPolling } = usePolling(pollRunStatus, 2000, {
   shouldRun: () => running.value,
 })
 
-async function runWorkspace(): Promise<void> {
+async function startRun(scope: 'workspace' | 'node', targetNodeId?: string): Promise<void> {
   if (running.value) return
   running.value = true
+  activeRunScope.value = scope
   try {
-    const { run_id: runId } = await api.startRun(props.workspaceId, { scope: 'workspace' })
+    const { run_id: runId } = await api.startRun(props.workspaceId, {
+      scope,
+      ...(scope === 'node' && targetNodeId ? { target_node_id: targetNodeId } : {}),
+    })
     activeRunId.value = runId
     startRunPolling()
     await pollRunStatus()
@@ -369,10 +491,183 @@ async function runWorkspace(): Promise<void> {
   }
 }
 
-/** 步骤流入口按钮：对话框归 Task 12，先 toast 指路。 */
-function toastNextStep(): void {
-  ElMessage.info('该能力将在下一步开放（配置面板与接入向导）')
+function runWorkspace(): Promise<void> {
+  return startRun('workspace')
 }
+
+function onExecuteNode(): Promise<void> {
+  const node = selectedNode.value
+  if (!node) return Promise.resolve()
+  return startRun('node', node.id)
+}
+
+// ── 保存配置（Inspector → 整图 PUT，乐观锁 409 刷新重拉） ──
+
+async function onInspectorSave(config: Record<string, unknown>, inputs: string[]): Promise<void> {
+  const target = selectedNode.value
+  if (!target) return
+  try {
+    const nextNodes = nodes.value.map(n =>
+      n.id === target.id ? { ...n, config, inputs } : n)
+    const envelope = await api.putGraph(
+      props.workspaceId, { nodes: nextNodes }, graphRevision.value)
+    nodes.value = envelope.graph.nodes ?? nextNodes
+    graphRevision.value = envelope.graph_revision
+    ElMessage.success('配置已保存——节点标记为待执行')
+  } catch (error) {
+    const status = (error as { response?: { status?: number } })?.response?.status
+    if (status === 409) {
+      ElMessage.error('图已被他人修改，已刷新——请重新保存')
+      await refreshGraph().catch(() => {})
+    } else {
+      ElMessage.error(`保存配置失败：${await apiErrorDetail(error)}`)
+    }
+  }
+}
+
+// ── 试跑（不建 run 不写库；结果顶替输出区并出横幅） ──
+
+function pseudoTrialOutput(
+  nodeId: string, portId: string, dataset: Record<string, unknown>,
+): WorkspaceOutput {
+  const rows = Array.isArray(dataset.rows) ? dataset.rows : []
+  return {
+    run_id: 'trial',
+    workspace_id: props.workspaceId,
+    node_id: nodeId,
+    port_id: portId,
+    kind: 'table',
+    content_inline: dataset,
+    row_count: rows.length,
+    content_hash: '',
+    quality_json: null,
+    is_current: false,
+    stale_since_run: null,
+    created_at: new Date().toISOString(),
+  }
+}
+
+async function onTrial(): Promise<void> {
+  const ref = selectedRef.value
+  if (!ref || trialing.value) return
+  const [nodeId, portId] = ref.split(':')
+  trialing.value = true
+  try {
+    const result = await api.trialOutput(props.workspaceId, nodeId, portId)
+    const dataset = result.outputs?.[portId]
+    if (!dataset || typeof dataset !== 'object') {
+      ElMessage.warning('试跑未返回该端口的结果')
+      return
+    }
+    trialResult.value = {
+      inputRows: result.input_rows,
+      output: pseudoTrialOutput(nodeId, portId, dataset as Record<string, unknown>),
+    }
+  } catch (error) {
+    ElMessage.error(`试跑失败：${await apiErrorDetail(error)}`)
+  } finally {
+    trialing.value = false
+  }
+}
+
+// ── 接入资料（对话框落图+来源后：刷新全量并自动跑一次 source 节点） ──
+
+async function onSourceCreated(nodeId: string): Promise<void> {
+  const settled = await Promise.allSettled([
+    api.getWorkspace(props.workspaceId).then(d => { workspace.value = d }),
+    refreshGraph(),
+    refreshOutputs(),
+    refreshSources(),
+  ])
+  reportRefreshFailures(settled)
+  selectedRef.value = `${nodeId}:main`
+  // POST /sources 只冻快照不执行——前端补一次 scope=node 让底表立即有数据
+  await startRun('node', nodeId)
+}
+
+async function onGraphConflict(): Promise<void> {
+  await refreshGraph().catch(() => {})
+}
+
+// ── 添加算子（对话框确认 → 前端生成节点 → PUT 图 → 选中新节点） ──
+
+const OP_NODE_META: Record<string, { label: string; portName: string; config: Record<string, unknown> }> = {
+  select: { label: '选取列', portName: '选择结果', config: {} },
+  filter: { label: '过滤行', portName: '筛选结果', config: { cond: 'eq' } },
+  join: { label: '关联', portName: '关联结果', config: { method: 'left' } },
+  split_sections: { label: '章节切分', portName: '章节长表', config: { level: 1 } },
+  llm_extract: {
+    label: 'LLM 抽取', portName: '抽取结果',
+    config: { output_fields: [{ name: '字段1', type: 'text' }] },
+  },
+}
+
+function nextNodeId(op: string): { id: string; seq: number } {
+  const prefix = `${op}_`
+  let max = 0
+  for (const n of nodes.value) {
+    if (!n.id.startsWith(prefix)) continue
+    const seq = Number(n.id.slice(prefix.length))
+    if (Number.isFinite(seq)) max = Math.max(max, seq)
+  }
+  const seq = max + 1
+  return { id: `${prefix}${seq}`, seq }
+}
+
+async function onAddOperator(payload: { op: string; inputs: string[] }): Promise<void> {
+  const meta = OP_NODE_META[payload.op]
+  if (!meta) return
+  const { id, seq } = nextNodeId(payload.op)
+  const newNode: GraphNode = {
+    id,
+    op: payload.op,
+    name: `${meta.label} ${seq}`,
+    config: { ...meta.config },
+    inputs: payload.inputs,
+    ports: [{ id: 'main', name: meta.portName, kind: 'table' }],
+    x: 0,
+    y: nodes.value.reduce((max, n) => Math.max(max, n.y ?? 0), 0) + 1,
+  }
+  try {
+    const envelope = await api.putGraph(
+      props.workspaceId, { nodes: [...nodes.value, newNode] }, graphRevision.value)
+    nodes.value = envelope.graph.nodes ?? [...nodes.value, newNode]
+    graphRevision.value = envelope.graph_revision
+    selectedRef.value = `${id}:main`
+    ElMessage.success('算子已添加——在右侧配置参数后执行')
+  } catch (error) {
+    const status = (error as { response?: { status?: number } })?.response?.status
+    if (status === 409) {
+      ElMessage.error('图已被他人修改，已刷新——请重新添加')
+      await refreshGraph().catch(() => {})
+    } else {
+      ElMessage.error(`添加算子失败：${await apiErrorDetail(error)}`)
+    }
+  }
+}
+
+// ── 导出（可导出端口判定：有 current 输出且非 stale 且有行） ──
+
+const exportPorts = computed<ExportPortOption[]>(() =>
+  nodes.value.flatMap(node => node.ports.map(port => {
+    const ref = `${node.id}:${port.id}`
+    const out = outputs.value[ref]
+    const base = {
+      nodeId: node.id, portId: port.id, ref,
+      name: port.name, nodeLabel: node.name,
+    }
+    if (!out) {
+      return { ...base, rowCount: null, exportable: false, reason: '该输出尚未执行' }
+    }
+    const rowCount = out.row_count ?? 0
+    if (out.stale_since_run) {
+      return { ...base, rowCount, exportable: false, reason: '输出已过期，需重新运行' }
+    }
+    if (!rowCount) {
+      return { ...base, rowCount, exportable: false, reason: '输出无数据行' }
+    }
+    return { ...base, rowCount, exportable: true, reason: '' }
+  })))
 
 onMounted(load)
 </script>
@@ -416,7 +711,7 @@ onMounted(load)
 .ws-detail__meta-dot { color: var(--kb-border, #e2e8f0); font-size: 12px; }
 .ws-detail__run { font-size: 12px; color: var(--kb-text-secondary, #64748b); }
 .ws-detail__run.is-active { color: var(--kb-accent, #0891b2); }
-.ws-detail__run.is-succeeded { color: var(--kb-success, #10b981); }
+.ws-detail__run.is-completed { color: var(--kb-success, #10b981); }
 .ws-detail__run.is-partial { color: var(--kb-warning, #f59e0b); }
 .ws-detail__run.is-failed { color: var(--el-color-danger, #ef4444); }
 .ws-detail__spinner { animation: ws-detail-spin 1s linear infinite; vertical-align: -2px; margin-right: 3px; }
@@ -519,22 +814,11 @@ onMounted(load)
   font-family: var(--kb-font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
 }
 .ws-detail__stale-banner { margin-bottom: 8px; }
+.ws-detail__stale-banner :deep(.el-button) { margin-left: 10px; }
 .ws-detail__output-body { min-width: 0; }
 
-/* 右栏：Inspector 占位（Task 12 建真身） */
+/* 右栏：Inspector */
 .ws-detail__right {
   flex: 0 0 320px; width: 320px; min-width: 0;
 }
-.ws-detail__inspector {
-  height: 100%; min-height: 200px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 8px; padding: 24px;
-  border: 1px dashed var(--kb-border, #e2e8f0);
-  border-radius: 10px;
-  background: var(--kb-bg-card-hover, #f8fafc);
-  text-align: center;
-}
-.ws-detail__inspector-icon { color: var(--kb-text-tertiary, #94a3b8); opacity: .6; }
-.ws-detail__inspector-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--kb-text-secondary, #64748b); }
-.ws-detail__inspector-hint { margin: 0; font-size: 12px; color: var(--kb-text-tertiary, #94a3b8); }
 </style>

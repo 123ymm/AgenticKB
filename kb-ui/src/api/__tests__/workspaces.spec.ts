@@ -15,7 +15,7 @@ vi.mock('axios', () => ({
         state.requests.push({ method, url, config, body })
         if (url === '/api/workspaces' && method === 'get') return { data: { workspaces: [{ id: 'wsp_1' }] } }
         if (url.endsWith('/members')) return { data: { members: [{ user_id: 'u1', role: 'viewer' }] } }
-        if (url.endsWith('/runs')) return { data: { runs: [{ id: 'run_9', status: 'succeeded' }] } }
+        if (url.endsWith('/runs')) return { data: { runs: [{ id: 'run_9', status: 'completed' }] } }
         if (url.endsWith('/sources')) return { data: { sources: [{ node_id: 's1', connector: 'kb_dir' }] } }
         if (url.endsWith('/graph')) return { data: { graph: { nodes: [] }, graph_revision: 2, batch_no: 1 } }
         if (url.endsWith('/outputs/current')) return { data: { outputs: { 's1:out': { row_count: 3 } } } }
@@ -212,7 +212,7 @@ describe('workspaces API', () => {
 
     await expect(api.listWorkspaces()).resolves.toEqual([{ id: 'wsp_1' }])
     await expect(api.listMembers('wsp_1')).resolves.toEqual([{ user_id: 'u1', role: 'viewer' }])
-    await expect(api.listRuns('wsp_1')).resolves.toEqual([{ id: 'run_9', status: 'succeeded' }])
+    await expect(api.listRuns('wsp_1')).resolves.toEqual([{ id: 'run_9', status: 'completed' }])
     await expect(api.listSources('wsp_1')).resolves.toEqual([{ node_id: 's1', connector: 'kb_dir' }])
     await expect(api.getCurrentOutputs('wsp_1')).resolves.toEqual({ outputs: { 's1:out': { row_count: 3 } } })
   })

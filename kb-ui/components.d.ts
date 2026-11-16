@@ -128,7 +128,11 @@ declare module 'vue' {
     WorkflowOperatorNodeBase: typeof import('./src/components/workflow/WorkflowOperatorNodeBase.vue')['default']
     WorkflowValidationPanel: typeof import('./src/components/mining/workflow/WorkflowValidationPanel.vue')['default']
     WorkflowVersionPreview: typeof import('./src/components/mining/workflow/WorkflowVersionPreview.vue')['default']
+    WorkspaceExportDialog: typeof import('./src/components/workspaces/WorkspaceExportDialog.vue')['default']
+    WorkspaceInspector: typeof import('./src/components/workspaces/WorkspaceInspector.vue')['default']
+    WorkspaceNodeDialog: typeof import('./src/components/workspaces/WorkspaceNodeDialog.vue')['default']
     WorkspaceOutputTable: typeof import('./src/components/workspaces/WorkspaceOutputTable.vue')['default']
+    WorkspaceSourceDialog: typeof import('./src/components/workspaces/WorkspaceSourceDialog.vue')['default']
     WorkspaceStepFlow: typeof import('./src/components/workspaces/WorkspaceStepFlow.vue')['default']
     YamlEditor: typeof import('./src/components/common/YamlEditor.vue')['default']
   }

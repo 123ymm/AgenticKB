@@ -7,7 +7,8 @@
  * 追加。错误文案统一由调用方用 apiErrorDetail 提取（404/403/409 带
  * {code, message} 信封——反探测口径：不存在与无权同响应）。
  *
- * 契约权威 = mining/kb/routes/workspaces.py（19+ 端点）与
+ * 契约权威 = mining/kb/routes/workspaces.py（22 端点：CRUD 5 + 成员 4 +
+ * 图 2 + 来源 4 + 运行 4 + 输出试跑 2 + 导出 1）与
  * workspace_service.py（响应形态）：
  * - 列表/详情行：db_workspaces._WS_COLUMNS（列表不带 graph_json——节点数
  *   需读图才知道，列表页不显示该列）。
@@ -22,6 +23,20 @@ import { createProxyClient } from '@/api/proxyClient'
 // ----------------------------------------------------------------- 类型
 
 export type WorkspaceStatus = 'active' | 'archived'
+
+/**
+ * run 状态七值词表（012 DDL / executor._TERMINAL_STATUSES）：
+ * 非终态 queued/running/awaiting_review → 终态 completed/partial/
+ * failed/cancelled。**无 'succeeded'**（那是导出行词表——勿混）。
+ */
+export type RunStatus =
+  | 'queued'
+  | 'running'
+  | 'awaiting_review'
+  | 'completed'
+  | 'partial'
+  | 'failed'
+  | 'cancelled'
 
 /** 工作区行（列表口径：无 graph_json；021 DDL _WS_COLUMNS 同序）。 */
 export interface WorkspaceSummary {
@@ -131,7 +146,7 @@ export interface RunSummary {
   graph_revision: number
   graph_hash: string
   batch_no: number
-  status: string
+  status: RunStatus
   progress_json: Record<string, unknown> | null
   error: string | null
   actor_kind: string
