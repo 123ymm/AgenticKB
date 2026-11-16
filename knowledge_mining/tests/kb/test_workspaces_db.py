@@ -247,6 +247,8 @@ async def test_put_graph_structural_validation(async_pool) -> None:
                _node("B", "source")),
         # 节点 id 重复
         _graph(_node("A", "source"), _node("A", "filter")),
+        # 节点 id 含冒号（node:port 引用无歧义的扩展校验专属负例）
+        _graph(_node("A:B", "source")),
         # 非法 op
         _graph(_node("A", "神仙算子")),
         # 空端口

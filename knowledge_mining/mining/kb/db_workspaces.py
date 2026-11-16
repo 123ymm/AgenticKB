@@ -572,10 +572,14 @@ class WorkspaceDB:
         self, conn: Any | None = None, *, workspace_id: str, user_id: str,
         role: str,
     ) -> dict[str, Any]:
+        """锁序：降级路径 owner 集有序锁**先行**、后锁目标行（LOW-1，见
+        _guard_last_owner）；提升为 owner 不减计数，无需守卫锁。"""
         if role not in _VALID_MEMBER_ROLES:
             raise WorkspaceValidationError(f"invalid role: {role!r}")
         async with self._use_conn(conn) as c:
             async with c.transaction():
+                if role != "owner":
+                    await self._guard_last_owner(c, workspace_id, user_id)
                 cur = await c.execute(
                     """SELECT role FROM kb_workspace_members
                        WHERE workspace_id = %s AND user_id = %s FOR UPDATE""",
@@ -584,8 +588,6 @@ class WorkspaceDB:
                 if await cur.fetchone() is None:
                     raise WorkspaceNotFoundError(
                         f"member not found: {user_id}")
-                if role != "owner":
-                    await self._guard_last_owner(c, workspace_id, user_id)
                 cur = await c.execute(
                     """UPDATE kb_workspace_members SET role = %s
                        WHERE workspace_id = %s AND user_id = %s
@@ -597,9 +599,13 @@ class WorkspaceDB:
     async def remove_member(
         self, conn: Any | None = None, *, workspace_id: str, user_id: str,
     ) -> bool:
-        """移除成员（无该成员行 → False）；最后一个 owner → Validation。"""
+        """移除成员（无该成员行 → False）；最后一个 owner → Validation。
+
+        锁序：owner 集有序锁**先行**、后锁目标行（LOW-1，见
+        _guard_last_owner）。"""
         async with self._use_conn(conn) as c:
             async with c.transaction():
+                await self._guard_last_owner(c, workspace_id, user_id)
                 cur = await c.execute(
                     """SELECT 1 FROM kb_workspace_members
                        WHERE workspace_id = %s AND user_id = %s FOR UPDATE""",
@@ -607,7 +613,6 @@ class WorkspaceDB:
                 )
                 if await cur.fetchone() is None:
                     return False
-                await self._guard_last_owner(c, workspace_id, user_id)
                 await c.execute(
                     "DELETE FROM kb_workspace_members"
                     " WHERE workspace_id = %s AND user_id = %s",
@@ -627,27 +632,23 @@ class WorkspaceDB:
     async def _guard_last_owner(
         self, c: Any, workspace_id: str, user_id: str,
     ) -> None:
-        """user 当前是 owner 且域内 owner 数 ≤1 → 拒绝（移除/降级都不行——
-        工作区永远至少留一个 owner）。
+        """owner 集有序锁 + 最后 owner 保护（移除/降级都不行——工作区永远
+        至少留一个 owner）。
 
-        owner 行集整体 FOR UPDATE（user_id 定序）：并发双降级在锁上串行，
-        后到者重数 owner 数——否则两把单行锁各见 2 个 owner 同时放行，
-        工作区被清成零 owner。"""
-        cur = await c.execute(
-            """SELECT 1 FROM kb_workspace_members
-               WHERE workspace_id = %s AND user_id = %s AND role = 'owner'""",
-            (workspace_id, user_id),
-        )
-        if await cur.fetchone() is None:
-            return
+        锁序（规格审查 LOW-1）：**先**按 user_id 定序锁全部 owner 行、**再**
+        由调用方锁目标成员行——所有减 owner 的事务在同一有序锁集上串行，
+        两 owner 并发降级不再出现 T1/O1↔T2/O2 互等的死锁窗（败者收裸
+        psycopg 死锁错的问题一并消失）。目标是否 owner 由**锁内**行集判定
+        （不做另行无锁预读）：守卫时刻的全部 owner 行被持有到事务提交，
+        并发提升/移除竞态下计数也不可能被清零。"""
         cur = await c.execute(
             """SELECT user_id FROM kb_workspace_members
                WHERE workspace_id = %s AND role = 'owner'
                ORDER BY user_id FOR UPDATE""",
             (workspace_id,),
         )
-        owners = await cur.fetchall()
-        if len(owners) <= 1:
+        owners = {str(r["user_id"]) for r in await cur.fetchall()}
+        if user_id in owners and len(owners) <= 1:
             raise WorkspaceValidationError(
                 "cannot remove or demote the last owner")
 
