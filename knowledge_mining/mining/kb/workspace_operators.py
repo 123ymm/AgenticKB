@@ -29,6 +29,7 @@ topological_order 与 db_workspaces._ensure_acyclic 同语义（inputs 当边）
 """
 from __future__ import annotations
 
+import json
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -457,14 +458,26 @@ def _run_join(
 
 def _split_row(row: dict[str, Any], level: int) -> list[dict[str, Any]]:
     """单文档行展开（Task 7 质量收口 C 自 _run_split_sections 拆出）：载荷
-    三态——字符串 → 原样进「内容」列（章节空串、_id=文档_id:全文——计划
-    明文）；dict 且 sections 为列表 → 逐节展开（一行一节，_id=文档_id:章节
-    标题，同文档同级别同标题多节追加出现序后缀 #2/#3 防撞号——首个不带；
-    B.3：新行身份由来源文档和章节定位组合）；其余（非 dict 非字符串 /
-    dict 无 sections 键 / sections 非列表 / 无该级别有效节）→ 空列表，
-    由调用方记 no_section_docs。_source 继承文档来源。"""
+    三态——字符串先按 文档内容_JSON 契约尝试 json.loads（Task 13 e2e 集成
+    缺口修复：read_kb_dir 决策 4 把章节结构存成 canonical JSON 字符串——
+    dict 非六列型合法列值，列名本就承诺 JSON；解析出 dict 即走结构路径，
+    否则真实 kb_dir 源接 split_sections 只会产出每文档一行「全文」）；
+    解不出 dict 的字符串（纯文本/JSON 数组等）→ 原样进「内容」列（章节
+    空串、_id=文档_id:全文——计划明文）；dict 且 sections 为列表 → 逐节
+    展开（一行一节，_id=文档_id:章节标题，同文档同级别同标题多节追加
+    出现序后缀 #2/#3 防撞号——首个不带；B.3：新行身份由来源文档和章节
+    定位组合）；其余（非 dict 非字符串 / dict 无 sections 键 / sections
+    非列表 / 无该级别有效节）→ 空列表，由调用方记 no_section_docs。
+    _source 继承文档来源。"""
     file_name = row.get(_FILE_COL)
     payload = row.get(_DOC_CONTENT_COL)
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            payload = parsed
     if isinstance(payload, str):
         return [{
             "_id": f"{row['_id']}:全文",

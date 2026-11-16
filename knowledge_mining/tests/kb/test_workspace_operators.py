@@ -722,6 +722,34 @@ def test_split_sections_string_payload_to_content_column() -> None:
     assert quality == {"no_section_docs": []}
 
 
+def test_split_sections_json_string_payload_expands() -> None:
+    """Task 13 e2e 集成缺口钉测：read_kb_dir 把 文档内容_JSON 存成 canonical
+    JSON 字符串（Task 5 决策 4——dict 非六列型合法列值）——字符串载荷解析出
+    dict 时必须走章节展开（否则真实 kb_dir 源接 split_sections 只会产出每
+    文档一行「全文」，拆章节算子对真实来源不可达）；解不出 dict 的字符串
+    （纯文本 / JSON 数组等）仍走全文路径（与上一用例同语义）。"""
+    body = {"document_id": "d9", "title": "产品.md", "sections": [
+        {"level": 1, "title": "基本属性", "text": "属性段"},
+        {"level": 1, "title": "技术规格", "text": "规格段"},
+    ]}
+    ds = {"kind": "table", "cols": ["文件", "文档内容_JSON"],
+          "rows": [
+              {"_id": "d9", "_source": "kb1//产品.md", "文件": "产品.md",
+               "文档内容_JSON": json.dumps(
+                   body, ensure_ascii=False, separators=(",", ":"))},
+              {"_id": "a1", "_source": "s2", "文件": "数组.md",
+               "文档内容_JSON": "[1, 2]"},
+          ]}
+    outputs, quality = run_operator("split_sections", {"level": 1}, [ds])
+    rows = outputs["main"]["rows"]
+    assert [r["_id"] for r in rows] == ["d9:基本属性", "d9:技术规格",
+                                        "a1:全文"]
+    assert rows[0]["章节"] == "基本属性" and rows[0]["内容"] == "属性段"
+    assert rows[1]["内容"] == "规格段"
+    assert rows[2]["章节"] == "" and rows[2]["内容"] == "[1, 2]"
+    assert quality == {"no_section_docs": []}
+
+
 def test_split_sections_duplicate_titles_get_occurrence_suffix() -> None:
     """M1：同文档同级别同标题多节——_id 追加出现序后缀防撞号（B.3：新行
     身份由来源文档和章节定位组合；首个不带后缀，第二个起 #2/#3）。"""
