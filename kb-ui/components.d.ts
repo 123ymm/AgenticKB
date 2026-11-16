@@ -54,6 +54,7 @@ declare module 'vue' {
     ElLink: typeof import('element-plus/es')['ElLink']
     ElOption: typeof import('element-plus/es')['ElOption']
     ElPagination: typeof import('element-plus/es')['ElPagination']
+    ElPopover: typeof import('element-plus/es')['ElPopover']
     ElProgress: typeof import('element-plus/es')['ElProgress']
     ElRadio: typeof import('element-plus/es')['ElRadio']
     ElRadioButton: typeof import('element-plus/es')['ElRadioButton']
@@ -127,6 +128,8 @@ declare module 'vue' {
     WorkflowOperatorNodeBase: typeof import('./src/components/workflow/WorkflowOperatorNodeBase.vue')['default']
     WorkflowValidationPanel: typeof import('./src/components/mining/workflow/WorkflowValidationPanel.vue')['default']
     WorkflowVersionPreview: typeof import('./src/components/mining/workflow/WorkflowVersionPreview.vue')['default']
+    WorkspaceOutputTable: typeof import('./src/components/workspaces/WorkspaceOutputTable.vue')['default']
+    WorkspaceStepFlow: typeof import('./src/components/workspaces/WorkspaceStepFlow.vue')['default']
     YamlEditor: typeof import('./src/components/common/YamlEditor.vue')['default']
   }
   export interface GlobalDirectives {
