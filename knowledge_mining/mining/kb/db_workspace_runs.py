@@ -12,7 +12,10 @@ upsert_binding / insert_export 五个，首参可选 conn，注入时嵌套 tran
 （Conflict 属图乐观锁，本层无此语义，仅为服务层统一 import 面而
 re-export）。
 
-机制权威 = docs/superpowers/plans/2026-11-16-workbench-mvp.md Task 3：
+机制权威 = docs/superpowers/plans/2026-11-16-workbench-mvp.md Task 3
+（Task 9 导出交付面增量：get_export_by_request / reset_failed_export /
+get_binding / upsert_binding(exported_at) / mark_export_result
+(target_artifact_id)——读与终态回写均直连 pool，导出编排归服务层）：
 - try_start_guard 照 db_compile_inputs.try_start_guard 三段式：单事务
   ``pg_advisory_xact_lock(hashtext(workspace_id))`` 内 ①查在飞（queued/
   running）②工作区存在·active ③INSERT queued。**graph_snapshot_json 随
@@ -538,11 +541,15 @@ class WorkspaceRunDB:
         self, conn: Any | None = None, workspace_id: str = "",
         node_id: str = "", port_id: str = "", artifact_id: str = "",
         artifact_kind: str = "", last_run_id: str | None = None,
-        updated_by: str = "",
+        updated_by: str = "", exported_at: str | None = None,
     ) -> dict[str, Any]:
         """port→artifact 导出去处绑定：PK 冲突即更新 artifact/last_run_id/
         last_exported_at（保留首插 created_by——绑定关系不换人，只换目标）。
-        updated_by 仅首插落 created_by（表无审计列，同 upsert_source 口径）。"""
+        updated_by 仅首插落 created_by（表无审计列，同 upsert_source 口径）。
+        exported_at（Task 9）：显式传入时落 last_exported_at——导出事务内
+        传 ``SELECT now()`` 值，与同事务制品行 updated_at（now() 写入）同钟
+        等值，人工改动门禁（updated_at > last_exported_at）不因 Python/DB
+        双钟偏差误伤。"""
         for label, value in (("workspace_id", workspace_id),
                              ("node_id", node_id), ("port_id", port_id),
                              ("artifact_id", artifact_id),
@@ -565,9 +572,26 @@ class WorkspaceRunDB:
                         last_exported_at = EXCLUDED.last_exported_at
                     RETURNING {_BINDING_COLUMNS}""",
                 (workspace_id, node_id, port_id, artifact_id, artifact_kind,
-                 last_run_id, _utcnow(), updated_by, _utcnow()),
+                 last_run_id, exported_at or _utcnow(), updated_by,
+                 _utcnow()),
             )
             return dict(await cur.fetchone())  # type: ignore[arg-type]
+
+    async def get_binding(
+        self, *, workspace_id: str, node_id: str, port_id: str,
+    ) -> dict[str, Any] | None:
+        """绑定行读（Task 9 导出门禁 c：artifact.updated_at 对比
+        binding.last_exported_at 的入口）。"""
+        async with self._use_conn(None) as c:
+            cur = await c.execute(
+                f"""SELECT {_BINDING_COLUMNS}
+                    FROM kb_workspace_output_bindings
+                    WHERE workspace_id = %s AND node_id = %s
+                      AND port_id = %s""",
+                (workspace_id, node_id, port_id),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
     async def insert_export(
         self, conn: Any | None = None, *, request_id: str,
@@ -622,10 +646,13 @@ class WorkspaceRunDB:
         self, export_id: str, status: str,
         result_json: dict[str, Any] | None = None,
         error: str | None = None,
+        target_artifact_id: str | None = None,
     ) -> bool:
         """导出结果回写：pending → 终态一次性（守卫 WHERE status='pending'
         → 重放/并发回写 rowcount=0 → False）；succeeded 必带 result_json、
-        failed 必带 error 文本（配对校验，不带即 Validation）。"""
+        failed 必带 error 文本（配对校验，不带即 Validation）。
+        target_artifact_id（Task 9）：provided 才覆写——导出登记行先建
+        （request_id 幂等占位），制品在逐 item 事务里创建，终态回写时补账。"""
         if status not in _VALID_EXPORT_TERMINAL:
             raise WorkspaceValidationError(
                 f"status must be one of {list(_VALID_EXPORT_TERMINAL)}:"
@@ -641,9 +668,40 @@ class WorkspaceRunDB:
                 """UPDATE kb_workspace_exports
                    SET status = %s,
                        result_json = COALESCE(%s::jsonb, result_json),
-                       error = %s
+                       error = %s,
+                       target_artifact_id = COALESCE(%s, target_artifact_id)
                    WHERE id = %s AND status = 'pending'""",
                 (status, _json(result_json) if result_json else None,
-                 error, export_id),
+                 error, target_artifact_id, export_id),
+            )
+            return bool(cur.rowcount or 0)
+
+    async def get_export_by_request(
+        self, *, request_id: str,
+    ) -> dict[str, Any] | None:
+        """request_id 幂等读（Task 9 导出入口）：命中 succeeded → 服务层
+        原样回放 result_json（duplicate）；pending → 409；failed → 复用该行
+        重跑（reset_failed_export 回 pending）。"""
+        async with self._use_conn(None) as c:
+            cur = await c.execute(
+                f"""SELECT {_EXPORT_COLUMNS} FROM kb_workspace_exports
+                    WHERE request_id = %s""",
+                (request_id,),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def reset_failed_export(self, *, export_id: str) -> bool:
+        """failed 行复用重跑（67号 Task 9 拍板）：状态回 pending 并清
+        error/result_json/target_artifact_id——同 request_id 重试不撞
+        UNIQUE，账记在同一行。守卫 WHERE status='failed'：并发重试只有
+        一个赢（False 方=已被翻 pending，由服务层翻 409）。"""
+        async with self._use_conn(None) as c:
+            cur = await c.execute(
+                """UPDATE kb_workspace_exports
+                   SET status = 'pending', error = NULL, result_json = NULL,
+                       target_artifact_id = NULL
+                   WHERE id = %s AND status = 'failed'""",
+                (export_id,),
             )
             return bool(cur.rowcount or 0)

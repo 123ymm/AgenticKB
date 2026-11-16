@@ -581,3 +581,51 @@ async def test_insert_export_idempotent_and_result(async_pool) -> None:
     by_id = {r["status"]: r for r in rows}
     assert by_id["succeeded"]["result_json"] == {"artifact_id": "art_x"}
     assert "KB 可见性校验失败" in by_id["failed"]["error"]
+
+
+async def test_export_read_reset_and_binding_helpers(async_pool) -> None:
+    """Task 9 导出配套面：get_export_by_request / reset_failed_export（仅
+    failed 行可回 pending，回退即清 error/result/target）/ get_binding /
+    upsert_binding 显式 exported_at / mark_export_result 带
+    target_artifact_id（provided 才覆写）。"""
+    rdb, _, ws, owner = await _seed(async_pool)
+    req = f"req-{uuid.uuid4().hex[:12]}"
+
+    assert await rdb.get_export_by_request(request_id=req) is None
+    row, created = await rdb.insert_export(
+        None, request_id=req, workspace_id=ws["id"], node_id="B",
+        port_id="main", mapping_json={}, created_by=owner)
+    assert created is True
+    got = await rdb.get_export_by_request(request_id=req)
+    assert got["id"] == row["id"] and got["status"] == "pending"
+
+    # reset 仅对 failed 行生效：pending/不存在 → False
+    assert await rdb.reset_failed_export(export_id=row["id"]) is False
+    assert await rdb.reset_failed_export(export_id="wse_missing") is False
+    assert await rdb.mark_export_result(
+        row["id"], "failed", error="boom") is True
+    assert await rdb.reset_failed_export(export_id=row["id"]) is True
+    got = await rdb.get_export_by_request(request_id=req)
+    assert got["status"] == "pending"
+    assert got["error"] is None and got["result_json"] is None
+    assert got["target_artifact_id"] is None
+
+    assert await rdb.mark_export_result(
+        row["id"], "succeeded", result_json={"exports": []},
+        target_artifact_id="art_z") is True
+    got = await rdb.get_export_by_request(request_id=req)
+    assert got["target_artifact_id"] == "art_z"
+    assert got["result_json"] == {"exports": []}
+
+    # binding 读 + 显式 exported_at（导出事务内 now() 同钟落账）
+    assert await rdb.get_binding(
+        workspace_id=ws["id"], node_id="B", port_id="main") is None
+    binding = await rdb.upsert_binding(
+        None, ws["id"], "B", "main", artifact_id="art_1",
+        artifact_kind="table", updated_by=owner,
+        exported_at="2026-11-16T01:02:03+00:00")
+    assert binding["last_exported_at"] == "2026-11-16T01:02:03+00:00"
+    got_b = await rdb.get_binding(
+        workspace_id=ws["id"], node_id="B", port_id="main")
+    assert got_b["artifact_id"] == "art_1"
+    assert got_b["last_exported_at"] == "2026-11-16T01:02:03+00:00"

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""KB 知识制品工作台服务层（67号 MVP Task 8）——权限反探测 + CRUD/图/来源/
-运行面/成员编排。
+"""KB 知识制品工作台服务层（67号 MVP Task 8/9）——权限反探测 + CRUD/图/
+来源/运行面/成员编排 + 导出交付。
 
 机制权威 = docs/superpowers/plans/2026-11-16-workbench-mvp.md Task 8：
 
@@ -25,15 +25,52 @@
 - kb_dir 即读即冻（Task 5 决策 3）：read_kb_dir 与 upsert_source 共用一条
   pool 连接——权限判定与冻结落库同连接（upsert 自带事务；batch_no+1 与
   manifest 原子）。执行不重读 KB；重接入=重新 PUT source 触发重读。
+
+Task 9 导出交付（export_drafts，机制权威=计划文档 Task 9）：
+
+- **request_id 幂等三态**：succeeded → 原样回放 result_json（响应 duplicate
+  标记，200 语义）；pending → 409 export_in_progress；failed → **复用该行
+  重跑**（reset 回 pending——拍板：新导出新 id 会撞 request_id UNIQUE，
+  行保留账记同处）。幂等行**先建后执行**（偏离计划字面的「exports 行随首
+  item 事务」）：多 item 请求首 item 可能门禁全败不进事务，行不建则终态
+  无处回写；且先建行让并发重放在任何 item 落地前即被 409 拦截（不产生
+  双份制品副作用）。
+- **逐 item 门禁（任一不过→该 item 失败不阻断其余）**：a) 输出存在且
+  is_current 且非 stale 且 row_count>0；b) 图上溯 kb_dir 血缘对 config.kb_id
+  重验 KB 可见性（read_kb_dir 同款谓词 KbDB.is_visible——执行不重读 KB 的
+  撤权检查移到这里，67号 §7.1 后半句）；c) 绑定存在且制品 updated_at >
+  binding.last_exported_at → artifact_modified_since_export（防覆盖人工
+  改动；owner 须同域有效用户）。
+- **单 item 单事务（手法铁律）**：db_artifacts 各方法自开事务不能串调凑
+  单事务——service 内联 pool.connection() 事务调 conn 级内核（Task 9b
+  提炼）：创建制品+owner 成员行+操作者 editor 行（owner≠操作者时）+建列
+  （样本推断六列型）+rev0 行（row_key=hex(_id)；provenance=[{"_source",
+  "workspace":{id,node,port,run_id}}] 数组口径）+upsert_binding 同事务。
+  **同钟口径**：制品 updated_at（DB now() 写入）与 binding.last_exported_at
+  （同事务 SELECT now() 显式传入）取同一事务时间戳——人工改动门禁不因
+  Python/DB 双钟偏差误伤（无改动重导出恒等放行= B.5 重写草稿语义：删除
+  重插 rev0，provenance 不拼接、不解除绑定、不新建制品）。
+- 终态回写：任一 item 成功 → exports 行 succeeded+result_json（部分成功
+  是合法态，200+逐项 status）；全部失败 → 行 failed 后抛 export_all_failed
+  （消息带逐项失败码）。不写 kb_artifact_batches（67号 §4.3）；不发布不
+  拨指针无 MCP 开放。
 """
 from __future__ import annotations
 
 import json
+import logging
+from datetime import datetime
 from typing import Any
 
 import anyio
 
-from knowledge_mining.mining.kb.db_artifacts import ArtifactDB
+from knowledge_mining.mining.kb.db import KbDB
+from knowledge_mining.mining.kb.db_artifacts import (
+    ArtifactDB,
+    ArtifactError,
+    _encode_key_parts,
+    _json as _artifact_json,
+)
 from knowledge_mining.mining.kb.db_workspaces import (
     WorkspaceConflictError,
     WorkspaceDB,
@@ -42,12 +79,18 @@ from knowledge_mining.mining.kb.db_workspaces import (
     WorkspaceValidationError,
 )
 from knowledge_mining.mining.kb.db_workspace_runs import WorkspaceRunDB
+from knowledge_mining.mining.kb.services.artifact_import_service import (
+    _infer_column_type,
+)
 from knowledge_mining.mining.kb.workspace_executor import WorkspaceExecutor
 from knowledge_mining.mining.kb.workspace_sources import (
     WorkspacePermissionError,
+    _SingleConnPool,
     parse_excel,
     read_kb_dir,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "WorkspaceForbiddenError",
@@ -487,12 +530,282 @@ class WorkspaceService:
         port_id: str,
     ) -> dict[str, Any]:
         """试跑（design 角色；不建 run 不写库——执行器口径）。port_id 须是
-        节点声明的输出端口（结果键校验，给 URL 端口段以语义）。"""
+        节点声明的输出端口（结果键校验，给 URL 端口段以语义）；**空
+        outputs 边缘同拦**（Task 9 补口：无声明端口与端口不存在同面 →
+        404 output_not_found，与导出门禁码族一致）。"""
         await self._require(user, workspace_id, *ROLE_DESIGN)
         result = await self._executor.trial_node(workspace_id, node_id)
         outputs = result.get("outputs")
-        if isinstance(outputs, dict) and outputs \
-                and port_id not in outputs:
-            raise WorkspaceValidationError(
-                f"port not found: {port_id}", code="port_not_found")
+        if not isinstance(outputs, dict) or port_id not in outputs:
+            raise WorkspaceNotFoundError(
+                f"port not found: {port_id}", code="output_not_found")
         return {"node_id": node_id, "port_id": port_id, **result}
+
+    # ------------------------------------------------------------ 导出交付
+
+    @staticmethod
+    def _kb_dir_lineage(
+        nodes: list[dict[str, Any]], sources: dict[str, dict[str, Any]],
+        node_id: str,
+    ) -> list[str]:
+        """图上溯 node_id（含自身）全部 kb_dir 来源的 config.kb_id——执行
+        不重读 KB（Task 5 决策 3），撤权检查移至导出门禁的血缘输入。图
+        已保证无环（put_graph 校验），BFS 自然终止。"""
+        by_id = {str(n.get("id")): n for n in nodes}
+        seen = {node_id}
+        queue = [node_id]
+        while queue:
+            node = by_id.get(queue.pop())
+            if node is None:
+                continue
+            for ref in node.get("inputs") or []:
+                producer = str(ref).split(":", 1)[0]
+                if producer not in seen:
+                    seen.add(producer)
+                    queue.append(producer)
+        kb_ids: list[str] = []
+        for nid in seen:
+            row = sources.get(nid)
+            if row is None or str(row.get("connector")) != "kb_dir":
+                continue
+            kb_id = str((row.get("config") or {}).get("kb_id") or "")
+            if kb_id and kb_id not in kb_ids:
+                kb_ids.append(kb_id)
+        return kb_ids
+
+    @staticmethod
+    def _build_export_table(
+        dataset: dict[str, Any], *, workspace_id: str, node_id: str,
+        port_id: str, run_id: Any,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """输出数据集 → 制品列定义 + rev0 行（导出专用口径）：
+
+        - 列：cols 全量样本推断六列型（_infer_column_type——excel 冻结解析
+          同源），column_id=c001 序（artifact_import create_specs 同构）；
+        - 行：row_key=hex(_id)（与手工行增/追加导入的主键编码同构）；data
+          只含 cols（_id 进 row_key、_source 进 provenance）；provenance=
+          [{"_source", "workspace":{id,node,port,run_id}}]——数组口径
+          （db_artifacts 既有不变量，UPSERT 拼接依赖数组）；ordinal 按序；
+          data/provenance/conflicts 已 _json 编码（_insert_rows_in_conn 的
+          flat 行契约）。
+        """
+        cols = [str(c) for c in (dataset.get("cols") or [])]
+        rows = list(dataset.get("rows") or [])
+        columns: list[dict[str, Any]] = []
+        for position, col in enumerate(cols, start=1):
+            ctype, enum = _infer_column_type([r.get(col) for r in rows])
+            columns.append({
+                "column_id": f"c{position:03d}", "column_name": col,
+                "column_type": ctype, "enum_values": enum or None,
+                "is_primary_key": False, "is_indexed": False,
+                "alias": [], "ordinal": position,
+            })
+        lineage = {"id": workspace_id, "node": node_id, "port": port_id,
+                   "run_id": run_id}
+        flat: list[dict[str, Any]] = []
+        for ordinal, row in enumerate(rows, start=1):
+            flat.append({
+                "row_key": _encode_key_parts([str(row["_id"])]),
+                "data": _artifact_json({c: row.get(c) for c in cols}),
+                "provenance": _artifact_json([
+                    {"_source": str(row.get("_source") or ""),
+                     "workspace": lineage}]),
+                "conflicts": _artifact_json({}), "ordinal": ordinal,
+            })
+        return columns, flat
+
+    async def _export_one(
+        self, ws: dict[str, Any], user: dict[str, Any], item: dict[str, Any],
+        outputs: dict[str, dict[str, Any]], graph_nodes: list[dict[str, Any]],
+        sources: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """单 item 门禁+单事务落制品（口径见模块 docstring Task 9 节）。
+
+        返回逐项结果 {node_id, port_id, artifact_id, name, status, error?}；
+        门禁/事务失败 → status=failed + error=机器码，不抛（编排层聚账）。"""
+        workspace_id = str(ws["id"])
+        operator = _uid(user)
+        node_id = str(item.get("node_id") or "")
+        port_id = str(item.get("port_id") or "")
+        name = str(item.get("artifact_name") or "").strip()
+        result: dict[str, Any] = {"node_id": node_id, "port_id": port_id,
+                                  "artifact_id": None, "name": name,
+                                  "status": "failed"}
+        try:
+            if not node_id or not port_id or not name or len(name) > 200:
+                raise WorkspaceValidationError("invalid export item")
+            # 门禁 a：输出存在且 is_current 且非 stale 且 row_count>0
+            out = outputs.get(f"{node_id}:{port_id}")
+            if out is None:
+                raise WorkspaceValidationError(
+                    f"output not found: {node_id}:{port_id}",
+                    code="output_not_found")
+            if out.get("stale_since_run"):
+                raise WorkspaceValidationError(
+                    f"output stale since {out['stale_since_run']}",
+                    code="stale_output")
+            if not int(out.get("row_count") or 0):
+                raise WorkspaceValidationError(
+                    "output has no rows", code="empty_output")
+            # owner：默认工作区 owner；指定时须同域有效用户
+            owner_id = str(item.get("owner_user_id") or "") \
+                or str(ws["owner_user_id"])
+            if await self._adb.get_user_status(owner_id) != "active" \
+                    or not await self._adb.user_in_domain(
+                        owner_id, str(ws["domain_id"])):
+                raise WorkspaceValidationError(
+                    f"invalid owner user: {owner_id}",
+                    code="invalid_owner_user")
+            # 门禁 b：kb_dir 血缘撤权重验（read_kb_dir 同款谓词）
+            kb_ids = self._kb_dir_lineage(graph_nodes, sources, node_id)
+            if kb_ids:
+                async with self._pool.connection() as conn:
+                    kbdb = KbDB(_SingleConnPool(conn))
+                    for kb_id in kb_ids:
+                        if not await kbdb.is_visible(
+                                kb_id=kb_id, user_id=operator):
+                            raise WorkspaceValidationError(
+                                f"kb not readable: {kb_id}",
+                                code="source_permission_revoked")
+            # 门禁 c：绑定+人工改动（updated_at 晚于上次导出即阻断）
+            binding = await self._rdb.get_binding(
+                workspace_id=workspace_id, node_id=node_id, port_id=port_id)
+            artifact: dict[str, Any] | None = None
+            expected_ts: Any = None
+            if binding is not None:
+                artifact = await self._adb.get_artifact(
+                    str(binding["artifact_id"]))
+            if artifact is not None:
+                expected_ts = artifact["updated_at"]
+                last_exported = binding.get("last_exported_at")
+                if isinstance(last_exported, str) and last_exported:
+                    try:
+                        last_ts = datetime.fromisoformat(last_exported)
+                    except ValueError:
+                        last_ts = None
+                    if last_ts is None or artifact["updated_at"] > last_ts:
+                        raise WorkspaceValidationError(
+                            "artifact modified since last export",
+                            code="artifact_modified_since_export")
+            # 单 item 单事务：conn 级内核串装（手法铁律，见模块 docstring）
+            async with self._pool.connection() as conn:
+                async with conn.transaction():
+                    cur = await conn.execute("SELECT now() AS ts")
+                    txn_now = (await cur.fetchone())["ts"]
+                    if artifact is None:  # 首导出（或绑定指向的制品已删）
+                        artifact = await ArtifactDB._create_artifact_in_conn(
+                            conn, domain_id=str(ws["domain_id"]),
+                            kind="table", title=name, description="",
+                            owner_user_id=owner_id, visibility="private")
+                    else:  # B.5 重写草稿：并发人工改动由锁内令牌校验兜底
+                        await self._adb._assert_expected_updated_at(
+                            conn, artifact["artifact_id"], expected_ts)
+                    if operator != str(artifact["owner_user_id"]):
+                        await ArtifactDB._upsert_member_in_conn(
+                            conn, artifact["artifact_id"], operator, "editor")
+                    dataset = out.get("content_inline")
+                    if not isinstance(dataset, dict):
+                        raise WorkspaceValidationError(
+                            "output dataset unreadable", code="empty_output")
+                    columns, flat = self._build_export_table(
+                        dataset, workspace_id=workspace_id, node_id=node_id,
+                        port_id=port_id, run_id=out.get("run_id"))
+                    await ArtifactDB._replace_columns_in_conn(
+                        conn, artifact["artifact_id"], columns)
+                    await ArtifactDB._delete_rows_in_conn(
+                        conn, artifact["artifact_id"], 0)
+                    await ArtifactDB._insert_rows_in_conn(
+                        conn, artifact["artifact_id"], 0, flat, operator)
+                    await self._rdb.upsert_binding(
+                        conn, workspace_id=workspace_id, node_id=node_id,
+                        port_id=port_id,
+                        artifact_id=str(artifact["artifact_id"]),
+                        artifact_kind="table",
+                        last_run_id=out.get("run_id"), updated_by=operator,
+                        exported_at=txn_now.isoformat())
+            return {**result, "artifact_id": str(artifact["artifact_id"]),
+                    "status": "succeeded"}
+        except WorkspaceValidationError as exc:
+            return {**result, "error": str(exc.code or "workspace_validation")}
+        except ArtifactError as exc:
+            code = ("artifact_modified_since_export"
+                    if str(exc.code) == "stale_artifact" else "export_failed")
+            logger.warning("workspace export item failed (%s): %s",
+                           node_id, exc.code)
+            return {**result, "error": code}
+        except Exception as exc:  # noqa: BLE001 —— 单 item 失败不阻断其余
+            logger.warning("workspace export item crashed: %s:%s %r",
+                           node_id, port_id, exc)
+            return {**result, "error": "export_failed"}
+
+    async def export_drafts(
+        self, workspace_id: str, user: dict[str, Any], *, request_id: str,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """导出交付入口（design 角色；机制见模块 docstring Task 9 节）。"""
+        if not isinstance(request_id, str) or not request_id:
+            raise WorkspaceValidationError("request_id must be non-empty")
+        if not isinstance(items, list) or not items:
+            raise WorkspaceValidationError(
+                "items must be a non-empty list")
+        ws, _role = await self._require(user, workspace_id, *ROLE_DESIGN)
+        outputs = await self._rdb.get_current_outputs(workspace_id)
+        graph_nodes = list((ws.get("graph_json") or {}).get("nodes") or [])
+        sources = {str(r["node_id"]): r for r in await self._db.list_sources(
+            workspace_id=workspace_id)}
+
+        # request_id 幂等三态 + 行先建后执行（见模块 docstring）。
+        # created=True（本请求刚建行）直接执行——pending 三态判定只对
+        # 既有行生效，否则自建行会把自己判成在飞。
+        export_row = await self._rdb.get_export_by_request(
+            request_id=request_id)
+        created = False
+        if export_row is None:
+            first = outputs.get(
+                f"{items[0].get('node_id')}:{items[0].get('port_id')}")
+            export_row, created = await self._rdb.insert_export(
+                None, request_id=request_id, workspace_id=workspace_id,
+                node_id=str(items[0].get("node_id") or ""),
+                port_id=str(items[0].get("port_id") or ""),
+                snapshot_run_id=(first or {}).get("run_id"),
+                mapping_json={"items": [
+                    {"node_id": str(i.get("node_id") or ""),
+                     "port_id": str(i.get("port_id") or ""),
+                     "artifact_name": str(i.get("artifact_name") or ""),
+                     "owner_user_id": str(i.get("owner_user_id") or "")}
+                    for i in items]},
+                created_by=_uid(user))
+        if not created:
+            status = str(export_row["status"])
+            if status == "succeeded":
+                payload = dict(export_row.get("result_json") or {})
+                return {**payload, "duplicate": True}
+            if status == "pending":
+                raise WorkspaceConflictError(
+                    f"export in progress: {request_id}",
+                    code="export_in_progress")
+            if not await self._rdb.reset_failed_export(
+                    export_id=str(export_row["id"])):
+                raise WorkspaceConflictError(
+                    f"export in progress: {request_id}",
+                    code="export_in_progress")
+
+        results = [
+            await self._export_one(ws, user, item, outputs, graph_nodes,
+                                   sources)
+            for item in items
+        ]
+        succeeded = [r for r in results if r["status"] == "succeeded"]
+        if not succeeded:
+            codes = ",".join(sorted({
+                str(r.get("error") or "export_failed") for r in results}))
+            await self._rdb.mark_export_result(
+                str(export_row["id"]), "failed",
+                error=f"export_all_failed: {codes}")
+            raise WorkspaceValidationError(
+                f"export_all_failed: {codes}", code="export_all_failed")
+        await self._rdb.mark_export_result(
+            str(export_row["id"]), "succeeded",
+            result_json={"exports": results},
+            target_artifact_id=str(succeeded[0]["artifact_id"]))
+        return {"exports": results}

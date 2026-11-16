@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""KB 知识制品工作台 REST 路由 —— /api/workspaces（67号 §5.5 / Task 8）。
+"""KB 知识制品工作台 REST 路由 —— /api/workspaces（67号 §5.5 / Task 8/9）。
 
-十八端点：工作区 CRUD（DELETE=归档）/ 成员四端点（owner-only+admin 旁路）/
+十九端点：工作区 CRUD（DELETE=归档）/ 成员四端点（owner-only+admin 旁路）/
 图读·写（乐观锁 409 graph_conflict / 校验环 422 graph_invalid）/ 来源三端点
 （kb_dir 即读即冻 + excel multipart + 删）/ 运行四端点（start 202·cancel 幂等）/
-当前输出读 / 单口试跑。导出端点归 Task 9。
+当前输出读 / 单口试跑（空 outputs→404 output_not_found，Task 9 补口）/
+导出交付（POST /exports，Task 9：幂等 request_id + 单事务私有草稿）。
 
 薄 handler + _map_error 错误翻译（照 routes/artifacts._map_error 风格）：
 业务与权限全部在 WorkspaceService（见 workspace_service.py 模块 docstring 的
@@ -24,6 +25,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from knowledge_mining.mining.kb.auth import current_user
@@ -95,6 +97,23 @@ class MemberPatch(BaseModel):
     role: str = Field(pattern="^(owner|editor|viewer)$")
 
 
+class ExportItem(BaseModel):
+    """单导出项：artifact_name 1..200（制品标题）；owner_user_id 缺省=
+    工作区 owner（须同域有效用户——服务层逐项校验，不过该项不阻断其余）。"""
+    node_id: str = Field(min_length=1, max_length=200)
+    port_id: str = Field(min_length=1, max_length=200)
+    artifact_name: str = Field(min_length=1, max_length=200)
+    owner_user_id: str | None = Field(default=None,
+                                      min_length=1, max_length=128)
+
+
+class ExportCreate(BaseModel):
+    """request_id = 幂等键（重放回放既有结果标 duplicate；在飞 409；
+    failed 复用行重跑——机制见 workspace_service.Task 9 节）。"""
+    request_id: str = Field(min_length=1, max_length=200)
+    items: list[ExportItem] = Field(min_length=1, max_length=50)
+
+
 # ---------------------------------------------------------------- helpers
 
 #: WorkspaceError.code → HTTP 状态（服务层打码后的码表；未收录回落 400，
@@ -105,6 +124,7 @@ _WS_HTTP_STATUS: dict[str, int] = {
     "member_not_found": 404,
     "source_not_found": 404,
     "run_not_found": 404,
+    "output_not_found": 404,  # 试跑端口不存在（Task 9 补口：空 outputs 同面）
     # 403：工作区有权但角色不足 / 来源 KB 无权（来源拍板见服务层 docstring）
     "workspace_forbidden": 403,
     "workspace_source_forbidden": 403,
@@ -113,11 +133,13 @@ _WS_HTTP_STATUS: dict[str, int] = {
     "graph_conflict": 409,
     "workspace_conflict": 409,
     "run_in_progress": 409,
+    "export_in_progress": 409,
     # 422：形态/词表/护栏族（消息带定位，走裸 detail 透传）
     "graph_invalid": 422,
     "invalid_scope": 422,
     "invalid_member_user": 422,
     "port_not_found": 422,
+    "export_all_failed": 422,  # 消息透传逐项失败码（服务层拼接）
     "workspace_validation": 422,
 }
 
@@ -127,11 +149,13 @@ _WS_MESSAGES: dict[str, str] = {
     "member_not_found": "成员不存在",
     "source_not_found": "来源不存在",
     "run_not_found": "运行不存在或无权限访问",
+    "output_not_found": "输出端口不存在或尚未执行",
     "workspace_forbidden": "角色权限不足",
     "workspace_source_forbidden": "无权读取来源知识库",
     "graph_conflict": "图已被他人修改（版本失配），请刷新后重试",
     "workspace_conflict": "工作区已被他人修改，请刷新后重试",
     "run_in_progress": "该工作区已有运行在飞，请等待完成或先取消",
+    "export_in_progress": "该导出请求正在处理中，请稍后重试",
 }
 
 
@@ -511,3 +535,26 @@ async def trial_node(
             port_id=port_id)
     except WorkspaceError as exc:
         raise _map_error(exc) from None
+
+
+# ----------------------------------------------------------------- 导出
+
+@router.post("/{workspace_id}/exports")
+async def create_export(
+    workspace_id: str,
+    body: ExportCreate,
+    user: dict[str, Any] = Depends(current_user),
+    svc: Any = Depends(get_workspace_service),
+):
+    """导出为私有表格制品草稿（幂等 request_id；机制见 workspace_service
+    Task 9 节）：首发/部分成功 201+逐项 status；幂等重放 200+duplicate；
+    在飞 409 export_in_progress；全部失败 422 export_all_failed（消息带
+    逐项失败码）。"""
+    try:
+        result = await svc.export_drafts(
+            workspace_id, user, request_id=body.request_id,
+            items=[item.model_dump() for item in body.items])
+    except WorkspaceError as exc:
+        raise _map_error(exc) from None
+    status = 200 if result.get("duplicate") else 201
+    return JSONResponse(status_code=status, content=result)

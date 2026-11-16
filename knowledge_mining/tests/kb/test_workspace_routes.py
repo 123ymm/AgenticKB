@@ -648,6 +648,18 @@ async def test_source_excel_bad_file_422_and_too_large_413(env, monkeypatch):
     assert r.status_code == 413
 
 
+async def test_source_excel_wrong_extension_422(env):
+    """Task 9 补口：非 .xlsx 后缀（.csv）→ 422 unsupported_file_type。"""
+    wid = await _create_ws(env)
+    r = await env.client.post(
+        f"/api/workspaces/{wid}/sources/excel",
+        files={"file": ("库存.csv", b"model,power\nP1,3000", "text/csv")},
+        data={"node_id": "sp"},
+    )
+    assert r.status_code == 422
+    assert "unsupported_file_type" in r.text
+
+
 # ----------------------------------------------------------------- 运行面
 
 async def test_run_start_202_subgraph_422_inflight_409_cancel(env):
@@ -720,15 +732,23 @@ async def test_trial_design_role_and_port_mismatch(env):
     env.ex.trial_results["f"] = {
         "outputs": {"main": {"kind": "table", "cols": ["a"], "rows": []}},
         "quality": {}, "trial": True, "input_rows": 3}
+    # 空 outputs 边缘（Task 9 补口）：无声明端口 → 404 output_not_found
+    env.ex.trial_results["e"] = {"quality": {}, "trial": True,
+                                 "input_rows": 0}
+    r = await env.client.post(
+        f"/api/workspaces/{wid}/outputs/e/main/trial")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "output_not_found"
     r = await env.client.post(
         f"/api/workspaces/{wid}/outputs/f/main/trial")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["trial"] is True and body["port_id"] == "main"
-    # 声明端口不存在 → 422
+    # 声明端口不存在 → 404 output_not_found（与导出门禁同码族）
     r = await env.client.post(
         f"/api/workspaces/{wid}/outputs/f/nope/trial")
-    assert r.status_code == 422
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "output_not_found"
     # viewer → 403；节点不存在 → 422
     env.db.members[(wid, "u-viewer")] = "viewer"
     env.holder["user"] = _user("u-viewer")
@@ -738,6 +758,71 @@ async def test_trial_design_role_and_port_mismatch(env):
     env.holder["user"] = _user("u-alice")
     r = await env.client.post(
         f"/api/workspaces/{wid}/outputs/ghost/main/trial")
+    assert r.status_code == 422
+
+
+# ----------------------------------------------------------------- 导出
+
+
+async def test_export_route_status_codes(env):
+    """POST /exports：201 首发成功 / 200 幂等重放（duplicate）/ 409
+    export_in_progress / 422 export_all_failed / items 空数组 422（pydantic）。
+    服务编排真库行为归 test_workspace_export.py；此处 stub 打路由翻译面。"""
+    wid = await _create_ws(env)
+    calls: list[dict] = []
+
+    async def fake_export(workspace_id, user, *, request_id, items):
+        calls.append({"wid": workspace_id, "request_id": request_id,
+                      "items": items})
+        if request_id == "r-dup":
+            return {"exports": [{"node_id": "s", "port_id": "main",
+                                 "artifact_id": "art_1", "name": "功率表",
+                                 "status": "succeeded"}],
+                    "duplicate": True}
+        if request_id == "r-busy":
+            raise WorkspaceConflictError("export in progress",
+                                         code="export_in_progress")
+        if request_id == "r-allbad":
+            raise WorkspaceValidationError(
+                "export_all_failed: stale_output,empty_output",
+                code="export_all_failed")
+        return {"exports": [{"node_id": "s", "port_id": "main",
+                             "artifact_id": "art_2", "name": "功率表",
+                             "status": "succeeded"}]}
+
+    env.svc.export_drafts = fake_export
+    body = {"request_id": "r-ok", "items": [
+        {"node_id": "s", "port_id": "main", "artifact_name": "功率表",
+         "owner_user_id": "u-bob"}]}
+
+    r = await env.client.post(f"/api/workspaces/{wid}/exports", json=body)
+    assert r.status_code == 201, r.text
+    assert r.json()["exports"][0]["artifact_id"] == "art_2"
+    assert calls[0]["wid"] == wid
+    assert calls[0]["items"][0]["owner_user_id"] == "u-bob"
+
+    r = await env.client.post(f"/api/workspaces/{wid}/exports", json={
+        **body, "request_id": "r-dup"})
+    assert r.status_code == 200 and r.json()["duplicate"] is True
+
+    r = await env.client.post(f"/api/workspaces/{wid}/exports", json={
+        **body, "request_id": "r-busy"})
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "export_in_progress"
+
+    r = await env.client.post(f"/api/workspaces/{wid}/exports", json={
+        **body, "request_id": "r-allbad"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "export_all_failed"
+
+    # items 空数组 / artifact_name 超长 → pydantic 422
+    r = await env.client.post(f"/api/workspaces/{wid}/exports", json={
+        "request_id": "r-empty", "items": []})
+    assert r.status_code == 422
+    r = await env.client.post(f"/api/workspaces/{wid}/exports", json={
+        "request_id": "r-long", "items": [
+            {"node_id": "s", "port_id": "main",
+             "artifact_name": "x" * 201}]})
     assert r.status_code == 422
 
 
