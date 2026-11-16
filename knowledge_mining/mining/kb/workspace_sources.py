@@ -53,7 +53,7 @@ from __future__ import annotations
 import io
 import json
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any, AsyncIterator
 
 from openpyxl import load_workbook
@@ -136,12 +136,14 @@ def _norm_dirs(directories: Any) -> list[str]:
 
 
 def _ensure_budget(payload: dict[str, Any]) -> None:
-    """冻结产物序列化预算：manifest（含内嵌 dataset）≤ 20MB。"""
+    """冻结产物序列化预算：manifest（含内嵌 dataset）≤ 20MB；超限错误带
+    实际字节数（Task 6 质量审查 LOW：无字节数无法判断超了多少）。"""
     encoded = json.dumps(payload, ensure_ascii=False, default=str)
-    if len(encoded.encode("utf-8")) > MAX_SERIALIZED_BYTES:
+    size = len(encoded.encode("utf-8"))
+    if size > MAX_SERIALIZED_BYTES:
         raise WorkspaceValidationError(
             "frozen manifest exceeds serialization budget"
-            f" {MAX_SERIALIZED_BYTES} bytes")
+            f" {MAX_SERIALIZED_BYTES} bytes: actual {size} bytes")
 
 
 # ------------------------------------------------------------ 文档底表
@@ -392,9 +394,11 @@ async def read_kb_dir(
 
 
 def _fallback_value(raw: Any) -> Any:
-    """cast 失败的原值兜底（决策 5）：datetime/date 归一 ISO（json 可序列
-    化），其余原样。"""
-    if isinstance(raw, (datetime, date)):
+    """cast 失败的原值兜底（决策 5）：datetime/date/time 归一 ISO（json
+    可序列化——time 值可过本预算闸（default=str）但 Task 6 起执行器侧的
+    canonical 序列化（无 default）会爆 TypeError，必须在此归一），其余
+    原样。"""
+    if isinstance(raw, (datetime, date, time)):
         return raw.isoformat()
     return raw
 

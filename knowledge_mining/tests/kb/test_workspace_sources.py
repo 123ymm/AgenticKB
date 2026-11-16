@@ -398,3 +398,30 @@ async def test_materialize_source_roundtrip_both_connectors(
     assert "重新接入" in str(ei.value)
     with pytest.raises(WorkspaceValidationError):
         ws.materialize_source({"connector": "excel"})
+
+
+# ------------------------------------------------- Task 6 携带小修（LOW）
+
+def test_fallback_value_normalizes_time_to_isoformat() -> None:
+    """Task 6 质量审查 LOW：datetime.time 可过预算闸（default=str）但在
+    canonical 序列化（无 default）爆 TypeError——兜底必须归一 ISO。"""
+    from datetime import datetime as dt
+    from datetime import time as dtime
+
+    assert ws._fallback_value(dtime(9, 30, 5)) == "09:30:05"
+    assert ws._fallback_value(dt(2026, 1, 2, 3, 4)) == "2026-01-02T03:04:00"
+    assert ws._fallback_value("x") == "x"
+    assert ws._fallback_value(None) is None
+
+
+def test_ensure_budget_error_carries_actual_bytes(monkeypatch) -> None:
+    """Task 6 质量审查 LOW：预算超限错误消息带实际字节数（无字节数无法
+    判断超了多少——排查冻结预算问题的唯一线索）。"""
+    monkeypatch.setattr(ws, "MAX_SERIALIZED_BYTES", 8)
+    payload = {"dataset": {"cols": ["列a"], "rows": []}}
+    with pytest.raises(WorkspaceValidationError) as ei:
+        ws._ensure_budget(payload)
+    expected = len(json.dumps(
+        payload, ensure_ascii=False, default=str).encode("utf-8"))
+    assert str(expected) in str(ei.value)
+    assert "8" in str(ei.value)
