@@ -269,11 +269,14 @@ class WorkspaceRunDB:
     async def update_progress(
         self, run_id: str, *, done_node: str | None,
         current_node: str | None, failed_rows: list[str] | None = None,
+        node_error: tuple[str, str] | None = None,
     ) -> bool:
         """progress_json 增量合并（FOR UPDATE 读改写——执行器单写者，行锁
         兜底并发）：done 追加去重；failed_rows 按节点并集去重（必须挂
         done_node——节点完结时点上报该节点的失败行账）；current_node 直写
-        （None=清空表示执行间隙）。run 不存在 → False。"""
+        （None=清空表示执行间隙）；node_error=(node_id, msg) 合并进
+        progress["node_errors"]（Task 6 执行器节点级失败账——分支 partial
+        的失败清单口径，不进 run.error 摘要）。run 不存在 → False。"""
         if failed_rows is None:
             failed_rows = []
         if done_node is not None \
@@ -288,6 +291,13 @@ class WorkspaceRunDB:
             raise WorkspaceValidationError(
                 "failed_rows requires done_node (failures are accounted"
                 " when the node completes)")
+        if node_error is not None:
+            err_nid, err_msg = node_error
+            if not isinstance(err_nid, str) or not err_nid \
+                    or not isinstance(err_msg, str) or not err_msg:
+                raise WorkspaceValidationError(
+                    "node_error must be a (node_id, message) tuple of"
+                    " non-empty strings")
 
         async with self._use_conn(None) as c:
             async with c.transaction():
@@ -313,6 +323,11 @@ class WorkspaceRunDB:
                                 merged.append(item)
                         progress["failed_rows"] = {
                             **failed_map, done_node: merged}
+                if node_error is not None:
+                    err_nid, err_msg = node_error
+                    errors = dict(progress.get("node_errors") or {})
+                    errors[err_nid] = err_msg
+                    progress["node_errors"] = errors
                 progress["current_node"] = current_node
                 await c.execute(
                     """UPDATE kb_workspace_runs SET progress_json = %s::jsonb
