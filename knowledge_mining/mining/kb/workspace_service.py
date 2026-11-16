@@ -34,7 +34,9 @@ Task 9 导出交付（export_drafts，机制权威=计划文档 Task 9）：
   行保留账记同处）。幂等行**先建后执行**（偏离计划字面的「exports 行随首
   item 事务」）：多 item 请求首 item 可能门禁全败不进事务，行不建则终态
   无处回写；且先建行让并发重放在任何 item 落地前即被 409 拦截（不产生
-  双份制品副作用）。
+  双份制品副作用）。**归属校验先于回放/重置**（审查 Medium-1）：request_id
+  全局唯一但行归属工作区——异工作区重放 404 反探测（不泄露他区制品/
+  节点元数据），reset 带 workspace_id 条件防异区翻 pending 借行执行。
 - **逐 item 门禁（任一不过→该 item 失败不阻断其余）**：a) 输出存在且
   is_current 且非 stale 且 row_count>0；b) 图上溯 kb_dir 血缘对 config.kb_id
   重验 KB 可见性（read_kb_dir 同款谓词 KbDB.is_visible——执行不重读 KB 的
@@ -705,8 +707,13 @@ class WorkspaceService:
                             conn, artifact["artifact_id"], operator, "editor")
                     dataset = out.get("content_inline")
                     if not isinstance(dataset, dict):
+                        # 防御分支（审查 Low-4）：content_inline 由 jsonb
+                        # 解析必为 dict（脏形态在 write_outputs 写库前已
+                        # 拦）——独立码名 invalid_output 便于区分脏数据与
+                        # 空输出（empty_output）。
                         raise WorkspaceValidationError(
-                            "output dataset unreadable", code="empty_output")
+                            "output dataset unreadable",
+                            code="invalid_output")
                     columns, flat = self._build_export_table(
                         dataset, workspace_id=workspace_id, node_id=node_id,
                         port_id=port_id, run_id=out.get("run_id"))
@@ -775,6 +782,13 @@ class WorkspaceService:
                      "owner_user_id": str(i.get("owner_user_id") or "")}
                     for i in items]},
                 created_by=_uid(user))
+        # 归属校验先于一切回放/重置（审查 Medium-1：request_id 全局唯一，
+        # 异工作区重放不得拿到他区 result_json、也不得把他区 failed 行翻
+        # pending 借行执行——404 反探测与族口径一致。覆盖入口查询与
+        # insert_export 并发回读两条来路；created=True 的新行必属本区）。
+        if not created and str(export_row["workspace_id"]) != workspace_id:
+            raise WorkspaceNotFoundError(
+                f"workspace not found: {workspace_id}")
         if not created:
             status = str(export_row["status"])
             if status == "succeeded":
@@ -785,7 +799,8 @@ class WorkspaceService:
                     f"export in progress: {request_id}",
                     code="export_in_progress")
             if not await self._rdb.reset_failed_export(
-                    export_id=str(export_row["id"])):
+                    export_id=str(export_row["id"]),
+                    workspace_id=workspace_id):
                 raise WorkspaceConflictError(
                     f"export in progress: {request_id}",
                     code="export_in_progress")

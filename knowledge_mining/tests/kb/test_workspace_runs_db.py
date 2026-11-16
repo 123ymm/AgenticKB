@@ -599,12 +599,20 @@ async def test_export_read_reset_and_binding_helpers(async_pool) -> None:
     got = await rdb.get_export_by_request(request_id=req)
     assert got["id"] == row["id"] and got["status"] == "pending"
 
-    # reset 仅对 failed 行生效：pending/不存在 → False
-    assert await rdb.reset_failed_export(export_id=row["id"]) is False
-    assert await rdb.reset_failed_export(export_id="wse_missing") is False
+    # reset 仅对「本工作区的 failed 行」生效：pending/不存在/异工作区 →
+    # False（审查 Medium-1：归属条件防跨工作区重置）
+    assert await rdb.reset_failed_export(
+        export_id=row["id"], workspace_id=ws["id"]) is False
+    assert await rdb.reset_failed_export(
+        export_id="wse_missing", workspace_id=ws["id"]) is False
     assert await rdb.mark_export_result(
         row["id"], "failed", error="boom") is True
-    assert await rdb.reset_failed_export(export_id=row["id"]) is True
+    assert await rdb.reset_failed_export(
+        export_id=row["id"], workspace_id="wsp_other") is False
+    got = await rdb.get_export_by_request(request_id=req)
+    assert got["status"] == "failed"  # 异工作区未翻动
+    assert await rdb.reset_failed_export(
+        export_id=row["id"], workspace_id=ws["id"]) is True
     got = await rdb.get_export_by_request(request_id=req)
     assert got["status"] == "pending"
     assert got["error"] is None and got["result_json"] is None

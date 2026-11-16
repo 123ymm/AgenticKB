@@ -492,3 +492,48 @@ async def test_export_permission_gates(async_pool) -> None:
         await _export(svc, ws, _ctx(viewer), f"req-{_hex(12)}",
                       [_item("s")])
     assert str(ei.value.code) == "workspace_forbidden"
+
+
+# ------------------------------------------------------------ 跨工作区回放
+
+
+async def test_export_cross_workspace_replay_404(async_pool) -> None:
+    """审查 Medium-1：request_id 全局唯一但归属工作区——异工作区重放 404
+    反探测（不回放他区 result_json、不把他区 failed 行翻 pending 借行执行）；
+    原工作区的结果与重试路径不受影响。"""
+    svc1, wdb1, rdb1, adb1, ws1, ctx1 = await _seed(async_pool)
+    svc2, wdb2, rdb2, adb2, ws2, ctx2 = await _seed(async_pool)
+    nodes = [_node("sp", "source"), _node("s", "select", inputs=("sp:main",))]
+    await _write_output(rdb1, wdb1, ws1, str(ctx1["id"]), nodes, "s",
+                        _products())
+
+    request_id = f"req-{_hex(12)}"
+    first = await _export(svc1, ws1, ctx1, request_id, [_item("s")])
+    art_id = first["exports"][0]["artifact_id"]
+
+    # 异工作区重放同 request_id → 404 反探测
+    with pytest.raises(WorkspaceNotFoundError):
+        await _export(svc2, ws2, ctx2, request_id, [_item("s")])
+
+    # 原结果不受影响：原工作区再重放仍 duplicate、同制品
+    replay = await _export(svc1, ws1, ctx1, request_id, [_item("s")])
+    assert replay["duplicate"] is True
+    assert replay["exports"][0]["artifact_id"] == art_id
+
+    # failed 行同样不可被异工作区 reset：ws1 造 failed（坏 owner 全败）→
+    # ws2 同 request_id → 404；ws1 重试走复用重跑路径成功（行未被异区翻
+    # pending——翻了 ws1 此处会撞 409 export_in_progress）
+    request_id2 = f"req-{_hex(12)}"
+    with pytest.raises(WorkspaceValidationError):
+        await _export(svc1, ws1, ctx1, request_id2, [
+            _item("s", owner_user_id=f"u-ghost-{_hex()}")])
+    row2 = await rdb1.get_export_by_request(request_id=request_id2)
+    assert row2["workspace_id"] == str(ws1["id"])
+    assert row2["status"] == "failed"
+    with pytest.raises(WorkspaceNotFoundError):
+        await _export(svc2, ws2, ctx2, request_id2, [_item("s")])
+    ok = await _export(svc1, ws1, ctx1, request_id2, [_item("s")])
+    assert ok["exports"][0]["status"] == "succeeded"
+    # 异工作区两次调用均未产生任何行/制品
+    assert await rdb2.get_binding(
+        workspace_id=str(ws2["id"]), node_id="s", port_id="main") is None

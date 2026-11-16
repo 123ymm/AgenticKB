@@ -691,17 +691,22 @@ class WorkspaceRunDB:
             row = await cur.fetchone()
             return dict(row) if row else None
 
-    async def reset_failed_export(self, *, export_id: str) -> bool:
+    async def reset_failed_export(
+        self, *, export_id: str, workspace_id: str,
+    ) -> bool:
         """failed 行复用重跑（67号 Task 9 拍板）：状态回 pending 并清
         error/result_json/target_artifact_id——同 request_id 重试不撞
-        UNIQUE，账记在同一行。守卫 WHERE status='failed'：并发重试只有
-        一个赢（False 方=已被翻 pending，由服务层翻 409）。"""
+        UNIQUE，账记在同一行。守卫 WHERE status='failed' AND workspace_id
+        ——并发重试只有一个赢（False 方=已被翻 pending，由服务层翻 409）；
+        **workspace_id 必带**（审查 Medium-1：request_id 全局唯一，不带归属
+        条件则异工作区可把他区 failed 行翻 pending 并借行执行自己的 items）。"""
         async with self._use_conn(None) as c:
             cur = await c.execute(
                 """UPDATE kb_workspace_exports
                    SET status = 'pending', error = NULL, result_json = NULL,
                        target_artifact_id = NULL
-                   WHERE id = %s AND status = 'failed'""",
-                (export_id,),
+                   WHERE id = %s AND workspace_id = %s
+                     AND status = 'failed'""",
+                (export_id, workspace_id),
             )
             return bool(cur.rowcount or 0)

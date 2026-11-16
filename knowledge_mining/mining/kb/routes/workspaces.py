@@ -138,7 +138,6 @@ _WS_HTTP_STATUS: dict[str, int] = {
     "graph_invalid": 422,
     "invalid_scope": 422,
     "invalid_member_user": 422,
-    "port_not_found": 422,
     "export_all_failed": 422,  # 消息透传逐项失败码（服务层拼接）
     "workspace_validation": 422,
 }
