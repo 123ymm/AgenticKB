@@ -416,6 +416,41 @@ async def test_members_lifecycle_and_last_owner_protection(async_pool) -> None:
                             role="viewer")
 
 
+# ------------------------------------------------------------ 质量收口（护栏）
+
+
+async def test_put_graph_node_cap(async_pool) -> None:
+    """节点数上限（MAX_GRAPH_NODES=200）：超限整图拒绝，恰好 200 放行。"""
+    db, ws, _ = await _seed(async_pool)
+    ok200 = _graph(*(
+        _node(f"n{i:03d}", "source", name=f"源{i}") for i in range(200)))
+    out = await db.put_graph(workspace_id=ws["id"], graph=ok200,
+                             expected_revision=0)
+    assert out["graph_revision"] == 1
+
+    over = _graph(*(
+        _node(f"m{i:03d}", "source", name=f"源{i}") for i in range(201)))
+    with pytest.raises(WorkspaceValidationError):
+        await db.put_graph(workspace_id=ws["id"], graph=over,
+                           expected_revision=1)
+    assert (await db.get_workspace(
+        workspace_id=ws["id"]))["graph_revision"] == 1  # 拒绝不推进
+
+
+async def test_put_graph_rejects_nonfinite_coords(async_pool) -> None:
+    """x/y 非有限值（NaN/±inf）拒绝——json.dumps 能带出 NaN，DB jsonb 也
+    存得进，必须在形态校验层拦下。"""
+    db, ws, _ = await _seed(async_pool)
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        for axis in ("x", "y"):
+            graph = _graph({**_node("A", "source"), axis: bad})
+            with pytest.raises(WorkspaceValidationError):
+                await db.put_graph(workspace_id=ws["id"], graph=graph,
+                                   expected_revision=0)
+    assert (await db.get_workspace(
+        workspace_id=ws["id"]))["graph_revision"] == 0
+
+
 # ------------------------------------------------------------ 来源
 
 async def test_upsert_source_batch_progression_and_crud(async_pool) -> None:

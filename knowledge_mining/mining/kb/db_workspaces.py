@@ -27,6 +27,7 @@ kb_workspace_members / kb_workspace_sources 仓储。
 from __future__ import annotations
 
 import json
+import math
 import secrets
 from collections import deque
 from contextlib import asynccontextmanager
@@ -44,6 +45,10 @@ __all__ = [
 #: 步骤流合法算子（封闭词表，新增算子=改此处 + Task 4 注册表）。
 _VALID_OPS = ("source", "select", "filter", "join", "split_sections",
               "llm_extract")
+
+#: 图节点数上限（put_graph 护栏，2026-11-16 质量收口）：模板驱动步骤流的
+#: 画布规模边界——超限整图拒绝，防巨型图拖垮 diff / Kahn 拓扑 / 执行器。
+MAX_GRAPH_NODES = 200
 
 _VALID_MEMBER_ROLES = ("owner", "editor", "viewer")
 
@@ -111,99 +116,140 @@ def _validate_graph(graph: Any) -> list[dict[str, Any]]:
     缺省 0；客户端携带的 pending/stale 被丢弃——标志服务端权威，由 diff 写
     回）。规则：id 非空唯一且不含 ':'（node:port 引用无歧义）；op ∈ 合法
     词表；ports 非空且 port id 节点内唯一；source 节点 inputs 必空；跨节点
-    inputs 引用的节点与端口必须存在；Kahn 环检测（inputs 当边）。"""
+    inputs 引用的节点与端口必须存在；节点数 ≤ MAX_GRAPH_NODES；Kahn 环检测
+    （inputs 当边）。单节点字段归一到 _validate_node，跨节点引用见
+    _validate_refs（2026-11-16 质量收口切分）。"""
     if not isinstance(graph, dict):
         raise WorkspaceValidationError(
             "graph must be an object with a 'nodes' list")
     nodes_in = graph.get("nodes")
     if not isinstance(nodes_in, list):
         raise WorkspaceValidationError("graph.nodes must be a list")
+    if len(nodes_in) > MAX_GRAPH_NODES:
+        raise WorkspaceValidationError(
+            f"graph.nodes exceeds limit {MAX_GRAPH_NODES}: {len(nodes_in)}")
     normalized: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for i, raw in enumerate(nodes_in):
-        if not isinstance(raw, dict):
-            raise WorkspaceValidationError(
-                f"graph.nodes[{i}] must be an object")
-        nid = raw.get("id")
-        if not isinstance(nid, str) or not nid:
-            raise WorkspaceValidationError(
-                f"graph.nodes[{i}].id must be a non-empty string")
-        if ":" in nid:
-            raise WorkspaceValidationError(
-                f"node id must not contain ':' (node:port refs would be"
-                f" ambiguous): {nid}")
-        if nid in seen_ids:
-            raise WorkspaceValidationError(f"duplicate node id: {nid}")
-        seen_ids.add(nid)
-        op = raw.get("op")
-        if op not in _VALID_OPS:
-            raise WorkspaceValidationError(
-                f"graph.nodes[{i}].op must be one of {list(_VALID_OPS)}:"
-                f" {op!r}")
-        name = raw.get("name", "")
-        if not isinstance(name, str):
-            raise WorkspaceValidationError(
-                f"node {nid}: name must be a string")
-        config = raw.get("config", {})
-        if config is None:
-            config = {}
-        if not isinstance(config, dict):
-            raise WorkspaceValidationError(
-                f"node {nid}: config must be an object")
-        inputs_in = raw.get("inputs", [])
-        if inputs_in is None:
-            inputs_in = []
-        if not isinstance(inputs_in, list):
-            raise WorkspaceValidationError(
-                f"node {nid}: inputs must be a list")
-        inputs: list[str] = []
-        for ref in inputs_in:
-            if not isinstance(ref, str) or ":" not in ref:
-                raise WorkspaceValidationError(
-                    f"node {nid}: input must be 'node:port': {ref!r}")
-            producer, _, port = ref.partition(":")
-            if not producer or not port:
-                raise WorkspaceValidationError(
-                    f"node {nid}: input must be 'node:port': {ref}")
-            inputs.append(ref)
-        ports_in = raw.get("ports")
-        if not isinstance(ports_in, list) or not ports_in:
-            raise WorkspaceValidationError(
-                f"node {nid}: ports must be a non-empty list")
-        ports: list[dict[str, Any]] = []
-        port_ids: set[str] = set()
-        for p in ports_in:
-            if not isinstance(p, dict) or not isinstance(p.get("id"), str) \
-                    or not p["id"]:
-                raise WorkspaceValidationError(
-                    f"node {nid}: each port needs a non-empty string id")
-            pid = p["id"]
-            if pid in port_ids:
-                raise WorkspaceValidationError(
-                    f"node {nid}: duplicate port id: {pid}")
-            port_ids.add(pid)
-            pname = p.get("name", "")
-            pkind = p.get("kind", "table")
-            if not isinstance(pname, str) or not isinstance(pkind, str):
-                raise WorkspaceValidationError(
-                    f"node {nid}: port name/kind must be strings")
-            ports.append({"id": pid, "name": pname, "kind": pkind})
-        if op == "source" and inputs:
-            raise WorkspaceValidationError(
-                f"source node {nid} must not have inputs")
-        x, y = raw.get("x", 0), raw.get("y", 0)
-        for label, value in (("x", x), ("y", y)):
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise WorkspaceValidationError(
-                    f"node {nid}: {label} must be a number")
-        normalized.append({
-            "id": nid, "op": op, "name": name, "config": config,
-            "inputs": inputs, "ports": ports, "x": x, "y": y,
-        })
+        normalized.append(_validate_node(raw, i, seen_ids))
+    _validate_refs(normalized)
+    _ensure_acyclic(normalized)
+    return normalized
 
-    # 跨节点引用：producer 必须存在且含被引端口
-    by_id = {n["id"]: n for n in normalized}
-    for n in normalized:
+
+def _validate_node(
+    raw: Any, index: int, seen_ids: set[str],
+) -> dict[str, Any]:
+    """单节点字段校验 + 归一（跨节点引用/环由 _validate_graph 后续段负责；
+    seen_ids 就地累积——节点 id 全图唯一在逐节点段内即可判定）。"""
+    if not isinstance(raw, dict):
+        raise WorkspaceValidationError(f"graph.nodes[{index}] must be an object")
+    nid = raw.get("id")
+    if not isinstance(nid, str) or not nid:
+        raise WorkspaceValidationError(
+            f"graph.nodes[{index}].id must be a non-empty string")
+    if ":" in nid:
+        raise WorkspaceValidationError(
+            f"node id must not contain ':' (node:port refs would be"
+            f" ambiguous): {nid}")
+    if nid in seen_ids:
+        raise WorkspaceValidationError(f"duplicate node id: {nid}")
+    seen_ids.add(nid)
+    op = raw.get("op")
+    if op not in _VALID_OPS:
+        raise WorkspaceValidationError(
+            f"graph.nodes[{index}].op must be one of {list(_VALID_OPS)}:"
+            f" {op!r}")
+    name = raw.get("name", "")
+    if not isinstance(name, str):
+        raise WorkspaceValidationError(f"node {nid}: name must be a string")
+    config = raw.get("config", {})
+    if config is None:
+        config = {}
+    if not isinstance(config, dict):
+        raise WorkspaceValidationError(
+            f"node {nid}: config must be an object")
+    inputs = _validate_inputs(nid, raw.get("inputs", []))
+    ports = _validate_ports(nid, raw.get("ports"))
+    if op == "source" and inputs:
+        raise WorkspaceValidationError(
+            f"source node {nid} must not have inputs")
+    _validate_coords(nid, raw)
+    return {
+        "id": nid, "op": op, "name": name, "config": config,
+        "inputs": inputs, "ports": ports,
+        "x": raw.get("x", 0), "y": raw.get("y", 0),
+    }
+
+
+def _validate_inputs(nid: str, inputs_in: Any) -> list[str]:
+    """inputs 归一：非空列表，每项形如 'node:port'（两端皆非空）。"""
+    if inputs_in is None:
+        inputs_in = []
+    if not isinstance(inputs_in, list):
+        raise WorkspaceValidationError(f"node {nid}: inputs must be a list")
+    inputs: list[str] = []
+    for ref in inputs_in:
+        if not isinstance(ref, str) or ":" not in ref:
+            raise WorkspaceValidationError(
+                f"node {nid}: input must be 'node:port': {ref!r}")
+        producer, _, port = ref.partition(":")
+        if not producer or not port:
+            raise WorkspaceValidationError(
+                f"node {nid}: input must be 'node:port': {ref}")
+        inputs.append(ref)
+    return inputs
+
+
+def _validate_ports(nid: str, ports_in: Any) -> list[dict[str, Any]]:
+    """ports 归一：非空列表，port id 节点内唯一，name/kind 为字符串。"""
+    if not isinstance(ports_in, list) or not ports_in:
+        raise WorkspaceValidationError(
+            f"node {nid}: ports must be a non-empty list")
+    ports: list[dict[str, Any]] = []
+    port_ids: set[str] = set()
+    for p in ports_in:
+        if not isinstance(p, dict) or not isinstance(p.get("id"), str) \
+                or not p["id"]:
+            raise WorkspaceValidationError(
+                f"node {nid}: each port needs a non-empty string id")
+        pid = p["id"]
+        if pid in port_ids:
+            raise WorkspaceValidationError(
+                f"node {nid}: duplicate port id: {pid}")
+        port_ids.add(pid)
+        pname = p.get("name", "")
+        pkind = p.get("kind", "table")
+        if not isinstance(pname, str) or not isinstance(pkind, str):
+            raise WorkspaceValidationError(
+                f"node {nid}: port name/kind must be strings")
+        ports.append({"id": pid, "name": pname, "kind": pkind})
+    return ports
+
+
+def _validate_coords(nid: str, raw: dict[str, Any]) -> None:
+    """x/y 画布坐标校验：数值且**有限**——json.dumps 会把 NaN/inf 原样带出
+    （PG jsonb 拒收 NaN），必须在 Python 侧拦成 Validation 而非裸
+    InvalidTextRepresentation；超大 int（float 溢出）同判非有限。"""
+    for label in ("x", "y"):
+        value = raw.get(label, 0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise WorkspaceValidationError(
+                f"node {nid}: {label} must be a number")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:  # 超出 float 表示域的巨型 int
+            finite = False
+        if not finite:
+            raise WorkspaceValidationError(
+                f"node {nid}: {label} must be a finite number"
+                f" (NaN/inf rejected): {value!r}")
+
+
+def _validate_refs(nodes: list[dict[str, Any]]) -> None:
+    """跨节点引用：inputs 的 producer 必须存在且含被引端口。"""
+    by_id = {n["id"]: n for n in nodes}
+    for n in nodes:
         for ref in n["inputs"]:
             producer, port = ref.split(":", 1)
             target = by_id.get(producer)
@@ -214,9 +260,6 @@ def _validate_graph(graph: Any) -> list[dict[str, Any]]:
             if port not in {p["id"] for p in target["ports"]}:
                 raise WorkspaceValidationError(
                     f"node {n['id']} input references missing port: {ref}")
-
-    _ensure_acyclic(normalized)
-    return normalized
 
 
 def _ensure_acyclic(nodes: list[dict[str, Any]]) -> None:
