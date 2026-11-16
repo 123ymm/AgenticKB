@@ -72,6 +72,8 @@ const auth = useAuthStore()
 
 const pageTitles: Record<string, string> = {
   dashboard: '概览',
+  workspaces: '制作工作台',
+  'workspace-detail': '制作工作台',
   artifacts: '知识制品',
   'artifact-detail': '知识制品',
   kb: '知识库',

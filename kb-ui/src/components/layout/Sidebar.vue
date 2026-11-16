@@ -47,7 +47,7 @@ import { useRoute } from 'vue-router'
 import {
   Monitor, Management, Key,
   Cpu, Setting, Connection, Files, Share, UserFilled, Tickets, Grid,
-  QuestionFilled,
+  MagicStick, QuestionFilled,
 } from '@element-plus/icons-vue'
 import { useDomainStore } from '@/stores/domain'
 import { useBrandStore, resolveIcon } from '@/stores/brand'
@@ -64,8 +64,8 @@ const auth = useAuthStore()
 const logoSrc = computed(() => (brand.icon.trim() ? resolveIcon(brand.icon) : ''))
 
 // 导航项顺序（2026-10-19 用户定稿）：概览→知识库→检索记录→MCP接入→
-// 挖掘范式→检索范式→一张网接入→知识制品→LLM服务→用户管理→系统设置；
-// 帮助不占导航项——沉到左下角问号图标（平台指南全书）。
+// 挖掘范式→检索范式→一张网接入→制作工作台→知识制品→LLM服务→用户管理→
+// 系统设置；帮助不占导航项——沉到左下角问号图标（平台指南全书）。
 // 批次6：独立"检索"菜单下线——检索入口收进知识库详情的"检索" tab（全走检索范式）。
 // 批次8 M0（24 号 §5.10-§5.16）：实体图谱/本体版本/本体图谱三菜单注释下线
 // （研究线代码保留，路由与视图不动；未来启用需重新闭环设计）。
@@ -79,6 +79,8 @@ const ALL_NAV = [
   // 47 号：一张网接入（管理员：产品文档导入/重同步；KB 侧引用在知识库详情 tab）
   // 一张网图标用 Share（原 Key 与 MCP 接入撞图标）
   { path: '/onenet', label: '一张网接入', icon: Share, access: 'site-admin' },
+  // 67号 Task 10：制作工作台（制品的上游制作间，导出为制品草稿；只插入不动他项顺序）
+  { path: '/workspaces', label: '制作工作台', icon: MagicStick, access: 'all' },
   // 61号批次4：知识制品（表格建表发布，viewer 也有运行态视图）
   { path: '/artifacts', label: '知识制品', icon: Grid, access: 'all' },
   { path: '/llm', label: 'LLM 服务', icon: Cpu, access: 'site-admin' },
