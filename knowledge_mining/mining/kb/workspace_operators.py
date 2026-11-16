@@ -433,10 +433,14 @@ def _run_split_sections(
     config: dict[str, Any], inputs: list[dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     """拆章节（B.3：按声明级别展开，一文件可多行）：输入必须含
-    文档内容_JSON 与 文件 列；文档内容_JSON 为 dict 且 sections 为列表才
-    有效（否则该文档进问题账 no_section_docs，不阻断其余文档）；输出长表
-    cols=[文件,章节,内容]，_id=文档_id:章节标题、_source 继承文档来源；
-    无该级别章节的文档同样只进 no_section_docs。"""
+    文档内容_JSON 与 文件 列。载荷三态：dict 且 sections 为列表 → 逐节
+    展开（一行一节）；字符串 → 原样进「内容」列（章节空串、
+    _id=文档_id:全文——计划明文）；其余畸形（非 dict 非字符串 / dict 无
+    sections 键 / sections 非列表）进问题账 no_section_docs，不阻断其余
+    文档。输出长表 cols=[文件,章节,内容]；_id=文档_id:章节标题——同文档
+    同级别同标题多节追加出现序后缀 #2/#3 防撞号（首个不带；B.3：新行身份
+    由来源文档和章节定位组合）、_source 继承文档来源；无该级别章节的文档
+    同样只进 no_section_docs。"""
     ds = inputs[0]
     cols = ds.get("cols", [])
     if _DOC_CONTENT_COL not in cols:
@@ -453,32 +457,47 @@ def _run_split_sections(
         file_name = row.get(_FILE_COL)
         account = file_name if isinstance(file_name, str) else str(file_name)
         payload = row.get(_DOC_CONTENT_COL)
-        sections = payload.get("sections") if isinstance(payload, dict) \
-            else None
         emitted = 0
-        if isinstance(sections, list):
-            for item in sections:
-                if not isinstance(item, dict):
-                    continue
-                item_level = item.get("level")
-                if isinstance(item_level, bool) \
-                        or not isinstance(item_level, int) \
-                        or item_level != level:
-                    continue
-                title = item.get("title")
-                if not isinstance(title, str) or not title:
-                    continue
-                text = item.get("text")
-                rows_out.append({
-                    "_id": f"{row['_id']}:{title}",
-                    "_source": row["_source"],
-                    _FILE_COL: file_name,
-                    "章节": title,
-                    "内容": text if isinstance(text, str) else "",
-                })
-                emitted += 1
+        if isinstance(payload, str):
+            rows_out.append({
+                "_id": f"{row['_id']}:全文",
+                "_source": row["_source"],
+                _FILE_COL: file_name,
+                "章节": "",
+                "内容": payload,
+            })
+            emitted += 1
+        else:
+            sections = payload.get("sections") \
+                if isinstance(payload, dict) else None
+            if isinstance(sections, list):
+                title_seen: dict[str, int] = {}  # 只计本级命中节的出现序
+                for item in sections:
+                    if not isinstance(item, dict):
+                        continue
+                    item_level = item.get("level")
+                    if isinstance(item_level, bool) \
+                            or not isinstance(item_level, int) \
+                            or item_level != level:
+                        continue
+                    title = item.get("title")
+                    if not isinstance(title, str) or not title:
+                        continue
+                    occurrence = title_seen.get(title, 0) + 1
+                    title_seen[title] = occurrence
+                    out_id = f"{row['_id']}:{title}" if occurrence == 1 \
+                        else f"{row['_id']}:{title}#{occurrence}"
+                    text = item.get("text")
+                    rows_out.append({
+                        "_id": out_id,
+                        "_source": row["_source"],
+                        _FILE_COL: file_name,
+                        "章节": title,
+                        "内容": text if isinstance(text, str) else "",
+                    })
+                    emitted += 1
         if emitted == 0:
-            no_section.append(account)  # 结构坏/无该级章节：不产出行，记账
+            no_section.append(account)  # 畸形/无该级章节：不产出行，记账
     return ({"main": {"kind": "table",
                       "cols": [_FILE_COL, "章节", "内容"], "rows": rows_out}},
             {"no_section_docs": no_section})

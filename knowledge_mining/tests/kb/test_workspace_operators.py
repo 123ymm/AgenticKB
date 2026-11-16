@@ -134,6 +134,16 @@ def test_validate_dataset_allows_none_values_and_partial_cols() -> None:
     validate_dataset(ds)
 
 
+def test_validate_dataset_kind_defaults_to_table() -> None:
+    """缺 kind 视为 table（LOW 钉测）：Task 3 时代数据集不带 kind，兼容读；
+    显式 table 同过，documents/relations 预留形态照拒（见拒绝参数化）。"""
+    ds = {"cols": ["型号"], "rows": [{"_id": "r1", "_source": "s",
+                                      "型号": "P1"}]}
+    validate_dataset(ds)
+    ds["kind"] = "table"
+    validate_dataset(ds)
+
+
 @pytest.mark.parametrize("mutate", [
     lambda ds: ds.update(kind="documents"),
     lambda ds: ds.update(cols=[]),
@@ -324,6 +334,16 @@ def test_run_operator_validates_operator_outputs() -> None:
             run_operator("__broken__", {}, [_PRODUCTS])
     finally:
         del OPERATOR_DEFS["__broken__"]
+
+
+def test_run_operator_allows_unknown_config_keys(products) -> None:
+    """未知 config 键放行（LOW 钉测）：前端表单向前兼容——只校验 schema
+    声明过的字段（缺必填/类型不符/enum 词表外），未声明键原样透传不算错。"""
+    outputs, quality = run_operator(
+        "filter", {"field": "型号", "cond": "eq", "value": "P1",
+                   "client_hint": "表单折叠态"}, [products])
+    assert [r["_id"] for r in outputs["main"]["rows"]] == ["p1"]
+    assert quality == {"input_rows": 3, "filtered": 2}
 
 
 # ------------------------------------------------------------ topological_order
@@ -525,6 +545,36 @@ def test_filter_is_empty_needs_no_value(products) -> None:
     assert len(outputs["main"]["rows"]) == 3
 
 
+def test_filter_eq_ne_loose_numeric_equality() -> None:
+    """eq/ne 宽松相等钉测（M3）：数值口径下 "2000"==2000 命中（含空白
+    归一、字符串/数值 value 双向）；ne 且 value=None=「非空即命中」——
+    null 行仍不匹配（空值走 is_empty/not_empty），本断言即口径拍板。"""
+    ds = {"kind": "table", "cols": ["型号", "功率_W"],
+          "rows": [
+              {"_id": "p1", "_source": "s", "型号": "P1", "功率_W": 3000},
+              {"_id": "p2", "_source": "s", "型号": "P2", "功率_W": "2000"},
+              {"_id": "p3", "_source": "s", "型号": "P3", "功率_W": 2000},
+              {"_id": "p4", "_source": "s", "型号": "P4",
+               "功率_W": " 2000 "},
+              {"_id": "p5", "_source": "s", "型号": "P5", "功率_W": None},
+          ]}
+
+    def _ids(field: str, cond: str, value) -> list[str]:
+        outputs, _ = run_operator(
+            "filter", {"field": field, "cond": cond, "value": value}, [ds])
+        return [r["_id"] for r in outputs["main"]["rows"]]
+
+    # 数值宽松相等：三种书写形态同一值，字符串/数值 value 双向命中
+    assert _ids("功率_W", "eq", "2000") == ["p2", "p3", "p4"]
+    assert _ids("功率_W", "eq", 2000) == ["p2", "p3", "p4"]
+    # 文本域不可数值化：回精确等
+    assert _ids("型号", "eq", "P1") == ["p1"]
+    # ne=eq 补集（null 行除外）：2000 的三种书写形态都被排除
+    assert _ids("功率_W", "ne", "2000") == ["p1"]
+    # ne 且 value=None：非空行全命中、null 行不命中（口径拍板，见 docstring）
+    assert _ids("功率_W", "ne", None) == ["p1", "p2", "p3", "p4"]
+
+
 # ------------------------------------------------------------ join
 
 
@@ -643,22 +693,75 @@ def test_split_sections_level2(docs) -> None:
     assert quality == {"no_section_docs": []}
 
 
+def test_split_sections_string_payload_to_content_column() -> None:
+    """M2（计划明文）：文档内容_JSON 为字符串的行原样进「内容」列——
+    章节=空串、内容=该字符串、_id=文档_id:全文；文件列与来源继承；
+    不进问题账，也不阻断结构化文档。"""
+    ds = {"kind": "table", "cols": ["文件", "文档内容_JSON"],
+          "rows": [
+              {"_id": "plain", "_source": "s1", "文件": "纯文本.md",
+               "文档内容_JSON": "整份文档没有章节结构，全文一行"},
+              {"_id": "ok", "_source": "s2", "文件": "结构化.md",
+               "文档内容_JSON": {"sections": [
+                   {"level": 1, "title": "基本属性", "text": "有效"}]}},
+          ]}
+    outputs, quality = run_operator("split_sections", {"level": 1}, [ds])
+    ds_out = outputs["main"]
+    assert [r["_id"] for r in ds_out["rows"]] == ["plain:全文", "ok:基本属性"]
+    first = ds_out["rows"][0]
+    assert first["文件"] == "纯文本.md"
+    assert first["章节"] == ""
+    assert first["内容"] == "整份文档没有章节结构，全文一行"
+    assert first["_source"] == "s1"
+    assert quality == {"no_section_docs": []}
+
+
+def test_split_sections_duplicate_titles_get_occurrence_suffix() -> None:
+    """M1：同文档同级别同标题多节——_id 追加出现序后缀防撞号（B.3：新行
+    身份由来源文档和章节定位组合；首个不带后缀，第二个起 #2/#3）。"""
+    ds = {"kind": "table", "cols": ["文件", "文档内容_JSON"],
+          "rows": [
+              {"_id": "d1", "_source": "s", "文件": "重复标题.md",
+               "文档内容_JSON": {"sections": [
+                   {"level": 1, "title": "备注", "text": "第一段备注"},
+                   {"level": 1, "title": "基本属性", "text": "属性"},
+                   {"level": 1, "title": "备注", "text": "第二段备注"},
+                   {"level": 1, "title": "备注", "text": "第三段备注"},
+                   {"level": 2, "title": "备注", "text": "二级不算"},
+               ]}},
+          ]}
+    outputs, quality = run_operator("split_sections", {"level": 1}, [ds])
+    rows = outputs["main"]["rows"]
+    assert [r["_id"] for r in rows] == \
+        ["d1:备注", "d1:基本属性", "d1:备注#2", "d1:备注#3"]
+    assert [r["内容"] for r in rows] == \
+        ["第一段备注", "属性", "第二段备注", "第三段备注"]
+    # 后缀只按 (文档, 标题) 计数：level=2 的同名节不消耗 level=1 的序号
+    outputs2, _ = run_operator("split_sections", {"level": 2}, [ds])
+    assert [r["_id"] for r in outputs2["main"]["rows"]] == ["d1:备注"]
+    assert quality == {"no_section_docs": []}
+
+
 def test_split_sections_problem_rows_into_account() -> None:
-    """结构坏行（非 dict / 无 sections 键）与无该级章节的文档同进问题账，
-    不产出行、不阻断其余文档。"""
+    """畸形载荷（非 dict 非字符串 / dict 无 sections 键 / sections 非
+    列表）与无该级章节的文档同进问题账 no_section_docs，不产出行、不
+    阻断其余文档。"""
     ds = {"kind": "table", "cols": ["文件", "文档内容_JSON"],
           "rows": [
               {"_id": "ok", "_source": "s1", "文件": "好文档.md",
                "文档内容_JSON": {"sections": [
                    {"level": 1, "title": "基本属性", "text": "有效"}]}},
-              {"_id": "str", "_source": "s2", "文件": "坏结构.md",
-               "文档内容_JSON": "不是dict"},
+              {"_id": "num", "_source": "s2", "文件": "数字载荷.md",
+               "文档内容_JSON": 12345},
               {"_id": "nosec", "_source": "s3", "文件": "无章节键.md",
                "文档内容_JSON": {"标题": "没有sections键"}},
+              {"_id": "badsec", "_source": "s4", "文件": "章节非列表.md",
+               "文档内容_JSON": {"sections": "不是列表"}},
           ]}
     outputs, quality = run_operator("split_sections", {"level": 1}, [ds])
     assert [r["_id"] for r in outputs["main"]["rows"]] == ["ok:基本属性"]
-    assert quality == {"no_section_docs": ["坏结构.md", "无章节键.md"]}
+    assert quality == {"no_section_docs": ["数字载荷.md", "无章节键.md",
+                                           "章节非列表.md"]}
 
 
 def test_split_sections_rejections(docs, products) -> None:
