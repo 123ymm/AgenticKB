@@ -40,10 +40,13 @@ partial 语义 / 快照 current 输入复用 / stale 传播 / 节点 pending·st
    快照计算因此安全。
 6. **崩溃恢复不做启动钩子**：mining 多 worker 场景无法区分「谁崩了」——
    启动钩子会把别的 worker 正在跑的 run 误判残留。改为
-   reconcile_stale_running（running 且 started_at 超过 30 分钟 →
+   reconcile_stale_running（running 且 started_at 超过 60 分钟 →
    failed(interrupted)）在每次 start_run 入口先调：新 run 前清残，简单
-   可靠；30 分钟远超任何确定性算子图（≤200 节点、单算子纯内存变换）的
+   可靠；60 分钟远超任何确定性算子图（≤200 节点、单算子纯内存变换）的
    执行时长。残 run 只认账不复活（67号：不自动续跑）。
+   阈值 60 的来源（Task 7 审查 INFO-1）：llm 算子双轮等待的理论上限
+   2×900s=30min 恰等旧阈值 30——正常等待中的 run 会被并发 start_run 入口
+   的 reconcile 误判 interrupted；60min 留出整倍余量。
 7. **llm 算子分派（Task 7）**：OPERATOR_DEFS[op].kind=="llm"（MVP 唯一
    llm_extract）的算子节点不走 run_operator 同步执行——_exec_operator
    分派 workspace_llm_operator.run_full（正式跑，domain=工作区 domain_id）
@@ -95,8 +98,10 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: running 残留判定阈值（分钟）——见模块 docstring 决策 6。
-STALE_RUNNING_MINUTES = 30
+#: running 残留判定阈值（分钟）——见模块 docstring 决策 6。60 = llm 算子双轮
+#: 等待理论上限（2×900s=30min）的两倍：恰等或低于真实执行时长的阈值会把
+#: 等待中的 run 误判 interrupted（Task 7 审查 INFO-1）。
+STALE_RUNNING_MINUTES = 60
 
 #: 后台执行任务引用池（asyncio 只持弱引用，模块级集合防 GC；done 即弃）。
 _RUNNING_TASKS: set["asyncio.Task[None]"] = set()
@@ -262,7 +267,7 @@ class WorkspaceExecutor:
         引擎级异常兜底 mark_failed **覆盖全函数体**（Task 7 质量收口 A：
         含 mark_running/list_sources/get_current_outputs 等前置 DB 调用与
         终态落账本身——后台 task 不许带异常死掉把 run 挂在 running；reconcile
-        是 30 分钟级的最后防线，这里是即时的；mark_failed 自身再失败才交给
+        是 60 分钟级的最后防线，这里是即时的；mark_failed 自身再失败才交给
         reconcile 收账）。"""
         try:
             if not await self._rdb.mark_running(run_id):

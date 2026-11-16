@@ -468,7 +468,8 @@ async def test_start_run_validation_gates(async_pool) -> None:
 
 
 async def test_reconcile_stale_running(async_pool) -> None:
-    """running + started_at 超 30 分钟 → failed(interrupted)；start_run
+    """running + started_at 超 60 分钟（阈值随 INFO-1 提到 60：llm 双轮等待
+    理论上限 2×900s=30min 不得被误判）→ failed(interrupted)；start_run
     入口自动清残——残 run 不再挡同工作区的新 run。"""
     ex, wdb, ws, owner = await _seed_chain(async_pool)
     rdb = WorkspaceRunDB(async_pool)
@@ -481,7 +482,7 @@ async def test_reconcile_stale_running(async_pool) -> None:
     async with async_pool.connection() as conn:
         await conn.execute(
             "UPDATE kb_workspace_runs SET started_at = %s WHERE id = %s",
-            ((datetime.now(timezone.utc) - timedelta(minutes=40)).isoformat(),
+            ((datetime.now(timezone.utc) - timedelta(minutes=70)).isoformat(),
              stale_run["id"]),
         )
 
