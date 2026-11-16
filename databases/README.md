@@ -76,6 +76,32 @@ lifespan 恢复），补产物列：`artifact_bucket/object_key/size/sha256/doc_
 **不入 `asset_storage_objects`**——不受引用计数/GC 波及；过期由后台 sweep 删对象
 并置 `status='expired'`（行保留供列表回看）。copy_kb 超 5000 文档即引导走本通道。
 
+## kb/：知识制品工作台 7 表（021，67号 MVP）
+
+启动链 DDL：`kb/schemas/021_kb_workspaces.sql`；存量库版本化迁移：
+`migrations/core/20261116_012_kb_workspaces.sql`（online_expand，两份同文，
+DDL 主体漂移由 `tests/maintenance/test_schema_mirror_sync.py` 钉死）。
+
+语义与决策依据：67号规划 §4.1——模板驱动步骤流工作台的数据底座：
+
+- 登记：`kb_workspaces`（graph_json 设计态草稿 + graph_revision 乐观锁）+
+  `kb_workspace_members`（owner/editor/viewer）。
+- 来源：`kb_workspace_sources`（connector=kb_dir/excel；`input_manifest` 冻结输入，
+  运行可复现的根）。
+- 运行：`kb_workspace_runs`（`graph_snapshot_json` 冻结图 + 七态状态机；
+  scope=node/workspace/subgraph，trial 试跑不建 run 行）。
+- 输出：`kb_workspace_run_outputs`（`is_current` 单活指针——部分唯一索引
+  `uq_ws_output_current` 保证同 (workspace,node,port) 至多一行 current；
+  `stale_since_run` 记失效来源）。
+- 绑定/导出：`kb_workspace_output_bindings`（port→artifact 导出去处）+
+  `kb_workspace_exports`（`request_id` 幂等键；mode 现仅 create_draft，
+  绝不直接发布）。
+
+时间戳口径=TEXT ISO（同 002/020 任务记录族；017 制品族是 TIMESTAMPTZ，两族不混）。
+`actor_kind`/`actor_id` 在登记/运行/导出三表落位——Agent 通道（mcp_key）从第一张
+表就带 actor 字段（67号 §0 禁止事项）。表间外键仅限组内（members/sources→
+workspaces、run_outputs→runs，均 ON DELETE CASCADE），身份列不建跨域强外键。
+
 ## 当前决定
 
 ### 1. 三个库逻辑上分开

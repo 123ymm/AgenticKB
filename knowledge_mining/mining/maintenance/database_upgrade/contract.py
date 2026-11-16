@@ -15,7 +15,8 @@ CURRENT_SCHEMA_VERSION = "2026.09.user-lifecycle-retrieval-v1"
 # 66号批次1：加 011（wiki 目录草稿表 kb_wiki_tocs）后刷新。
 # 2026-11-10 合并 fzl194/master：整库导出与 wiki 两条分支各自用掉 010——
 # 迁移 id 含日期+表名全局唯一（双 010 保留，ledger 按整串 id 记账），合并后刷新。
-CURRENT_SCHEMA_CHECKSUM = "1e954b3dcbc1ff5553ee3b8e3de44c574c37ef144102f7a01b6e601ddbf6dda0"
+# 67号工作台 MVP：加 012（kb_workspace_* 七表）后刷新。
+CURRENT_SCHEMA_CHECKSUM = "042f05aeed937b9251f427a63932597a374f7fda75bdcc479cc4f27c4e8de34f"
 SCHEMA_MARKER_ID = f"schema/{CURRENT_SCHEMA_VERSION}"
 MIGRATION_LEDGER_TABLE = "cmkb_schema_migrations"
 LEGACY_COMPAT_TABLES: tuple[str, ...] = ("mcp_open_kbs", "mcp_access")
@@ -94,6 +95,14 @@ FORMAL_TABLES: frozenset[str] = frozenset({
     "kb_wiki_page_units",
     # wiki 目录草稿（66号批次1，迁移 011）：设计态 toc，发布时冻结进 revisions
     "kb_wiki_tocs",
+    # 知识制品工作台（67号 MVP，迁移 012）：登记/成员/来源/运行/输出/绑定/导出
+    "kb_workspaces",
+    "kb_workspace_members",
+    "kb_workspace_sources",
+    "kb_workspace_runs",
+    "kb_workspace_run_outputs",
+    "kb_workspace_output_bindings",
+    "kb_workspace_exports",
 })
 EXPECTED_FORMAL_TABLES = len(FORMAL_TABLES)
 EXPECTED_PHYSICAL_TABLES = EXPECTED_FORMAL_TABLES + 1
@@ -125,6 +134,14 @@ PREVIOUS_RELEASE_TABLES: frozenset[str] = frozenset(
             "kb_wiki_page_links",
             "kb_wiki_page_units",
             "kb_wiki_tocs",
+            # 67号工作台七表（迁移 012）本版新增，源库必然缺席，一并从上一版基线扣除
+            "kb_workspaces",
+            "kb_workspace_members",
+            "kb_workspace_sources",
+            "kb_workspace_runs",
+            "kb_workspace_run_outputs",
+            "kb_workspace_output_bindings",
+            "kb_workspace_exports",
         }
     )
     | {"serving_query_logs"}
@@ -161,5 +178,5 @@ RETIRED_TABLES: tuple[str, ...] = (
 if len(RETIRED_TABLES) != len(set(RETIRED_TABLES)):  # pragma: no cover - import guard
     raise RuntimeError("RETIRED_TABLES contains duplicates")
 
-if EXPECTED_FORMAL_TABLES != 66:  # pragma: no cover - import guard
-    raise RuntimeError("FORMAL_TABLES must contain exactly 66 names")
+if EXPECTED_FORMAL_TABLES != 73:  # pragma: no cover - import guard
+    raise RuntimeError("FORMAL_TABLES must contain exactly 73 names")
