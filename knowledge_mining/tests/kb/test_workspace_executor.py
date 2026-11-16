@@ -20,7 +20,8 @@ manifest 内嵌 dataset——materialize_source 同构取数，无须真实 xlsx
 - 崩溃恢复：running + 旧 started_at → reconcile_stale_running 判
   failed(interrupted)；start_run 入口自动清残（残 run 不挡新 run）。
 - source 缺行：节点失败（未接入来源）不炸 run，下游级联，全败→failed。
-- llm_extract 桩：run 中节点失败（partial）+ 试跑同样「未接线」。
+- llm_extract 接线（Task 7）：单链 source(excel)→llm_extract 注入 fake
+  llm_factory，全区跑 → completed+输出列/quality/幂等键/域断言；试跑同 fake。
 - cancel：受控桩按住首算子节点 → cancel → 后台在节点边界自停（下一节点
   不执行）+ 幂等（二次 False）。
 - start 校验：NotFound / 归档 / 空图 / subgraph 未接线 / node 缺目标。
@@ -520,26 +521,57 @@ async def test_source_row_missing_node_fails_run_survives(async_pool) -> None:
     assert await rdb.get_current_outputs(ws["id"]) == {}
 
 
-async def test_llm_extract_stub_partial(async_pool) -> None:
-    """llm_extract 未注册（Task 7 接线）：run 中节点失败 → partial；试跑
-    同样抛「未接线」。"""
+async def test_llm_extract_node_full_run(async_pool) -> None:
+    """llm_extract 真库走通（Task 7 接线）：source(excel)→llm_extract 单链，
+    注入 fake llm_factory，全区跑 → completed；输出=输入列+新列（int cast）、
+    quality 全账、幂等键/域传参；试跑通道同 fake（input_rows=切片实数）。"""
+    from knowledge_mining.tests.kb.test_workspace_llm import FakeLlmTaskClient
+
     wdb, ws, owner = await _seed(async_pool)
     await _put_graph(wdb, ws["id"], [
         _node("sp", "source"),
         _node("lx", "llm_extract", inputs=("sp:main",),
-              config={"input_column": "型号", "prompt_template": "{型号}",
-                      "output_fields": [{"name": "备注", "type": "string"}]}),
+              config={"input_column": "型号",
+                      "prompt_template": "从下文抽取：{型号}",
+                      "output_fields": [{"name": "标签", "type": "enum"},
+                                        {"name": "分数", "type": "int"}]}),
     ])
     await _put_source(wdb, ws["id"], "sp", _products())
-    ex = WorkspaceExecutor(async_pool)
+    fake = FakeLlmTaskClient(default_outcome={
+        "status": "succeeded",
+        "result": {"text_output": '{"标签": "高端", "分数": 88}',
+                   "parse_status": "ok"},
+    })
+    ex = WorkspaceExecutor(async_pool, llm_factory=lambda: fake)
     rdb = WorkspaceRunDB(async_pool)
-    run = await _wait_terminal(
-        rdb, await ex.start_run(ws["id"], scope="workspace",
-                                created_by=owner))
-    assert run["status"] == "partial"
-    assert run["progress_json"]["node_errors"]["lx"] == "llm_extract 未接线"
-    with pytest.raises(WorkspaceValidationError, match="未接线"):
-        await ex.trial_node(ws["id"], "lx")
+    run_id = await ex.start_run(ws["id"], scope="workspace",
+                                created_by=owner)
+    run = await _wait_terminal(rdb, run_id)
+    assert run["status"] == "completed"
+    assert "node_errors" not in (run["progress_json"] or {})
+
+    outputs = await rdb.get_current_outputs(ws["id"])
+    assert set(outputs) == {"sp:main", "lx:main"}
+    lx = outputs["lx:main"]
+    assert lx["row_count"] == 3
+    assert lx["content_inline"]["cols"] == ["型号", "功率_W", "标签", "分数"]
+    rows = {r["_id"]: r for r in lx["content_inline"]["rows"]}
+    assert rows["p1"]["标签"] == "高端" and rows["p1"]["分数"] == 88
+    assert rows["p1"]["型号"] == "P1"
+    assert rows["p3"]["分数"] == 88
+    assert lx["quality_json"] == {
+        "total": 3, "succeeded": 3, "failed_row_ids": [], "retried": 0,
+        "partial": False}
+    # 传参钉：幂等键 wsop:{run}:{node}:{row}、域=工作区 domain_id
+    assert fake.submits[0]["idempotency_key"] == f"wsop:{run_id}:lx:p1"
+    assert fake.submits[0]["knowledge_domain"] == ws["domain_id"]
+
+    # 试跑通道（同 fake）：前 3 行、单轮、幂等键 wstrial 形态
+    result = await ex.trial_node(ws["id"], "lx")
+    assert result["trial"] is True
+    assert result["input_rows"] == 3
+    assert result["outputs"]["main"]["rows"][0]["分数"] == 88
+    assert fake.submits[-1]["idempotency_key"].startswith("wstrial:lx:")
 
 
 # ------------------------------------------------------------ cancel
@@ -563,7 +595,7 @@ async def test_cancel_stops_at_node_boundary(
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def _hold(run_id, workspace_id, node, run_new, current):
+    async def _hold(run_id, workspace_id, node, run_new, current, *, domain):
         calls.append(node["id"])
         if node["id"] == "s1":
             entered.set()

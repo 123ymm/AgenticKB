@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
-"""KB 知识制品工作台算子注册表 + 4 确定性算子（67号工作台 MVP Task 4）。
+"""KB 知识制品工作台算子注册表 + 4 确定性算子（67号工作台 MVP Task 4；
+Task 7 加 llm_extract 条目）。
 
 注册表 ``OPERATOR_DEFS`` 是封闭 dict（新增算子=改本模块加条目；登记层
 db_workspaces._VALID_OPS 是图上可出现的算子词表——**source 节点不入注册
 表**（executor 直读 kb_workspace_sources.input_manifest），**llm_extract
-Task 7 落地时加条目并标 kind="llm"**，executor 按 kind 分派确定性执行或
-LlmTaskClient 异步批）。
+条目 kind="llm"、run=None**——执行不走 run_operator 的同步 run，由
+executor 按 kind 分派 workspace_llm_operator.run_full/run_trial（LlmTaskClient
+异步批），run_operator 对其显式拒绝）。
 
 条目字段：``{"op", "name", "input_arity", "kind"(默认 deterministic),
-"ports"(list[PortSpec]), "config_schema", "run"}``。``config_schema`` 是
+"ports"(list[PortSpec]), "config_schema", "run"(llm 算子为 None)}``。
+``config_schema`` 是
 json-schema-lite：每字段 ``{type, required, enum?, ...}``（type ∈
 string/integer/number/boolean/array/object/any；额外描述键仅供前端表单
 消费，后端只校验顶层字段；数组元素结构由算子自身校验）——前端表单与后端
@@ -140,6 +143,10 @@ def run_operator(
         except WorkspaceValidationError as exc:
             raise WorkspaceValidationError(
                 f"operator {op}: input #{i} invalid: {exc}") from exc
+    if defn.get("kind") == "llm" or defn.get("run") is None:
+        raise WorkspaceValidationError(
+            f"operator {op}: kind=llm 算子不经 run_operator 同步执行"
+            f"（executor 分派 workspace_llm_operator.run_full/run_trial）")
     _validate_config(op, defn["config_schema"], config)
     outputs, quality = defn["run"](config if config is not None else {},
                                    inputs)
@@ -575,5 +582,22 @@ OPERATOR_DEFS: dict[str, dict[str, Any]] = {
             "level": {"type": "integer", "required": True, "enum": [1, 2]},
         },
         "run": _run_split_sections,
+    },
+    "llm_extract": {
+        "op": "llm_extract", "name": "LLM 逐行抽取", "input_arity": 1,
+        "kind": "llm",
+        "ports": [PortSpec("main", "抽取结果", "table")],
+        "config_schema": {
+            "input_column": {"type": "string", "required": True},
+            "prompt_template": {"type": "string", "required": True},
+            "output_fields": {"type": "array", "required": True,
+                              "item_fields": {"name": "string",
+                                              "type": "string"}},
+            "model": {"type": "string"},
+        },
+        # run=None：执行由 executor 按 kind="llm" 分派
+        # workspace_llm_operator.run_full/run_trial（LlmTaskClient 异步批；
+        # 元素级语义校验也在该模块——output_fields 六列型词表等）。
+        "run": None,
     },
 }

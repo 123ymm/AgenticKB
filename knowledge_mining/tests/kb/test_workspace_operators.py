@@ -269,23 +269,29 @@ def test_merge_quality_rules() -> None:
 
 
 def test_operator_registry_closed_shape() -> None:
-    """封闭注册表：恰好 4 确定性算子；条目字段齐全可被前端表单消费。"""
-    assert set(OPERATOR_DEFS) == {"select", "filter", "join", "split_sections"}
+    """封闭注册表：恰好 4 确定性算子 + 1 llm 算子（Task 7：kind=llm、
+    run=None——执行分派 workspace_llm_operator，不走同步 run_operator）；
+    条目字段齐全可被前端表单消费。"""
+    assert set(OPERATOR_DEFS) == {"select", "filter", "join",
+                                  "split_sections", "llm_extract"}
     for op, defn in OPERATOR_DEFS.items():
         assert defn["op"] == op
         assert isinstance(defn["name"], str) and defn["name"]
         assert isinstance(defn["input_arity"], int)
-        assert defn["kind"] == "deterministic"
         assert isinstance(defn["config_schema"], dict)
-        assert callable(defn["run"])
         assert defn["ports"] and all(
             isinstance(p, PortSpec) for p in defn["ports"])
         port_ids = [p.id for p in defn["ports"]]
         assert len(port_ids) == len(set(port_ids))
         assert all(p.kind in ("table", "documents", "relations")
                    for p in defn["ports"])
+        if defn["kind"] == "llm":
+            assert defn["run"] is None
+            continue
+        assert defn["kind"] == "deterministic"
+        assert callable(defn["run"])
     assert OPERATOR_DEFS["join"]["input_arity"] == 2
-    for op in ("select", "filter", "split_sections"):
+    for op in ("select", "filter", "split_sections", "llm_extract"):
         assert OPERATOR_DEFS[op]["input_arity"] == 1
 
 

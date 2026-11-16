@@ -2,9 +2,11 @@
 """KB 知识制品工作台执行引擎（67号工作台 MVP Task 6）。
 
 职责：start_run（守卫+后台执行）/ _execute（拓扑逐节点执行：source 取
-冻结 manifest、算子经 workspace_operators.run_operator、llm_extract 桩）/
-分支 partial 语义 / 快照 current 输入复用 / stale 传播 / 节点 pending·
-stale 标志定点清除 / trial 试跑不落库 / cancel / 崩溃恢复 reconcile。
+冻结 manifest、确定性算子经 workspace_operators.run_operator、llm 算子
+（kind="llm"）分派 workspace_llm_operator.run_full——Task 7 接线）/ 分支
+partial 语义 / 快照 current 输入复用 / stale 传播 / 节点 pending·stale
+标志定点清除 / trial 试跑不落库（llm 算子走 run_trial）/ cancel / 崩溃
+恢复 reconcile。
 
 设计决策（docstring 即决策记录，编号供审查引用）：
 
@@ -42,9 +44,12 @@ stale 标志定点清除 / trial 试跑不落库 / cancel / 崩溃恢复 reconci
    failed(interrupted)）在每次 start_run 入口先调：新 run 前清残，简单
    可靠；30 分钟远超任何确定性算子图（≤200 节点、单算子纯内存变换）的
    执行时长。残 run 只认账不复活（67号：不自动续跑）。
-7. **llm_extract 桩**：注册表未注册（Task 7 落地 kind="llm" 分派），本
-   任务对 op=='llm_extract' 的节点/试跑直接 WorkspaceValidationError
-   （"llm_extract 未接线"）——节点级失败走 partial 语义不炸 run。
+7. **llm 算子分派（Task 7）**：OPERATOR_DEFS[op].kind=="llm"（MVP 唯一
+   llm_extract）的算子节点不走 run_operator 同步执行——_exec_operator
+   分派 workspace_llm_operator.run_full（正式跑，domain=工作区 domain_id）
+   / run_trial（试跑）；LlmTaskClient 由 executor 惰性构造（构造式照
+   kb/deps._get_task_client：base_url=MiningConfig().llm_service_url；llm_factory
+   注入面供测试换 fake），write_outputs 路径与确定性算子完全一致。
 8. **取消点=节点边界**：每节点执行前读 run 行，status≠'running' 即停
    （覆盖 cancel 与 reconcile 误伤等一切外部终态写入）；已写输出保留，
    行留终态。queued 期间被取消 → mark_running 返回 False，执行根本不
@@ -70,7 +75,13 @@ from knowledge_mining.mining.kb.workspace_dataset import (
     slice_for_trial,
     validate_dataset,
 )
+from knowledge_mining.mining.kb.workspace_llm_operator import (
+    LlmOperatorContext,
+    run_full as llm_run_full,
+    run_trial as llm_run_trial,
+)
 from knowledge_mining.mining.kb.workspace_operators import (
+    OPERATOR_DEFS,
     run_operator,
     topological_order,
 )
@@ -133,6 +144,16 @@ def _descendants(nodes: list[dict[str, Any]], node_id: str) -> set[str]:
     return seen
 
 
+def _default_llm_client() -> Any:
+    """LlmTaskClient 惰性构造（Task 7；构造式照 kb/deps._get_task_client：
+    base_url 取 MiningConfig().llm_service_url——执行器不持有 FastAPI
+    request，无法复用其模块级单例，进程内自持一实例跨 run 复用连接池、
+    永不 close；延迟导入避免模块加载期拉起配置读取）。"""
+    from knowledge_mining.mining.infra.llm_task_client import LlmTaskClient
+    from knowledge_mining.mining.infra.mining_config import MiningConfig
+    return LlmTaskClient(base_url=MiningConfig().llm_service_url)
+
+
 class WorkspaceExecutor:
     """工作台执行引擎（行为规格与决策见模块 docstring）。
 
@@ -141,10 +162,22 @@ class WorkspaceExecutor:
     get_status / cancel_run / trial_node 四个入口。
     """
 
-    def __init__(self, pool: Any) -> None:
+    def __init__(self, pool: Any, *, llm_factory: Any = None) -> None:
         self._pool = pool
         self._wdb = WorkspaceDB(pool)
         self._rdb = WorkspaceRunDB(pool)
+        # llm 算子客户端（决策 7）：llm_factory 注入面供测试换 fake；
+        # 缺省惰性构造真 LlmTaskClient（首个 llm 节点执行时才建）。
+        self._llm_factory = llm_factory
+        self._llm_client: Any = None
+
+    def _llm_ctx(self) -> LlmOperatorContext:
+        """llm 算子执行上下文（客户端单实例缓存——httpx 连接池跨节点/跨
+        run 复用）。"""
+        if self._llm_client is None:
+            factory = self._llm_factory or _default_llm_client
+            self._llm_client = factory()
+        return LlmOperatorContext(llm=self._llm_client)
 
     # ------------------------------------------------------------ 启动
 
@@ -211,7 +244,7 @@ class WorkspaceExecutor:
                             else -1)
         task = asyncio.create_task(
             self._execute(str(run["id"]), workspace_id, graph, exec_set,
-                          started_revision))
+                          started_revision, str(ws["domain_id"])))
         _RUNNING_TASKS.add(task)
         task.add_done_callback(_log_and_discard)
         return str(run["id"])
@@ -220,7 +253,7 @@ class WorkspaceExecutor:
 
     async def _execute(
         self, run_id: str, workspace_id: str, graph: dict[str, Any],
-        exec_set: set[str], started_revision: int,
+        exec_set: set[str], started_revision: int, domain: str = "",
     ) -> None:
         """后台执行主体（单写者；取消点=节点边界，决策 8）。
 
@@ -264,13 +297,10 @@ class WorkspaceExecutor:
                             written = await self._exec_source(
                                 run_id, workspace_id, node,
                                 sources.get(nid))
-                        elif node["op"] == "llm_extract":
-                            raise WorkspaceValidationError(
-                                "llm_extract 未接线")
                         else:
                             written = await self._exec_operator(
                                 run_id, workspace_id, node, run_new,
-                                current)
+                                current, domain=domain)
                         run_new.update(
                             {f"{nid}:{port}": ds
                              for port, ds in written.items()})
@@ -339,11 +369,14 @@ class WorkspaceExecutor:
     async def _exec_operator(
         self, run_id: str, workspace_id: str, node: dict[str, Any],
         run_new: dict[str, dict[str, Any]],
-        current: dict[str, dict[str, Any]],
+        current: dict[str, dict[str, Any]], *, domain: str = "",
     ) -> dict[str, dict[str, Any]]:
-        """算子节点：输入解析（决策 3：本 run 新输出优先→current→失败）→
-        run_operator → 逐 port 契约校验+序列化预算 → write_outputs。
-        返回 {port: dataset}（本 run 新输出，供下游优先复用）。"""
+        """算子节点（决策 7：确定性 + llm 统一入口）：输入解析（决策 3：
+        本 run 新输出优先→current→失败）→ 按 OPERATOR_DEFS kind 分派——
+        deterministic 走 run_operator 同步执行；llm 走
+        workspace_llm_operator.run_full（domain=工作区 domain_id，asyncio
+        侧由该模块自行 to_thread）→ 逐 port 契约校验+序列化预算 →
+        write_outputs（两分支完全一致）。返回 {port: dataset}。"""
         inputs: list[dict[str, Any]] = []
         reused = False
         for ref in node.get("inputs") or []:
@@ -354,8 +387,16 @@ class WorkspaceExecutor:
                 reused = True
             else:
                 raise WorkspaceValidationError(f"输入未执行: {ref}")
-        outputs, quality = run_operator(
-            str(node["op"]), node.get("config"), inputs)
+        op = str(node["op"])
+        if OPERATOR_DEFS.get(op, {}).get("kind") == "llm":
+            if len(inputs) != 1:
+                raise WorkspaceValidationError(
+                    f"operator {op} expects 1 input(s), got {len(inputs)}")
+            outputs, quality = await llm_run_full(
+                self._llm_ctx(), node.get("config"), inputs[0],
+                domain=domain, run_id=run_id, node_id=str(node["id"]))
+        else:
+            outputs, quality = run_operator(op, node.get("config"), inputs)
         if reused:
             quality = {**quality, "reused_snapshot": True}
         prepared: dict[str, dict[str, Any]] = {}
@@ -405,9 +446,11 @@ class WorkspaceExecutor:
     async def trial_node(self, workspace_id: str, node_id: str,
                          ) -> dict[str, Any]:
         """试跑（67号 §4.1）：不建 run 不写库。输入取 current（无 →
-        Validation「输入未执行」）→ slice_for_trial(3) → run_operator。
-        llm_extract 试跑同样桩错（Task 7 接同步试跑通道）。input_rows=第
-        一输入切片后的实际行数（≥3 行的输入即 3）。"""
+        Validation「输入未执行」）→ slice_for_trial(3) → run_operator；
+        llm 算子（决策 7）分派 workspace_llm_operator.run_trial（模块内自
+        行切前 3 行、单轮 ≤60s、不重试——executor 传完整 current 数据集，
+        不预切片，避免整表 deepcopy 后丢弃）。input_rows=第一输入切片后的
+        实际行数（≥3 行的输入即 3）。"""
         ws = await self._wdb.get_workspace(workspace_id=workspace_id)
         if ws is None:
             raise WorkspaceNotFoundError(
@@ -419,19 +462,30 @@ class WorkspaceExecutor:
                     None)
         if node is None:
             raise WorkspaceValidationError(f"node not found: {node_id}")
-        if node.get("op") == "llm_extract":
-            raise WorkspaceValidationError("llm_extract 未接线")
         if node.get("op") == "source":
             raise WorkspaceValidationError(
                 "source 节点无算子可试跑（试跑仅对算子节点）")
         current = await self._rdb.get_current_outputs(workspace_id)
+        op = str(node.get("op"))
+        if OPERATOR_DEFS.get(op, {}).get("kind") == "llm":
+            refs = node.get("inputs") or []
+            if len(refs) != 1:
+                raise WorkspaceValidationError(
+                    f"operator {op} expects 1 input(s), got {len(refs)}")
+            if refs[0] not in current:
+                raise WorkspaceValidationError(f"输入未执行: {refs[0]}")
+            outputs, quality, trial_meta = await llm_run_trial(
+                self._llm_ctx(), node.get("config"),
+                current[refs[0]]["content_inline"],
+                domain=str(ws["domain_id"]), node_id=node_id)
+            return {"outputs": outputs, "quality": quality, "trial": True,
+                    "input_rows": int(trial_meta.get("input_rows", 0))}
         inputs: list[dict[str, Any]] = []
         for ref in node.get("inputs") or []:
             if ref not in current:
                 raise WorkspaceValidationError(f"输入未执行: {ref}")
             inputs.append(slice_for_trial(current[ref]["content_inline"]))
-        outputs, quality = run_operator(
-            str(node["op"]), node.get("config"), inputs)
+        outputs, quality = run_operator(op, node.get("config"), inputs)
         first_rows = inputs[0].get("rows") if inputs else []
         return {"outputs": outputs, "quality": quality, "trial": True,
                 "input_rows": (len(first_rows)
