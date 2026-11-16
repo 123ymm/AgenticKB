@@ -7,7 +7,9 @@
    kb_workspace_* 表必须缺席，本模块先红后绿即 TDD 红态。
 2. 关键约束面：actor_kind/role/connector/status CHECK（actor 字段必须从
    第一张表就带上，67号 §0 禁止事项）+ uq_ws_output_current 部分唯一索引
-   （is_current 单活指针，输出失效传播的根）。
+   （is_current 单活指针，输出失效传播的根）+ 安全语义封闭域——scope 不含
+   trial（试跑不建 run）、mode 仅 create_draft（绝不直接发布）、exports.
+   request_id UNIQUE（幂等键，规格审查补）。
 3. 文件级：迁移 012 与启动链镜像 021 建表集合一致（全量 DDL 主体比对另钉
    在 tests/maintenance/test_schema_mirror_sync.py 的 MIRROR_PAIRS；此处守
    表集合不漏建、两文件同表集）。
@@ -74,6 +76,30 @@ async def _check_defs(pool, table: str) -> list[str]:
         return sorted(str(row["def"]) for row in await cur.fetchall())
 
 
+async def _unique_defs(pool, table: str) -> list[tuple[str, str]]:
+    """返回 (约束名, 定义) 列表——UNIQUE 约束（contype='u'）。"""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """SELECT conname, pg_get_constraintdef(oid) AS def
+                 FROM pg_constraint
+                WHERE conrelid = %s::regclass AND contype = 'u'""",
+            (table,),
+        )
+        return sorted(
+            (str(row["conname"]), str(row["def"])) for row in await cur.fetchall()
+        )
+
+
+def _quoted_values(check_def: str) -> set[str]:
+    """从 CHECK 定义提取引号字面量（pg_get_constraintdef 的 IN 渲染形态）。
+
+    用于"值域恰好封闭"断言（如 scope 不含 trial、mode 仅 create_draft）——
+    渲染形如 `= ANY ((ARRAY['a'::character varying,...])::text[])`，引号
+    字面量与 DDL 声明值一一对应。
+    """
+    return set(re.findall(r"'([^']*)'", check_def))
+
+
 # ------------------------------------------------------------ ① 表存在性
 
 
@@ -130,6 +156,45 @@ async def test_run_status_check(async_pool) -> None:
     )
     assert any(
         "status" in d and all(value in d for value in expected) for d in defs
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_scope_check_excludes_trial(async_pool) -> None:
+    """scope 值域封闭为 node|workspace|subgraph：trial 试跑不建 run 行
+    （67号 §4.1），值域里出现 trial 即语义漂移。"""
+    defs = await _check_defs(async_pool, "kb_workspace_runs")
+    matched = [d for d in defs if "scope" in d and "CHECK" in d.upper()]
+    assert matched, "kb_workspace_runs 缺 scope CHECK 约束"
+    values: set[str] = set()
+    for d in matched:
+        values |= _quoted_values(d)
+    assert values == {"node", "workspace", "subgraph"}, (
+        f"scope 值域漂移（trial 不允许出现）：{sorted(values)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_export_request_id_unique_constraint(async_pool) -> None:
+    """request_id 幂等键（67号 §4.1）：导出重放必须命中同一行而非重复建稿。"""
+    uniques = await _unique_defs(async_pool, "kb_workspace_exports")
+    matched = [(name, d) for name, d in uniques if "request_id" in d]
+    assert matched, "kb_workspace_exports 缺 request_id UNIQUE 约束（幂等键）"
+    assert any(name == "uq_ws_exports_request" for name, _ in matched), matched
+
+
+@pytest.mark.asyncio
+async def test_export_mode_check_only_create_draft(async_pool) -> None:
+    """mode 值域仅 create_draft：导出只建草稿、绝不直接发布（67号 §0 安全语义，
+    publish/overwrite 类取值出现即违规）。"""
+    defs = await _check_defs(async_pool, "kb_workspace_exports")
+    matched = [d for d in defs if "mode" in d and "CHECK" in d.upper()]
+    assert matched, "kb_workspace_exports 缺 mode CHECK 约束"
+    values: set[str] = set()
+    for d in matched:
+        values |= _quoted_values(d)
+    assert values == {"create_draft"}, (
+        f"mode 值域漂移（只允许 create_draft）：{sorted(values)}"
     )
 
 
