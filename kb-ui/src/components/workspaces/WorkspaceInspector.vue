@@ -15,6 +15,18 @@
         </div>
         <span v-if="node.pending" class="ws-inspector__badge is-pending">待执行</span>
         <span v-else-if="node.stale" class="ws-inspector__badge is-stale">待更新</span>
+        <!-- 删除节点（用户测试反馈修复2）：确认与整图 PUT 归父级——后端同事务
+             清理来源绑定/当前输出/导出去处；下游仍引用时 422 由父级提示 -->
+        <el-button
+          v-if="canWrite"
+          class="ws-inspector__delete"
+          link
+          type="danger"
+          size="small"
+          data-test="inspector-delete-node"
+          :disabled="running"
+          @click="emit('delete-node')"
+        >删除节点</el-button>
       </header>
 
       <!-- 输入选择器：按算子元数渲染（source 语义无输入——后端强制 inputs 空） -->
@@ -295,7 +307,9 @@ import type { GraphNode, WorkspaceSource } from '@/api/workspaces'
  * 表单为本地草稿（切节点重置），「保存配置」才 emit save(config, inputs)
  * ——由父级组装整图 PUT（乐观锁/409 处理在父级）。列候选（portCols 键
  * node:port）由父级从 current outputs 提取，无输出时 select 退化为手输
- * 逗号分隔、其余下拉 allow-create。
+ * 逗号分隔、其余下拉 allow-create。节点信息段的「删除节点」只 emit
+ * delete-node——确认弹窗、整图 PUT 与依赖清理刷新（后端同事务清来源/
+ * 当前输出/绑定）都在父级 DetailView。
  */
 
 const props = defineProps<{
@@ -314,6 +328,8 @@ const emit = defineEmits<{
   save: [config: Record<string, unknown>, inputs: string[]]
   trial: []
   execute: []
+  /** 删除当前节点（确认弹窗/整图 PUT/依赖刷新都在父级 DetailView）。 */
+  'delete-node': []
 }>()
 
 // ── 算子元数据（与 workspace_operators.OPERATOR_DEFS 对齐） ──
@@ -600,6 +616,12 @@ function onSave(): void {
 .ws-inspector__badge.is-stale {
   background: var(--kb-warning-soft, rgba(245, 158, 11, 0.12));
   color: var(--kb-warning, #f59e0b);
+}
+.ws-inspector__delete {
+  flex-shrink: 0;
+  margin-left: auto;
+  height: auto;
+  padding: 2px 0;
 }
 
 /* 通用节 */

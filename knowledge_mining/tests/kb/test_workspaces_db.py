@@ -26,6 +26,7 @@ from knowledge_mining.mining.kb.db_workspaces import (
     WorkspaceNotFoundError,
     WorkspaceValidationError,
 )
+from knowledge_mining.mining.kb.db_workspace_runs import WorkspaceRunDB
 
 pytestmark = [pytest.mark.postgres, pytest.mark.asyncio]
 
@@ -141,6 +142,37 @@ async def test_list_workspaces_admin_member_and_archived(async_pool) -> None:
         domain_id=domain, user_id=u3, is_site_admin=True)
     archived = [r for r in admin_rows if r["status"] == "archived"]
     assert [r["id"] for r in archived] == [ws2["id"]]
+
+
+async def test_list_and_get_carry_owner_username(async_pool) -> None:
+    """负责人显示用户名（用户测试反馈修复1）：get/list 均 LEFT JOIN kb_users
+    透出 owner_username（照 list_members 的 JOIN 手法）；owner 用户行不
+    存在（外部写入的悬空 id，表间无 FK）→ None 不炸（回落显示归前端：
+    id 前 8 位）。create 的 RETURNING 不带该列（INSERT 无从 JOIN）——前端
+    建后进详情走 get，不依赖 create 响应携带。"""
+    kbdb = KbDB(async_pool)
+    uname = f"ws-u-{uuid.uuid4().hex[:8]}"
+    owner = str((await kbdb.create_user(username=uname))["id"])
+    db = WorkspaceDB(async_pool)
+    dom = f"dom-{uuid.uuid4().hex[:8]}"
+    ws = await db.create_workspace(
+        domain_id=dom, name="负责人显示", owner_user_id=owner, created_by=owner)
+    ghost = await db.create_workspace(
+        domain_id=dom, name="悬空负责人", owner_user_id="u-no-such-user-row",
+        created_by="u-no-such-user-row")
+
+    got = await db.get_workspace(workspace_id=ws["id"])
+    assert got is not None and got["owner_username"] == uname
+    got_ghost = await db.get_workspace(workspace_id=ghost["id"])
+    assert got_ghost is not None and got_ghost["owner_username"] is None
+
+    rows = await db.list_workspaces(
+        domain_id=dom, user_id=owner, is_site_admin=True)
+    by_id = {r["id"]: r.get("owner_username") for r in rows}
+    assert by_id[ws["id"]] == uname
+    assert by_id[ghost["id"]] is None
+    # 老列原样保留（owner_user_id 仍是审计口径的权威值）
+    assert all(r["owner_user_id"] for r in rows)
 
 
 async def test_patch_workspace_and_optimistic_token(async_pool) -> None:
@@ -367,6 +399,104 @@ async def test_put_graph_diff_flags_pending_stale(async_pool) -> None:
     assert flags4["C"] == (True, False)   # inputs 变化 → pending（旧 stale 让位）
     assert flags4["B"] == (True, False)   # 未变继承
     assert flags4["D"] == (True, False)   # 未变继承
+
+
+def _ds(n: int = 2) -> dict:
+    """write_outputs 用的最小数据集（Task 4 契约形态）。"""
+    return {"cols": ["型号"], "rows": [
+        {"_id": f"r{i:05d}", "_source": "表/P{i}", "型号": f"P{i}"}
+        for i in range(n)]}
+
+
+async def test_put_graph_node_deletion_cascade_cleanup(async_pool) -> None:
+    """删节点清理语义（用户测试反馈修复2）：put_graph diff 检出**被删节点**
+    （旧图有、新图无）→ 同事务清理 ①kb_workspace_sources 行 ②
+    kb_workspace_run_outputs 当前行（is_current——历史行保留）③
+    kb_workspace_output_bindings 行；下游仍在图且引用被删节点 → 既有
+    inputs 引用校验 422（消息点名违规节点），整体拒绝不清理。"""
+    db, ws, owner = await _seed(async_pool)
+    rdb = WorkspaceRunDB(async_pool)
+    v1 = _graph(
+        _node("A", "source", name="库源"),
+        _node("B", "filter", inputs=["A:main"]),
+        _node("C", "select", inputs=["B:main"]),
+        _node("D", "source", name="表源"),
+    )
+    await db.put_graph(workspace_id=ws["id"], graph=v1, expected_revision=0)
+    await db.upsert_source(
+        workspace_id=ws["id"], node_id="A", connector="kb_dir",
+        config={"kb_id": "kb-1", "directories": []},
+        input_manifest={"doc_count": 1, "documents": []}, updated_by=owner)
+    await db.upsert_source(
+        workspace_id=ws["id"], node_id="D", connector="excel",
+        config={"file_name": "a.xlsx", "sheet_name": "S"},
+        input_manifest={"row_count": 2, "rows": []}, updated_by=owner)
+
+    # run1 全节点各写一版；run2 再写 B/D → B/D 有 run1 历史 + run2 当前行
+    async def _start_run(graph_hash: str) -> dict:
+        out = await rdb.try_start_guard(
+            None, ws["id"], owner, graph_snapshot=v1, graph_hash=graph_hash,
+            scope="workspace", target_node_id=None, batch_no=1)
+        assert out["in_flight"] is None and out["run"] is not None
+        return out["run"]
+
+    run1 = await _start_run("h1")
+    for nid in ("A", "B", "C", "D"):
+        await rdb.write_outputs(
+            None, run_id=run1["id"], workspace_id=ws["id"], node_id=nid,
+            outputs={"main": {"dataset": _ds(2), "quality": {}}})
+    assert await rdb.mark_completed(run1["id"]) is True
+    run2 = await _start_run("h2")
+    for nid in ("B", "D"):
+        await rdb.write_outputs(
+            None, run_id=run2["id"], workspace_id=ws["id"], node_id=nid,
+            outputs={"main": {"dataset": _ds(1), "quality": {}}})
+    await rdb.upsert_binding(
+        None, workspace_id=ws["id"], node_id="B", port_id="main",
+        artifact_id="art_b", artifact_kind="table", updated_by=owner)
+    await rdb.upsert_binding(
+        None, workspace_id=ws["id"], node_id="D", port_id="main",
+        artifact_id="art_d", artifact_kind="table", updated_by=owner)
+
+    # ① 删中间节点 B，但 C 仍引用 B:main → 422（消息点名 C 与 B），整体
+    # 拒绝：revision 不动、来源/当前输出/绑定原样
+    with pytest.raises(WorkspaceValidationError) as exc_info:
+        await db.put_graph(workspace_id=ws["id"], graph=_graph(
+            _node("A", "source", name="库源"),
+            _node("C", "select", inputs=["B:main"]),
+            _node("D", "source", name="表源")), expected_revision=1)
+    assert "C" in str(exc_info.value) and "B" in str(exc_info.value)
+    assert (await db.get_workspace(
+        workspace_id=ws["id"]))["graph_revision"] == 1
+    assert [s["node_id"]
+            for s in await db.list_sources(workspace_id=ws["id"])] == ["A", "D"]
+    assert set(await rdb.get_current_outputs(ws["id"])) == {
+        "A:main", "B:main", "C:main", "D:main"}
+    assert await rdb.get_binding(
+        workspace_id=ws["id"], node_id="D", port_id="main") is not None
+
+    # ② 删叶节点 D（source 节点带来源行+当前输出+绑定）：成功 + revision+1
+    # + 三处依赖同事务清理（D 的 run1 历史行保留）
+    out = await db.put_graph(workspace_id=ws["id"], graph=_graph(
+        _node("A", "source", name="库源"),
+        _node("B", "filter", inputs=["A:main"]),
+        _node("C", "select", inputs=["B:main"])), expected_revision=1)
+    assert out["graph_revision"] == 2
+    assert [s["node_id"]
+            for s in await db.list_sources(workspace_id=ws["id"])] == ["A"]
+    current = await rdb.get_current_outputs(ws["id"])
+    assert set(current) == {"A:main", "B:main", "C:main"}
+    assert current["B:main"]["run_id"] == run2["id"]  # B 当前行仍是 run2 版
+    hist1 = {(r["node_id"], r["port_id"])
+             for r in await rdb.get_run_outputs(run1["id"])}
+    assert ("D", "main") in hist1  # 历史行不删（审计口径）
+    hist2 = {(r["node_id"], r["port_id"])
+             for r in await rdb.get_run_outputs(run2["id"])}
+    assert ("D", "main") not in hist2  # 当前行（run2）被清理
+    assert await rdb.get_binding(
+        workspace_id=ws["id"], node_id="D", port_id="main") is None
+    assert await rdb.get_binding(
+        workspace_id=ws["id"], node_id="B", port_id="main") is not None
 
 
 # ------------------------------------------------------------ 成员

@@ -339,6 +339,23 @@ def _apply_run_flags(
     return {"nodes": new_nodes}
 
 
+def _removed_node_ids(
+    new_nodes: list[dict[str, Any]], old_graph_json: Any,
+) -> list[str]:
+    """diff 检出**被删节点**（旧图有、新图无；有序输出便于日志/断言稳定）。
+
+    窄防御与 _apply_run_flags 同款：旧 graph_json 畸形（绕过写路径的脏
+    数据）视作空图——无被删节点，不做清理。"""
+    old_ids: set[str] = set()
+    if isinstance(old_graph_json, dict):
+        old_nodes = old_graph_json.get("nodes")
+        if isinstance(old_nodes, list):
+            for n in old_nodes:
+                if isinstance(n, dict) and isinstance(n.get("id"), str):
+                    old_ids.add(n["id"])
+    return sorted(old_ids - {n["id"] for n in new_nodes})
+
+
 class WorkspaceDB:
     """kb_workspaces / kb_workspace_members / kb_workspace_sources 仓储。
 
@@ -401,9 +418,19 @@ class WorkspaceDB:
     async def get_workspace(
         self, conn: Any | None = None, *, workspace_id: str,
     ) -> dict[str, Any] | None:
+        """详情读：LEFT JOIN kb_users 透出 owner_username（用户测试反馈
+        修复1——照 list_members 的 JOIN 手法；owner 用户行不存在 → None，
+        回落显示归前端）。"""
         async with self._use_conn(conn) as c:
             cur = await c.execute(
-                f"SELECT {_WS_COLUMNS} FROM kb_workspaces WHERE id = %s",
+                """SELECT w.id, w.domain_id, w.name, w.description,
+                          w.owner_user_id, u.username AS owner_username,
+                          w.status, w.graph_json, w.graph_revision,
+                          w.batch_no, w.actor_kind, w.actor_id, w.created_by,
+                          w.created_at, w.updated_at
+                   FROM kb_workspaces w
+                   LEFT JOIN kb_users u ON u.id = w.owner_user_id
+                   WHERE w.id = %s""",
                 (workspace_id,),
             )
             row = await cur.fetchone()
@@ -416,13 +443,16 @@ class WorkspaceDB:
         """工作区清单（含 active 与 archived，status 字段分列口径）。
 
         admin 两类（site/domain，调用方判定后传旗）= 本域全部；余人=owner
-        行或成员行命中（我参与的）。created_at DESC。"""
+        行或成员行命中（我参与的）。created_at DESC。owner_username 经 LEFT
+        JOIN kb_users 透出（用户测试反馈修复1；用户行不存在 → None）。"""
         async with self._use_conn(conn) as c:
             cur = await c.execute(
-                """SELECT id, domain_id, name, description, owner_user_id,
-                          status, graph_revision, batch_no, actor_kind,
-                          actor_id, created_by, created_at, updated_at
+                """SELECT w.id, w.domain_id, w.name, w.description,
+                          w.owner_user_id, u.username AS owner_username,
+                          w.status, w.graph_revision, w.batch_no, w.actor_kind,
+                          w.actor_id, w.created_by, w.created_at, w.updated_at
                    FROM kb_workspaces w
+                   LEFT JOIN kb_users u ON u.id = w.owner_user_id
                    WHERE w.domain_id = %(dom)s
                      AND (%(admin)s OR w.owner_user_id = %(u)s
                           OR EXISTS (SELECT 1 FROM kb_workspace_members m
@@ -520,9 +550,16 @@ class WorkspaceDB:
         纯形态校验锁外先行 → FOR UPDATE → graph_revision 整数令牌比对（失配
         Conflict）→ 服务端 diff 写标志 → graph_revision+1 同事务推进。
 
+        **删节点清理语义**（用户测试反馈修复2）：diff 检出被删节点（旧图有、
+        新图无）→ 与图替换**同事务**清理其依赖行——①kb_workspace_sources
+        （来源绑定）②kb_workspace_run_outputs 的**当前行**（is_current——
+        历史行保留审计）③kb_workspace_output_bindings（导出去处）。下游
+        仍在图且 inputs 引用被删节点时，锁外的 _validate_refs 先行 422
+        （消息点名违规节点与缺失节点），图与依赖行整体不动——用户须先改接
+        或删除下游。Conflict/NotFound 同理整体回滚不清理。
+
         返回 {"graph": 新图（节点含 pending/stale）, "graph_revision": 新
-        版本号, "updated_at": 新令牌}；不触碰 outputs 表（两标志分工，见
-        模块 docstring）。"""
+        版本号, "updated_at": 新令牌}。"""
         normalized = _validate_graph(graph)
         async with self._use_conn(conn) as c:
             async with c.transaction():
@@ -541,6 +578,24 @@ class WorkspaceDB:
                         f" {expected_revision}, current"
                         f" {row['graph_revision']}")
                 new_graph = _apply_run_flags(normalized, row["graph_json"])
+                removed = _removed_node_ids(normalized, row["graph_json"])
+                if removed:
+                    await c.execute(
+                        """DELETE FROM kb_workspace_sources
+                           WHERE workspace_id = %s AND node_id = ANY(%s)""",
+                        (workspace_id, removed),
+                    )
+                    await c.execute(
+                        """DELETE FROM kb_workspace_run_outputs
+                           WHERE workspace_id = %s AND node_id = ANY(%s)
+                             AND is_current""",
+                        (workspace_id, removed),
+                    )
+                    await c.execute(
+                        """DELETE FROM kb_workspace_output_bindings
+                           WHERE workspace_id = %s AND node_id = ANY(%s)""",
+                        (workspace_id, removed),
+                    )
                 cur = await c.execute(
                     """UPDATE kb_workspaces
                        SET graph_json = %s::jsonb,

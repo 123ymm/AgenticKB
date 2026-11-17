@@ -32,8 +32,10 @@
       </div>
     </header>
 
-    <!-- 工具条：批次 · 节点数 · 运行态（轮询时 spinner+当前节点） -->
+    <!-- 工具条：负责人 · 批次 · 节点数 · 运行态（轮询时 spinner+当前节点） -->
     <div v-if="workspace" class="ws-detail__toolbar">
+      <span class="ws-detail__meta" data-test="ws-owner">负责人 {{ ownerLabel }}</span>
+      <span class="ws-detail__meta-dot">·</span>
       <span class="ws-detail__meta">批次 {{ workspace.batch_no }}</span>
       <span class="ws-detail__meta-dot">·</span>
       <span class="ws-detail__meta">{{ nodes.length }} 节点</span>
@@ -152,6 +154,7 @@
           @save="onInspectorSave"
           @trial="onTrial"
           @execute="onExecuteNode"
+          @delete-node="onDeleteNode"
         />
       </aside>
     </div>
@@ -176,7 +179,7 @@
       v-model="exportDialogOpen"
       :workspace-id="workspaceId"
       :ports="exportPorts"
-      :owner-label="workspace?.owner_user_id ?? ''"
+      :owner-label="ownerLabel"
     />
   </div>
 </template>
@@ -185,7 +188,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowLeft, Loading } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useWorkspacesApi } from '@/api/workspaces'
 import { apiErrorDetail } from '@/api/proxyClient'
 import { useDocumentTitle } from '@/composables/useDocumentTitle'
@@ -210,8 +213,9 @@ import type {
  * 工作台主页（67号 Task 11 三栏骨架 + Task 12 交互接线）：左来源+加工
  * 结果树 / 中步骤流+输出区（含试跑态）/ 右 Inspector 节点配置。执行交互
  * =运行工作区（scope=workspace）与执行此节点（scope=node）共用一套轮询
- * 机制（终态口径见 ./runStatus）；保存配置走整图 PUT（乐观锁 409 刷新
- * 重拉）；接入资料/添加算子/导出草稿三对话框挂页面级。
+ * 机制（终态口径见 ./runStatus）；保存配置与删除节点走整图 PUT（乐观锁
+ * 409 刷新重拉；删除的后端同事务清理见 onDeleteNode）；接入资料/添加
+ * 算子/导出草稿三对话框挂页面级。
  */
 const props = defineProps<{ workspaceId: string }>()
 
@@ -240,6 +244,12 @@ useDocumentTitle(() => workspace.value?.name || '制作工作台')
 /** canWrite = my_role ∈ {owner, editor}（admin 旁路后端已归一 owner）。 */
 const canWrite = computed(() =>
   workspace.value?.my_role === 'owner' || workspace.value?.my_role === 'editor')
+
+/** 负责人显示（用户测试反馈修复1）：owner_username 回落 owner_user_id 前 8 位。 */
+const ownerLabel = computed(() =>
+  workspace.value?.owner_username
+  || workspace.value?.owner_user_id.slice(0, 8)
+  || '—')
 
 const hasNodes = computed(() => nodes.value.length > 0)
 
@@ -521,6 +531,45 @@ async function onInspectorSave(config: Record<string, unknown>, inputs: string[]
       await refreshGraph().catch(() => {})
     } else {
       ElMessage.error(`保存配置失败：${await apiErrorDetail(error)}`)
+    }
+  }
+}
+
+// ── 删除节点（Inspector emit → 组装去掉该节点的新图 → PUT；后端同事务
+//    清理来源绑定/当前输出/导出去处，下游仍引用则 422 点名违规节点） ──
+
+async function onDeleteNode(): Promise<void> {
+  const target = selectedNode.value
+  if (!target) return
+  try {
+    await ElMessageBox.confirm(
+      `删除「${target.name}」将同时清除其来源绑定与当前输出（历史运行输出保留）。`
+      + '若下游节点仍引用它，需先改接或删除下游。',
+      '删除节点', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    const nextNodes = nodes.value.filter(n => n.id !== target.id)
+    const envelope = await api.putGraph(
+      props.workspaceId, { nodes: nextNodes }, graphRevision.value)
+    nodes.value = envelope.graph.nodes ?? nextNodes
+    graphRevision.value = envelope.graph_revision
+    // 后端同事务清理了被删节点的来源/当前输出/绑定——三面刷新回真
+    const settled = await Promise.allSettled([
+      refreshOutputs(), refreshSources(),
+    ])
+    reportRefreshFailures(settled)
+    selectedRef.value = defaultSelectedRef()
+    ElMessage.success('节点已删除')
+  } catch (error) {
+    const status = (error as { response?: { status?: number } })?.response?.status
+    if (status === 409) {
+      ElMessage.error('图已被他人修改，已刷新——请重新删除')
+      await refreshGraph().catch(() => {})
+    } else {
+      // 422 等：透传后端消息（下游仍引用时点名违规节点，提示先处理下游）
+      ElMessage.error(`删除节点失败：${await apiErrorDetail(error)}`)
     }
   }
 }

@@ -82,7 +82,8 @@ class FakeWorkspaceDB:
         ws = {
             "id": f"wsp_{uuid.uuid4().hex[:16]}", "domain_id": domain_id,
             "name": name, "description": description,
-            "owner_user_id": owner_user_id, "status": "active",
+            "owner_user_id": owner_user_id,
+            "owner_username": f"uname-{owner_user_id}", "status": "active",
             "graph_json": {"nodes": []}, "graph_revision": 0, "batch_no": 1,
             "actor_kind": actor_kind, "actor_id": actor_id,
             "created_by": created_by, "created_at": _tick(),
@@ -438,10 +439,14 @@ async def test_crud_roundtrip_and_archive(env):
     assert body["my_role"] == "owner"
     assert body["status"] == "active"
     assert body["graph_json"] == {"nodes": []}
+    # 负责人用户名透传（用户测试反馈修复1：db 层 JOIN，路由/服务不滤列）
+    assert body["owner_username"] == "uname-u-alice"
 
     r = await env.client.get("/api/workspaces")
     assert r.status_code == 200
-    assert [w["id"] for w in r.json()["workspaces"]] == [wid]
+    listed = r.json()["workspaces"]
+    assert [w["id"] for w in listed] == [wid]
+    assert listed[0]["owner_username"] == "uname-u-alice"
 
     r = await env.client.patch(
         f"/api/workspaces/{wid}",

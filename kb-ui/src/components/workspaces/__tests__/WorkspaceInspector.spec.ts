@@ -420,6 +420,28 @@ describe('WorkspaceInspector', () => {
     expect((busy.get('[data-test="inspector-trial"]').element as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('emits delete-node from the danger button; hidden for viewers, disabled while running', async () => {
+    // 删除节点（用户测试反馈修复2）：按钮在节点信息段，emit 交父级组装
+    // 整图 PUT——确认弹窗与后端 422（下游仍引用）文案都在父级处理
+    const wrapper = mountInspector({
+      node: node({ id: 'f1', op: 'filter', name: '筛功率' }),
+    })
+    await wrapper.get('[data-test="inspector-delete-node"]').trigger('click')
+    expect(wrapper.emitted('delete-node')).toHaveLength(1)
+
+    const busy = mountInspector({
+      node: node({ id: 'f1', op: 'filter', name: '筛功率' }),
+      running: true,
+    })
+    expect((busy.get('[data-test="inspector-delete-node"]').element as HTMLButtonElement).disabled).toBe(true)
+
+    const viewer = mountInspector({
+      node: node({ id: 'f1', op: 'filter', name: '筛功率' }),
+      canWrite: false,
+    })
+    expect(viewer.find('[data-test="inspector-delete-node"]').exists()).toBe(false)
+  })
+
   it('hides the action footer for read-only viewers', () => {
     const wrapper = mountInspector({
       node: node({ id: 'f1', op: 'filter', name: '筛功率' }),

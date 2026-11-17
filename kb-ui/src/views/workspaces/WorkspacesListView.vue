@@ -20,7 +20,7 @@
         </template>
       </el-table-column>
       <el-table-column label="负责人" min-width="140">
-        <template #default="{ row }">{{ row.owner_user_id || '—' }}</template>
+        <template #default="{ row }">{{ ownerLabel(row) }}</template>
       </el-table-column>
       <el-table-column label="状态" width="90">
         <template #default="{ row }">
@@ -170,6 +170,11 @@ async function createWorkspace() {
 
 function open(workspaceId: string) {
   router.push({ name: 'workspace-detail', params: { workspaceId } })
+}
+
+/** 负责人显示（用户测试反馈修复1）：owner_username 回落 owner_user_id 前 8 位。 */
+function ownerLabel(row: WorkspaceSummary): string {
+  return row.owner_username || row.owner_user_id.slice(0, 8) || '—'
 }
 
 /** 归档（owner/admin；confirm 后调 DELETE，成功用返回行就地换行——不整页重拉）。 */

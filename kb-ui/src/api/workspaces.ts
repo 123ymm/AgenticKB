@@ -45,6 +45,12 @@ export interface WorkspaceSummary {
   name: string
   description: string
   owner_user_id: string
+  /**
+   * 负责人用户名（db 层 get/list LEFT JOIN kb_users；用户行不存在 →
+   * null）。create/patch/archive 的 RETURNING 不带该列——前端显示回落
+   * owner_user_id 前 8 位。
+   */
+  owner_username?: string | null
   status: WorkspaceStatus
   graph_revision: number
   batch_no: number
