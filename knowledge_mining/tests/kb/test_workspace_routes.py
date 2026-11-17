@@ -140,6 +140,22 @@ class FakeWorkspaceDB:
             ws["updated_at"] = _tick()
         return dict(ws)
 
+    async def purge_workspace(self, conn=None, *, workspace_id: str) -> int:
+        """真删（两步门禁对齐真库）：仅 archived 可删；行与成员/来源行
+        （fake 态级联）一并清除，返回主表删除行数。"""
+        ws = self.workspaces.get(workspace_id)
+        if ws is None:
+            raise WorkspaceNotFoundError(f"workspace not found: {workspace_id}")
+        if ws["status"] != "archived":
+            raise WorkspaceValidationError(
+                f"workspace is active, 先归档: {workspace_id}")
+        del self.workspaces[workspace_id]
+        self.members = {k: v for k, v in self.members.items()
+                        if k[0] != workspace_id}
+        self.sources = {k: v for k, v in self.sources.items()
+                        if k[0] != workspace_id}
+        return 1
+
     async def put_graph(self, conn=None, *, workspace_id: str, graph,
                         expected_revision: int) -> dict:
         normalized = _validate_graph(graph)
@@ -458,6 +474,42 @@ async def test_crud_roundtrip_and_archive(env):
     assert r.status_code == 200 and r.json()["status"] == "archived"
     r = await env.client.get(f"/api/workspaces/{wid}")
     assert r.status_code == 200 and r.json()["status"] == "archived"
+
+
+async def test_delete_two_state_archive_then_purge(env):
+    """DELETE 两态（用户反馈问题1——归档后真删，两步门禁）：active → 200
+    status=archived（行保留）；已归档 → 200 status=deleted（行真删，此后
+    404 反探测）；editor 角色两态都 403（owner-only）；site admin 旁路可删。"""
+    wid = await _create_ws(env)
+    r = await env.client.delete(f"/api/workspaces/{wid}")
+    assert r.status_code == 200 and r.json()["status"] == "archived"
+
+    # owner-only：editor 对已归档工作区删除 → 403（admin 旁路之外不放行）
+    env.db.members[(wid, "u-viewer")] = "editor"
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.delete(f"/api/workspaces/{wid}")
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "workspace_forbidden"
+
+    # owner 再 DELETE → 真删：status=deleted，行消失（fake 层级联成员行）
+    env.holder["user"] = _user("u-alice")
+    r = await env.client.delete(f"/api/workspaces/{wid}")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "deleted"
+    assert env.db.workspaces.get(wid) is None
+    assert (wid, "u-viewer") not in env.db.members
+    r = await env.client.get(f"/api/workspaces/{wid}")
+    assert r.status_code == 404
+    # 已删干净后再 DELETE → 404（不复活）
+    r = await env.client.delete(f"/api/workspaces/{wid}")
+    assert r.status_code == 404
+
+    # site admin 旁路对已归档工作区可真删
+    wid2 = await _create_ws(env, "admin-purge")
+    await env.db.archive_workspace(workspace_id=wid2)
+    env.holder["user"] = _user("u-root", site_role="admin")
+    r = await env.client.delete(f"/api/workspaces/{wid2}")
+    assert r.status_code == 200 and r.json()["status"] == "deleted"
 
 
 async def test_detail_404_antiprobe_stranger_same_as_missing(env):

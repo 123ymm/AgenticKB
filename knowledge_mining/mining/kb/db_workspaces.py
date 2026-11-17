@@ -540,6 +540,43 @@ class WorkspaceDB:
                         f"workspace not found: {workspace_id}")
                 return dict(row)  # 已归档：幂等返回现态
 
+    async def purge_workspace(
+        self, conn: Any | None = None, *, workspace_id: str,
+    ) -> int:
+        """真删（用户反馈问题1——两步门禁，照制品「先停用再删除」）：仅
+        status='archived' 可执行（active → WorkspaceValidationError 提示先
+        归档；不存在 → NotFound）。单事务：先手清无 FK 的
+        kb_workspace_output_bindings / kb_workspace_exports 两表，再 DELETE
+        kb_workspaces 主行——members/sources/runs 靠既有 FK ON DELETE
+        CASCADE 连带清理，run_outputs 随 runs 级联（run_id FK）。返回删除
+        主表行数（调用门禁在前，恒 1）。"""
+        async with self._use_conn(conn) as c:
+            async with c.transaction():
+                cur = await c.execute(
+                    "SELECT status FROM kb_workspaces WHERE id = %s"
+                    " FOR UPDATE",
+                    (workspace_id,),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    raise WorkspaceNotFoundError(
+                        f"workspace not found: {workspace_id}")
+                if row["status"] != "archived":
+                    raise WorkspaceValidationError(
+                        f"workspace is active, 先归档再删除: {workspace_id}")
+                await c.execute(
+                    "DELETE FROM kb_workspace_output_bindings"
+                    " WHERE workspace_id = %s",
+                    (workspace_id,),
+                )
+                await c.execute(
+                    "DELETE FROM kb_workspace_exports WHERE workspace_id = %s",
+                    (workspace_id,),
+                )
+                cur = await c.execute(
+                    "DELETE FROM kb_workspaces WHERE id = %s", (workspace_id,))
+                return int(cur.rowcount or 0)
+
     # ------------------------------------------------------------ 图（put_graph）
 
     async def put_graph(

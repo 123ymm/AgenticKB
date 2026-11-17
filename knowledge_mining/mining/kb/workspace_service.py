@@ -274,11 +274,18 @@ class WorkspaceService:
             raise WorkspaceConflictError(
                 str(exc), code="workspace_conflict") from exc
 
-    async def archive_workspace(
+    async def archive_or_delete(
         self, *, user: dict[str, Any], workspace_id: str,
     ) -> dict[str, Any]:
-        """归档（幂等软删）：owner-only + admin 旁路。"""
-        await self._require(user, workspace_id, *ROLE_OWNER_ONLY)
+        """DELETE 两态（用户反馈问题1——两步门禁，照制品「先停用再删除」）：
+        active → 归档（幂等软删，返回行 status='archived'）；已 archived →
+        purge 真删（单事务七表清理，返回 {"id", "status": "deleted"}——行已
+        不存在，不再有整行可回）。owner-only + admin 旁路（_require 门禁）；
+        db 层 purge 锁内再验一次 archived（并发改态的纵深防御）。"""
+        ws, _ = await self._require(user, workspace_id, *ROLE_OWNER_ONLY)
+        if str(ws.get("status")) == "archived":
+            await self._db.purge_workspace(workspace_id=workspace_id)
+            return {"id": workspace_id, "status": "deleted"}
         return await self._db.archive_workspace(workspace_id=workspace_id)
 
     # ------------------------------------------------------------ 图

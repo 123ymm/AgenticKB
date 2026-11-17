@@ -113,6 +113,42 @@ describe('WorkspaceStepFlow', () => {
     expect(wrapper.emitted('select')).toEqual([['src1:rejected']])
   })
 
+  it('emits select with the FIRST port ref when the card body is clicked', async () => {
+    // 整卡选中（用户反馈问题2）：header/卡片体任意处点击 → 选中该节点
+    // 首个输出端口（多端口卡点卡片主体 = 快捷选中主输出）
+    const nodes = [
+      node({
+        id: 'src1', op: 'source', name: '来源',
+        ports: [
+          { id: 'main', name: '主输出', kind: 'table' },
+          { id: 'rejected', name: '过滤剔除', kind: 'table' },
+        ],
+      }),
+    ]
+    const wrapper = mountFlow(nodes)
+
+    await wrapper.get('[data-test="step-node-src1"]').trigger('click')
+    expect(wrapper.emitted('select')).toEqual([['src1:main']])
+  })
+
+  it('does not bubble port button clicks into a card-level first-port select', async () => {
+    // 端口按钮精确选口：点 rejected 只 emit 一次 rejected（不冒泡触发整卡
+    // 的首口选中——否则会追加第二个 main 事件）
+    const nodes = [
+      node({
+        id: 'src1', op: 'source', name: '来源',
+        ports: [
+          { id: 'main', name: '主输出', kind: 'table' },
+          { id: 'rejected', name: '过滤剔除', kind: 'table' },
+        ],
+      }),
+    ]
+    const wrapper = mountFlow(nodes)
+
+    await wrapper.get('[data-test="port-src1-rejected"]').trigger('click')
+    expect(wrapper.emitted('select')).toEqual([['src1:rejected']])
+  })
+
   it('marks the selected port and shows per-port row counts / stale meta', () => {
     const nodes = [
       node({

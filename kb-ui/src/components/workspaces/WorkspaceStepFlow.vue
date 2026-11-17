@@ -6,6 +6,7 @@
       class="ws-stepflow__card"
       :data-node-id="node.id"
       :data-test="`step-node-${node.id}`"
+      @click="selectNode(node)"
     >
       <header class="ws-stepflow__card-head">
         <el-icon class="ws-stepflow__op-icon" :class="`is-${node.op}`">
@@ -45,7 +46,7 @@
             'is-stale': portSummary(node.id, port.id).stale,
           }"
           :data-test="`port-${node.id}-${port.id}`"
-          @click="emit('select', portRef(node.id, port.id))"
+          @click.stop="emit('select', portRef(node.id, port.id))"
         >
           <span class="ws-stepflow__port-name">{{ port.name }}</span>
           <span class="ws-stepflow__port-meta">{{ portMeta(node.id, port.id) }}</span>
@@ -126,6 +127,16 @@ function opLabel(op: string): string {
 
 function portRef(nodeId: string, portId: string): string {
   return `${nodeId}:${portId}`
+}
+
+/**
+ * 整卡点击选中（用户反馈问题2）：卡片任意处（header/卡片体）点击 → 选中
+ * 该节点首个输出端口；端口按钮点击仍精确选对应口（@click.stop 阻止冒泡，
+ * 否则会追加一次首口选中）。
+ */
+function selectNode(node: GraphNode): void {
+  const first = node.ports[0]
+  if (first) emit('select', portRef(node.id, first.id))
 }
 
 function portSummary(nodeId: string, portId: string): {
@@ -217,6 +228,12 @@ function topoSort(nodes: GraphNode[]): GraphNode[] {
   border: 1px solid var(--kb-border, #e2e8f0);
   border-radius: 10px;
   background: var(--kb-bg-card, #fff);
+  /* 整卡可点击（用户反馈问题2）：hover 给可点击视觉 + 指针 */
+  cursor: pointer;
+  transition: border-color .12s var(--kb-ease, ease);
+}
+.ws-stepflow__card:hover {
+  border-color: var(--kb-accent, #0891b2);
 }
 
 /* 步骤连线：卡之间的竖向发丝线（最后一张卡后不画） */

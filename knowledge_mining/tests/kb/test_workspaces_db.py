@@ -499,6 +499,66 @@ async def test_put_graph_node_deletion_cascade_cleanup(async_pool) -> None:
         workspace_id=ws["id"], node_id="B", port_id="main") is not None
 
 
+async def test_purge_workspace_two_step_gate_and_cascade(async_pool) -> None:
+    """归档后真删（用户反馈问题1——两步门禁，照制品「先停用再删除」）：
+
+    - 门禁：active purge → WorkspaceValidationError（消息「先归档」），行与
+      依赖原样不动；
+    - 已归档 purge → 单事务清理：bindings/exports 两表**手清**（无 FK），
+      kb_workspaces 主行删除后 members/sources/runs 靠既有 FK ON DELETE
+      CASCADE 连带、run_outputs 随 runs 级联（run_id FK）——七表全空；
+    - 不存在的工作区 → NotFound；返回删除主表行数（1）。
+    """
+    db, ws, owner = await _seed(async_pool)
+    rdb = WorkspaceRunDB(async_pool)
+    graph = _graph(_node("A", "source"), _node("B", "filter",
+                                               inputs=["A:main"]))
+    await db.put_graph(workspace_id=ws["id"], graph=graph, expected_revision=0)
+    await db.upsert_source(
+        workspace_id=ws["id"], node_id="A", connector="kb_dir",
+        config={"kb_id": "kb-1", "directories": []},
+        input_manifest={"doc_count": 1, "documents": []}, updated_by=owner)
+    out = await rdb.try_start_guard(
+        None, ws["id"], owner, graph_snapshot=graph, graph_hash="h1",
+        scope="workspace", target_node_id=None, batch_no=2)
+    run = out["run"]
+    await rdb.write_outputs(
+        None, run_id=run["id"], workspace_id=ws["id"], node_id="B",
+        outputs={"main": {"dataset": _ds(2), "quality": {}}})
+    await rdb.upsert_binding(
+        None, workspace_id=ws["id"], node_id="B", port_id="main",
+        artifact_id="art_b", artifact_kind="table", updated_by=owner)
+    await rdb.insert_export(
+        None, request_id=f"req-{ws['id']}", workspace_id=ws["id"],
+        node_id="B", port_id="main", mapping_json={}, created_by=owner)
+
+    # 门禁第一步：active → Validation（提示先归档），行与依赖原样
+    with pytest.raises(WorkspaceValidationError, match="先归档"):
+        await db.purge_workspace(workspace_id=ws["id"])
+    assert await db.get_workspace(workspace_id=ws["id"]) is not None
+    assert await rdb.get_binding(
+        workspace_id=ws["id"], node_id="B", port_id="main") is not None
+    assert set(await rdb.get_current_outputs(ws["id"])) == {"B:main"}
+
+    # 第二步：归档后 purge → 主行 + 六张依赖表全空（级联验证）
+    await db.archive_workspace(workspace_id=ws["id"])
+    assert await db.purge_workspace(workspace_id=ws["id"]) == 1
+    assert await db.get_workspace(workspace_id=ws["id"]) is None
+    async with async_pool.connection() as conn:
+        for table in ("kb_workspace_members", "kb_workspace_sources",
+                      "kb_workspace_runs", "kb_workspace_run_outputs",
+                      "kb_workspace_output_bindings",
+                      "kb_workspace_exports"):
+            cur = await conn.execute(
+                f"SELECT COUNT(*) AS n FROM {table}"
+                " WHERE workspace_id = %s", (ws["id"],))
+            assert (await cur.fetchone())["n"] == 0, table
+
+    # 不存在的工作区 → NotFound（与归档同面）
+    with pytest.raises(WorkspaceNotFoundError):
+        await db.purge_workspace(workspace_id="wsp_missing")
+
+
 # ------------------------------------------------------------ 成员
 
 async def test_members_lifecycle_and_last_owner_protection(async_pool) -> None:

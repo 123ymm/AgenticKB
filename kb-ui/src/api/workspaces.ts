@@ -67,6 +67,15 @@ export interface WorkspaceDetail extends WorkspaceSummary {
   my_role: 'owner' | 'editor' | 'viewer'
 }
 
+/**
+ * DELETE 两态结果（用户反馈问题1——两步门禁）：active 工作区 → 归档行
+ * （status='archived'，整行返回）；已归档 → 真删（行已不存在，只回
+ * {id, status:'deleted'}——调用方按 status 从列表移除该行）。
+ */
+export type WorkspaceDeleteResult =
+  | WorkspaceSummary
+  | { id: string; status: 'deleted' }
+
 /** 图节点输出端口（db 层 _validate_ports 归一形态）。 */
 export interface GraphPort {
   id: string
@@ -304,7 +313,9 @@ export function useWorkspacesApi() {
       return data
     },
 
-    async archiveWorkspace(workspaceId: string): Promise<WorkspaceSummary> {
+    /** DELETE 两态：active → 归档（返回 archived 行）；已归档 → 真删（返回
+     * status='deleted'，无整行——行已清理）。owner-only + admin 旁路。 */
+    async deleteWorkspace(workspaceId: string): Promise<WorkspaceDeleteResult> {
       const { data } = await client.delete(`/api/workspaces/${workspaceId}`)
       return data
     },

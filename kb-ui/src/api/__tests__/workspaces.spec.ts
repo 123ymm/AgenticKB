@@ -14,6 +14,7 @@ vi.mock('axios', () => ({
         const config = state.requestInterceptor?.({ ...initial, url, method }) ?? { ...initial, url, method }
         state.requests.push({ method, url, config, body })
         if (url === '/api/workspaces' && method === 'get') return { data: { workspaces: [{ id: 'wsp_1' }] } }
+        if (url === '/api/workspaces/wsp_1' && method === 'delete') return { data: { id: 'wsp_1', status: 'deleted' } }
         if (url.endsWith('/members')) return { data: { members: [{ user_id: 'u1', role: 'viewer' }] } }
         if (url.endsWith('/runs')) return { data: { runs: [{ id: 'run_9', status: 'completed' }] } }
         if (url.endsWith('/sources')) return { data: { sources: [{ node_id: 's1', connector: 'kb_dir' }] } }
@@ -64,7 +65,7 @@ describe('workspaces API', () => {
     await api.createWorkspace({ name: '网络制品工坊', description: '做表', domain: 'plant/a' })
     await api.getWorkspace('wsp_1')
     await api.patchWorkspace('wsp_1', { name: '改名' })
-    await api.archiveWorkspace('wsp_1')
+    await api.deleteWorkspace('wsp_1')
     await api.listMembers('wsp_1')
     await api.addMember('wsp_1', 'u2', 'editor')
     await api.updateMemberRole('wsp_1', 'u2', 'viewer')
@@ -215,5 +216,7 @@ describe('workspaces API', () => {
     await expect(api.listRuns('wsp_1')).resolves.toEqual([{ id: 'run_9', status: 'completed' }])
     await expect(api.listSources('wsp_1')).resolves.toEqual([{ node_id: 's1', connector: 'kb_dir' }])
     await expect(api.getCurrentOutputs('wsp_1')).resolves.toEqual({ outputs: { 's1:out': { row_count: 3 } } })
+    // DELETE 两态（用户反馈问题1）：已归档工作区 → 真删只回 {id, status}
+    await expect(api.deleteWorkspace('wsp_1')).resolves.toEqual({ id: 'wsp_1', status: 'deleted' })
   })
 })

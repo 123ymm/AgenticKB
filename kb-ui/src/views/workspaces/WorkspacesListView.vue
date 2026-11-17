@@ -37,15 +37,14 @@
       </el-table-column>
       <el-table-column label="操作" width="90" align="center">
         <template #default="{ row }">
+          <!-- 两态 DELETE（用户反馈问题1）：active → 归档；已归档 → 真删 -->
           <el-button
-            v-if="row.status === 'active'"
             link
             type="danger"
             size="small"
-            data-test="archive-workspace"
-            @click="archive(row)"
-          >归档</el-button>
-          <span v-else class="workspace-list__archived-mark">—</span>
+            :data-test="row.status === 'active' ? 'archive-workspace' : 'delete-workspace'"
+            @click="removeWorkspace(row)"
+          >{{ row.status === 'active' ? '归档' : '删除' }}</el-button>
         </template>
       </el-table-column>
       <template #empty>
@@ -177,22 +176,39 @@ function ownerLabel(row: WorkspaceSummary): string {
   return row.owner_username || row.owner_user_id.slice(0, 8) || '—'
 }
 
-/** 归档（owner/admin；confirm 后调 DELETE，成功用返回行就地换行——不整页重拉）。 */
-async function archive(row: WorkspaceSummary) {
+/**
+ * 行操作（两态 DELETE，用户反馈问题1——两步门禁）：active → 归档（就地换
+ * 返回行）；已归档 → 真删（从列表移除该行——已导出的制品不受影响）。
+ * owner/admin；confirm 后调 DELETE，不整页重拉。
+ */
+async function removeWorkspace(row: WorkspaceSummary) {
+  const isArchived = row.status !== 'active'
   try {
     await ElMessageBox.confirm(
-      `归档后「${row.name}」不再出现在日常使用中（详情仍可读），确定归档？`,
-      '归档工作区', { confirmButtonText: '归档', cancelButtonText: '取消', type: 'warning' })
+      isArchived
+        ? `永久删除工作区「${row.name}」及其全部来源、运行历史与输出，不可恢复；已导出的制品不受影响。`
+        : `归档后「${row.name}」不再出现在日常使用中（详情仍可读），确定归档？`,
+      isArchived ? '删除工作区' : '归档工作区',
+      {
+        confirmButtonText: isArchived ? '永久删除' : '归档',
+        cancelButtonText: '取消',
+        type: isArchived ? 'error' : 'warning',
+      })
   } catch {
     return
   }
   try {
-    const archived = await api.archiveWorkspace(row.id)
-    workspaces.value = workspaces.value.map(
-      w => (w.id === archived.id ? { ...w, ...archived } : w))
-    ElMessage.success('已归档')
+    const result = await api.deleteWorkspace(row.id)
+    if (result.status === 'deleted') {
+      workspaces.value = workspaces.value.filter(w => w.id !== row.id)
+      ElMessage.success('已删除')
+    } else {
+      workspaces.value = workspaces.value.map(
+        w => (w.id === result.id ? { ...w, ...result } : w))
+      ElMessage.success('已归档')
+    }
   } catch (error) {
-    ElMessage.error(`归档失败：${await apiErrorDetail(error)}`)
+    ElMessage.error(`${isArchived ? '删除' : '归档'}失败：${await apiErrorDetail(error)}`)
   }
 }
 
@@ -242,6 +258,5 @@ watch(() => domainStore.currentDomain, load, { immediate: true })
   color: var(--kb-text-tertiary); font-size: 11.5px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.workspace-list__archived-mark { color: var(--kb-text-tertiary); }
 .workspace-list__hint { margin: -5px 0 0 70px; color: var(--kb-text-tertiary); font-size: 12px; }
 </style>

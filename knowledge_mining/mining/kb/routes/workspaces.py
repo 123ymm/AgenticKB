@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """KB 知识制品工作台 REST 路由 —— /api/workspaces（67号 §5.5 / Task 8/9）。
 
-十九端点：工作区 CRUD（DELETE=归档）/ 成员四端点（owner-only+admin 旁路）/
+十九端点：工作区 CRUD（DELETE 两态：active→归档 / 已归档→真删）/ 成员四端点（owner-only+admin 旁路）/
 图读·写（乐观锁 409 graph_conflict / 校验环 422 graph_invalid）/ 来源三端点
 （kb_dir 即读即冻 + excel multipart + 删）/ 运行四端点（start 202·cancel 幂等）/
 当前输出读 / 单口试跑（空 outputs→404 output_not_found，Task 9 补口）/
@@ -267,14 +267,16 @@ async def patch_workspace(
 
 
 @router.delete("/{workspace_id}")
-async def archive_workspace(
+async def archive_or_delete_workspace(
     workspace_id: str,
     user: dict[str, Any] = Depends(current_user),
     svc: Any = Depends(get_workspace_service),
 ):
-    """DELETE = 归档（幂等软删；归档后详情仍可读，status=archived）。"""
+    """DELETE 两态（用户反馈问题1——两步门禁）：active → 归档（幂等软删，
+    status=archived，详情仍可读）；已归档 → 真删（status=deleted，七表清理；
+    已导出的制品不受影响——绑定只是工作区侧的导出去处账目）。"""
     try:
-        return await svc.archive_workspace(
+        return await svc.archive_or_delete(
             user=user, workspace_id=workspace_id)
     except WorkspaceError as exc:
         raise _map_error(exc) from None
