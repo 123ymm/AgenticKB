@@ -537,3 +537,71 @@ async def test_export_cross_workspace_replay_404(async_pool) -> None:
     # 异工作区两次调用均未产生任何行/制品
     assert await rdb2.get_binding(
         workspace_id=str(ws2["id"]), node_id="s", port_id="main") is None
+
+
+async def _mk_ws_owner(async_pool, *, site_role: str, bind: bool):
+    """造无绑定/有绑定 owner 的工作台 + 一个 select 节点 current 输出。"""
+    u = await _user(async_pool)
+    if site_role == "admin":
+        async with async_pool.connection() as c:
+            async with c.transaction():
+                await c.execute(
+                    "UPDATE kb_users SET site_role='admin' WHERE id = %s",
+                    (str(u["id"]),))
+        u["site_role"] = "admin"
+    if bind:
+        await KbDB(async_pool).bind_domain(
+            user_id=str(u["id"]), domain=_BND[0])
+        domain = _BND[0]
+    else:
+        domain = f"dom-{_hex()}"
+    wdb = WorkspaceDB(async_pool)
+    ws = await wdb.create_workspace(
+        domain_id=domain, name=f"ws-{site_role}-{bind}", description="",
+        owner_user_id=str(u["id"]), created_by=str(u["id"]))
+    nodes = [_node("src", "source"),
+             _node("s", "select", inputs=("src:main",),
+                   config={"columns": [{"id": "型号", "name": "型号"}]})]
+    dataset = {"kind": "table", "name": "t", "cols": ["型号"],
+               "rows": [{"_id": "r1", "_source": "x", "型号": "P1"}],
+               "grain": "一行一产品"}
+    await _write_output(WorkspaceRunDB(async_pool), wdb, ws, str(u["id"]),
+                        nodes, "s", dataset)
+    return u, ws
+
+
+async def test_export_site_admin_owner_without_binding(async_pool):
+    """内网阻断修复：owner 为 active 站点管理员但无 user_domains 绑定行——
+    建工作台可走默认域回落、导出此前被严格 user_in_domain 拦死
+    （invalid_owner_user 内网必现）。修复口径=is_domain_admin 旁路
+    （site admin 全通），普通成员仍要求绑定行。"""
+    svc = WorkspaceService(async_pool)
+    admin, ws = await _mk_ws_owner(async_pool, site_role="admin", bind=False)
+    res = await svc.export_drafts(
+        str(ws["id"]), _ctx(admin), request_id=f"req-{_hex(12)}",
+        items=[{"node_id": "s", "port_id": "main",
+                "artifact_name": "管理员无绑定导出"}])
+    assert res["exports"][0]["status"] == "succeeded"
+    # 负侧一：无绑定普通用户连工作台都进不去（_assert_ws_role 域绑定
+    # 预检先行 404 反探测——比 owner 校验更早，属既定口径）
+    member, ws2 = await _mk_ws_owner(async_pool, site_role="member",
+                                     bind=False)
+    with pytest.raises(WorkspaceNotFoundError):
+        await svc.export_drafts(
+            str(ws2["id"]), _ctx(member), request_id=f"req-{_hex(12)}",
+            items=[{"node_id": "s", "port_id": "main",
+                    "artifact_name": "普通成员无绑定导出"}])
+    # 负侧二：有绑定 operator 显式指定无绑定用户为 owner —— 严格分支
+    # （active+user_in_domain）仍生效
+    bound, _b = await _mk_ws_owner(async_pool, site_role="member", bind=True)
+    # 单 item 全失败 → 聚合 422 export_all_failed（携带逐项错误码）
+    with pytest.raises(WorkspaceError) as ei:
+        await svc.export_drafts(
+            str(_b["id"]), _ctx(bound), request_id=f"req-{_hex(12)}",
+            items=[{"node_id": "s", "port_id": "main",
+                    "artifact_name": "指定无绑定owner",
+                    "owner_user_id": str(member["id"])}])
+    assert "invalid_owner_user" in str(ei.value)
+
+
+_BND = [f"bnd-{_hex()}"]

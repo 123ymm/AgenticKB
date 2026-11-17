@@ -656,12 +656,19 @@ class WorkspaceService:
             if not int(out.get("row_count") or 0):
                 raise WorkspaceValidationError(
                     "output has no rows", code="empty_output")
-            # owner：默认工作区 owner；指定时须同域有效用户
+            # owner：默认工作区 owner；指定时须同域有效用户。
+            # 站点/域管理员旁路（is_domain_admin，内含 active+未软删校验）：
+            # 与 _resolve_domain/_assert_ws_role 判定序同口径——admin 是系统
+            # 管理员、不依赖 user_domains 绑定行（内网无绑定 admin 建工作台
+            # 走默认域回落可成、导出此前被严格 user_in_domain 拦死）。
             owner_id = str(item.get("owner_user_id") or "") \
                 or str(ws["owner_user_id"])
-            if await self._adb.get_user_status(owner_id) != "active" \
-                    or not await self._adb.user_in_domain(
-                        owner_id, str(ws["domain_id"])):
+            if not (
+                await self._adb.is_domain_admin(
+                    owner_id, str(ws["domain_id"]))
+                or (await self._adb.get_user_status(owner_id) == "active"
+                    and await self._adb.user_in_domain(
+                        owner_id, str(ws["domain_id"])))):
                 raise WorkspaceValidationError(
                     f"invalid owner user: {owner_id}",
                     code="invalid_owner_user")
