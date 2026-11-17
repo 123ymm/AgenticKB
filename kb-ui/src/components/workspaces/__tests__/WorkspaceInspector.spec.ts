@@ -9,7 +9,8 @@ import type { GraphNode, WorkspaceSource } from '@/api/workspaces'
 
 /**
  * Inspector（右栏节点配置）：按 op 分派表单 / 草稿默认值 / save 组装
- * config 契约 / trial·execute emit / source 只读展示。mount + 本地
+ * config 契约（第三参 {name, portName}——节点名与输出表名随同一整图
+ * PUT 生效）/ trial·execute emit / source 只读展示。mount + 本地
  * el-* 表单 stub（select/option/input/checkbox/radio/button/tag——原生
  * 控件承接 v-model，setValue/trigger 直驱）。
  */
@@ -261,7 +262,66 @@ describe('WorkspaceInspector', () => {
     expect((wrapper.get('[data-test="inspector-filter-value"]').element as HTMLInputElement).value).toBe('2000')
 
     await wrapper.get('[data-test="inspector-save"]').trigger('click')
-    expect(wrapper.emitted('save')).toEqual([[{ field: '功率_W', cond: 'gte', value: '2000' }, ['src1:main']]])
+    expect(wrapper.emitted('save')).toEqual([[{ field: '功率_W', cond: 'gte', value: '2000' }, ['src1:main'], { name: '筛功率', portName: '主输出' }]])
+  })
+
+  // ── 节点改名+输出表名改名（用户测试反馈修复3） ──
+
+  it('renders node name and port name inputs hydrated from the node', () => {
+    const wrapper = mountInspector({
+      node: node({
+        id: 'f1', op: 'filter', name: '筛功率',
+        ports: [{ id: 'main', name: '筛选结果', kind: 'table' }],
+      }),
+    })
+    expect((wrapper.get('[data-test="inspector-node-name"]').element as HTMLInputElement).value).toBe('筛功率')
+    expect((wrapper.get('[data-test="inspector-port-name"]').element as HTMLInputElement).value).toBe('筛选结果')
+  })
+
+  it('emits save with edited node name and port name in the third payload slot', async () => {
+    const wrapper = mountInspector({
+      node: node({
+        id: 'f1', op: 'filter', name: '筛功率',
+        inputs: ['src1:main'],
+        config: { field: '功率_W', cond: 'gte', value: 2000 },
+        ports: [{ id: 'main', name: '筛选结果', kind: 'table' }],
+      }),
+      candidates: CANDIDATES,
+    })
+
+    await wrapper.get('[data-test="inspector-node-name"]').setValue('大功率筛选')
+    await wrapper.get('[data-test="inspector-port-name"]').setValue('高功率清单')
+
+    await wrapper.get('[data-test="inspector-save"]').trigger('click')
+    expect(wrapper.emitted('save')).toEqual([[{
+      field: '功率_W', cond: 'gte', value: '2000',
+    }, ['src1:main'], { name: '大功率筛选', portName: '高功率清单' }]])
+  })
+
+  it('blocks save with a warning when node name or port name is emptied', async () => {
+    const wrapper = mountInspector({
+      node: node({
+        id: 'f1', op: 'filter', name: '筛功率',
+        inputs: ['src1:main'],
+        config: { field: '功率_W', cond: 'gte', value: 2000 },
+      }),
+      candidates: CANDIDATES,
+    })
+
+    // 纯空白 = 空（trim 后校验）
+    await wrapper.get('[data-test="inspector-node-name"]').setValue('   ')
+    await wrapper.get('[data-test="inspector-save"]').trigger('click')
+    expect(wrapper.emitted('save')).toBeUndefined()
+
+    await wrapper.get('[data-test="inspector-node-name"]').setValue('筛功率')
+    await wrapper.get('[data-test="inspector-port-name"]').setValue('')
+    await wrapper.get('[data-test="inspector-save"]').trigger('click')
+    expect(wrapper.emitted('save')).toBeUndefined()
+
+    // 名称回填后放行（其余契约不变）
+    await wrapper.get('[data-test="inspector-port-name"]').setValue('主输出')
+    await wrapper.get('[data-test="inspector-save"]').trigger('click')
+    expect(wrapper.emitted('save')).toHaveLength(1)
   })
 
   it('hides the filter value input for is_empty / not_empty and drops value on save', async () => {
@@ -277,7 +337,7 @@ describe('WorkspaceInspector', () => {
     await setSel(wrapper, 'inspector-filter-field', '备注')
     await wrapper.get('[data-test="inspector-save"]').trigger('click')
     // is_empty 不携带 value 键（后端 VALUE_CONDS 之外不校验值）
-    expect(wrapper.emitted('save')).toEqual([[{ field: '备注', cond: 'is_empty' }, ['src1:main']]])
+    expect(wrapper.emitted('save')).toEqual([[{ field: '备注', cond: 'is_empty' }, ['src1:main'], { name: '空值筛', portName: '主输出' }]])
   })
 
   it('select: checkbox columns from input cols with per-column rename', async () => {
@@ -300,7 +360,7 @@ describe('WorkspaceInspector', () => {
         { id: '功率_W', name: '功率_W' },
         { id: '型号', name: '产品型号' },
       ],
-    }, ['src1:main']]])
+    }, ['src1:main'], { name: '选列', portName: '主输出' }]])
   })
 
   it('select: falls back to manual comma-separated input when cols are unknown', async () => {
@@ -319,7 +379,7 @@ describe('WorkspaceInspector', () => {
         { id: '功率_W', name: '功率_W' },
         { id: '备注', name: '备注' },
       ],
-    }, ['src1:main']]])
+    }, ['src1:main'], { name: '选列', portName: '主输出' }]])
   })
 
   it('join: hydrates left/right keys from each input and emits method+keys', async () => {
@@ -340,7 +400,7 @@ describe('WorkspaceInspector', () => {
     await wrapper.get('[data-test="inspector-save"]').trigger('click')
     expect(wrapper.emitted('save')).toEqual([[{
       method: 'inner', left_key: '型号', right_key: '产品型号',
-    }, ['src1:main', 'src2:main']]])
+    }, ['src1:main', 'src2:main'], { name: '关联库存', portName: '主输出' }]])
   })
 
   it('split_sections: level radio defaults from config and emits level', async () => {
@@ -353,7 +413,7 @@ describe('WorkspaceInspector', () => {
 
     await radios[0]!.setValue()
     await wrapper.get('[data-test="inspector-save"]').trigger('click')
-    expect(wrapper.emitted('save')).toEqual([[{ level: 1 }, ['src1:main']]])
+    expect(wrapper.emitted('save')).toEqual([[{ level: 1 }, ['src1:main'], { name: '切章节', portName: '主输出' }]])
   })
 
   it('llm_extract: field row editor keeps >=1 row, adds and removes', async () => {
@@ -390,7 +450,7 @@ describe('WorkspaceInspector', () => {
       prompt_template: '抽取 {输入}',
       output_fields: [{ name: '功率', type: 'float' }],
       model: 'glm-4.7',
-    }, ['src1:main']]])
+    }, ['src1:main'], { name: '抽取', portName: '主输出' }]])
   })
 
   it('blocks save with a warning when required fields are missing', async () => {

@@ -512,13 +512,27 @@ function onExecuteNode(): Promise<void> {
 }
 
 // ── 保存配置（Inspector → 整图 PUT，乐观锁 409 刷新重拉） ──
+//    第三参 names 同图生效：node.name 与 ports[0].name（下游 inputs 引用
+//    的是 node:port 稳定 id，改名不影响连线；其余节点原样透传）。
 
-async function onInspectorSave(config: Record<string, unknown>, inputs: string[]): Promise<void> {
+async function onInspectorSave(
+  config: Record<string, unknown>,
+  inputs: string[],
+  names: { name: string; portName: string },
+): Promise<void> {
   const target = selectedNode.value
   if (!target) return
   try {
     const nextNodes = nodes.value.map(n =>
-      n.id === target.id ? { ...n, config, inputs } : n)
+      n.id === target.id
+        ? {
+            ...n,
+            name: names.name,
+            config,
+            inputs,
+            ports: n.ports.map((p, i) => (i === 0 ? { ...p, name: names.portName } : p)),
+          }
+        : n)
     const envelope = await api.putGraph(
       props.workspaceId, { nodes: nextNodes }, graphRevision.value)
     nodes.value = envelope.graph.nodes ?? nextNodes

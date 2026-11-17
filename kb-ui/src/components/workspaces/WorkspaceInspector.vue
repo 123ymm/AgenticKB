@@ -29,6 +29,31 @@
         >删除节点</el-button>
       </header>
 
+      <!-- 命名双字段（用户测试反馈修复3：节点名与产出表名不可改）——草稿
+           随「保存配置」整图 PUT 生效；MVP 全部单口算子，输出表名只渲染第一口 -->
+      <section v-if="canWrite" class="ws-inspector__sec ws-inspector__identity">
+        <div class="ws-inspector__field">
+          <label class="ws-inspector__field-label">节点名称</label>
+          <el-input
+            v-model="nodeName"
+            data-test="inspector-node-name"
+            size="small"
+            :maxlength="NAME_MAX"
+            placeholder="步骤流中显示的名称"
+          />
+        </div>
+        <div class="ws-inspector__field">
+          <label class="ws-inspector__field-label">输出表名</label>
+          <el-input
+            v-model="portName"
+            data-test="inspector-port-name"
+            size="small"
+            :maxlength="NAME_MAX"
+            placeholder="加工结果树与下游引用显示的表名"
+          />
+        </div>
+      </section>
+
       <!-- 输入选择器：按算子元数渲染（source 语义无输入——后端强制 inputs 空） -->
       <section v-if="arity > 0" class="ws-inspector__sec">
         <h4 class="ws-inspector__sec-title">{{ arity === 2 ? '输入表' : '输入' }}</h4>
@@ -304,8 +329,10 @@ import type { GraphNode, WorkspaceSource } from '@/api/workspaces'
  * 表单（config 契约 = workspace_operators.OPERATOR_DEFS 的
  * config_schema）→ 操作（保存配置 / 试跑 / 执行）。
  *
- * 表单为本地草稿（切节点重置），「保存配置」才 emit save(config, inputs)
- * ——由父级组装整图 PUT（乐观锁/409 处理在父级）。列候选（portCols 键
+ * 表单为本地草稿（切节点重置），「保存配置」才 emit
+ * save(config, inputs, {name, portName})——节点名称与输出表名（MVP 单口
+ * 算子只渲染第一口，source 同样可改）也随同一整图 PUT 生效，由父级组装
+ * （乐观锁/409 处理在父级）。列候选（portCols 键
  * node:port）由父级从 current outputs 提取，无输出时 select 退化为手输
  * 逗号分隔、其余下拉 allow-create。节点信息段的「删除节点」只 emit
  * delete-node——确认弹窗、整图 PUT 与依赖清理刷新（后端同事务清来源/
@@ -325,7 +352,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  save: [config: Record<string, unknown>, inputs: string[]]
+  /** 第三参为重命名载荷：父级组装整图 PUT 时写 node.name 与 ports[0].name。 */
+  save: [config: Record<string, unknown>, inputs: string[], names: { name: string; portName: string }]
   trial: []
   execute: []
   /** 删除当前节点（确认弹窗/整图 PUT/依赖刷新都在父级 DetailView）。 */
@@ -359,8 +387,13 @@ const LLM_TYPE_LABELS: Record<string, string> = {
   text: '文本', int: '整数', float: '小数', date: '日期', enum: '枚举', bool: '布尔',
 }
 
+/** 节点名称/输出表名长度上限（与后端 put_graph 非空名校验对齐，超限截断）。 */
+const NAME_MAX = 100
+
 // ── 草稿（切节点重置；由 node.config/inputs 注入默认值） ──
 
+const nodeName = ref('')
+const portName = ref('')
 const inputs = ref<string[]>([])
 const selectPicked = ref<string[]>([])
 const selectRenames = reactive<Record<string, string>>({})
@@ -378,6 +411,8 @@ const llmFields = ref<Array<{ name: string; type: string }>>([])
 
 function hydrateDrafts(): void {
   const node = props.node
+  nodeName.value = ''
+  portName.value = ''
   selectPicked.value = []
   Object.keys(selectRenames).forEach(k => { delete selectRenames[k] })
   selectManual.value = ''
@@ -393,6 +428,8 @@ function hydrateDrafts(): void {
   llmFields.value = [{ name: '', type: 'text' }]
   if (!node) { inputs.value = []; return }
 
+  nodeName.value = node.name
+  portName.value = node.ports[0]?.name ?? ''
   inputs.value = [...node.inputs]
   const config = node.config ?? {}
   const asString = (v: unknown): string => (typeof v === 'string' ? v : '')
@@ -544,10 +581,24 @@ function buildConfig(): Record<string, unknown> | null {
   return {}
 }
 
+/** 节点名称/输出表名校验（非空 trim 后 1..100；失败就地提示不 emit）。 */
+function validateNames(): { name: string; portName: string } | null {
+  const name = nodeName.value.trim()
+  const port = portName.value.trim()
+  if (!name) { ElMessage.warning('节点名称不能为空'); return null }
+  if (!port) { ElMessage.warning('输出表名不能为空'); return null }
+  if (name.length > NAME_MAX || port.length > NAME_MAX) {
+    ElMessage.warning(`名称不能超过 ${NAME_MAX} 字`); return null
+  }
+  return { name, portName: port }
+}
+
 function onSave(): void {
+  const names = validateNames()
+  if (names === null) return
   const config = buildConfig()
   if (config === null) return
-  emit('save', config, [...inputs.value])
+  emit('save', config, [...inputs.value], names)
 }
 </script>
 
@@ -629,6 +680,8 @@ function onSave(): void {
   padding: 12px 0 2px;
   border-bottom: 1px dashed var(--kb-border-light, #f1f5f9);
 }
+/* 命名双字段：紧接标题栏（自带实线分隔），无节标题 */
+.ws-inspector__identity { padding-top: 10px; }
 .ws-inspector__sec-title {
   margin: 0 0 10px;
   font-size: 11px;
