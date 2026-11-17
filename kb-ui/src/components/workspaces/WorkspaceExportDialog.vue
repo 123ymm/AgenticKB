@@ -93,14 +93,16 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useWorkspacesApi, type ExportResult } from '@/api/workspaces'
 import { apiErrorDetail } from '@/api/proxyClient'
+import { generateRequestId } from '@/utils/uuid'
 
 /**
  * 导出制品草稿对话框（67号 Task 12）：可导出端口复选（不可选禁用+原因
  * ——无输出/空输出/已过期；「已绑定」类失败后端导出门禁才可知，走结果
  * 回执的错误中文化）→ 逐项名称（默认端口名，1..200）→ 责任人（拍板：
- * MVP 只读工作区 owner）→ exportDrafts（request_id=crypto.randomUUID
- * 幂等键）→ 回执：成功项「未发布」+查看制品（router.push），失败项错误
- * 码中文化；duplicate 重放同样展示既有结果。
+ * MVP 只读工作区 owner）→ exportDrafts（request_id 幂等键——经
+ * generateRequestId 三层回退：内网 HTTP 无 crypto.randomUUID 也能生成）
+ * → 回执：成功项「未发布」+查看制品（router.push），失败项错误码中文化；
+ * duplicate 重放同样展示既有结果。
  */
 
 export interface ExportPortOption {
@@ -191,7 +193,7 @@ async function submit(): Promise<void> {
   submitting.value = true
   try {
     const response = await api.exportDrafts(props.workspaceId, {
-      request_id: crypto.randomUUID(),
+      request_id: generateRequestId(),
       items,
     })
     result.value = response

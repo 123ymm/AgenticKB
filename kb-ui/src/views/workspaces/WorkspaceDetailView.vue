@@ -413,6 +413,7 @@ async function load(): Promise<void> {
     outputs.value = outputsEnvelope.outputs ?? {}
     sources.value = sourcesEnvelope
     selectedRef.value = defaultSelectedRef()
+    await resumeInflightRun()
   } catch (error) {
     workspace.value = null
     const status = (error as { response?: { status?: number } })?.response?.status
@@ -425,6 +426,28 @@ async function load(): Promise<void> {
 }
 
 // ── 运行面（workspace 全图 / node 单节点共用；轮询 run status 至终态） ──
+
+/**
+ * 重进页面恢复在飞 run（用户反馈缺口）：服务端后台一直在跑，但前端此前
+ * 只在"本会话点过运行"才轮询——退出去再进来运行指示就断了。挂载加载后
+ * 查最新一条 run，queued/running 则接回轮询（终态刷新/toast 复用既有
+ * pollRunStatus 全套）；查询失败静默不阻塞主流程。
+ */
+async function resumeInflightRun(): Promise<void> {
+  try {
+    const runs = await api.listRuns(props.workspaceId, 1)
+    const latest = Array.isArray(runs) ? runs[0] : undefined
+    if (latest && !isTerminalRunStatus(latest.status) && !running.value) {
+      activeRunId.value = latest.id
+      activeRunScope.value = latest.scope === 'node' ? 'node' : 'workspace'
+      running.value = true
+      lastRun.value = latest
+    }
+  } catch {
+    // 恢复失败视为无在飞 run——不阻塞页面主数据
+  }
+}
+
 
 const running = ref(false)
 const activeRunId = ref<string | null>(null)
