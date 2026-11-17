@@ -241,9 +241,13 @@ useDocumentTitle(() => workspace.value?.name || '制作工作台')
 
 // ── 派生态 ──
 
-/** canWrite = my_role ∈ {owner, editor}（admin 旁路后端已归一 owner）。 */
-const canWrite = computed(() =>
-  workspace.value?.my_role === 'owner' || workspace.value?.my_role === 'editor')
+/** canWrite：2026-11-17 收紧后 my_role 只剩合成角色 admin/domain_admin
+ * （管理员天然可写）；owner/editor 保留兼容历史口径。 */
+const canWrite = computed(() => {
+  const role = workspace.value?.my_role
+  return role === 'admin' || role === 'domain_admin'
+    || role === 'owner' || role === 'editor'
+})
 
 /** 负责人显示（用户测试反馈修复1）：owner_username 回落 owner_user_id 前 8 位。 */
 const ownerLabel = computed(() =>

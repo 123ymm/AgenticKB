@@ -1,13 +1,22 @@
 # -*- coding: utf-8 -*-
 """工作台 REST 路由测试（67号 MVP Task 8）—— httpx ASGI + fake（不碰真库）。
 
+**2026-11-17 收紧口径（用户指令：工作台仅站点/域管理员可用）**：
+_assert_ws_role 只剩 admin 两判定（site→"admin" / is_domain_admin→
+"domain_admin"），其余一律 404 反探测——绑定成员/成员行/owner 兜底/ viewer
+全退役；create 与 list 加管理员门禁（403 workspace_forbidden）。本文件
+seed 相应升级：默认操作者 u-alice=域管理员，u-viewer/u-bob=绑定普通成员
+（负侧），u-domadm=第二域管理员，u-root=site admin，u-foreigndm=他域
+域管理员。
+
 手法照 test_artifacts_routes.py：dependency_overrides 注入真实
 WorkspaceService（内部换 fake 仓储/执行器——构造注入面只有 pool/executor 两
 个生产参数，测试以保护属性直替，先例=env.db.update_cell = raise_stale），
 read_kb_dir 经 service 模块属性 monkeypatch（即读即冻链路的接缝在适配器
-边界）。打真实路由层：反探测 404 / 角色不足 403 / admin 旁路 / 图环 422 /
-乐观锁 409 / 来源 KB 无权 403 / 即读即冻 batch_no 推进 / runs 202·409·422 /
-excel 201·413·422 / members owner-only 与最后 owner 保护。
+边界）。打真实路由层：反探测 404（非管理员与不存在同码）/ 建台·列表管理员
+门禁 403 / admin 全通 / 图环 422 / 乐观锁 409 / 来源 KB 无权 403 /
+即读即冻 batch_no 推进 / runs 202·409·422 / excel 201·413·422 /
+members 最后 owner 保护。
 """
 from __future__ import annotations
 
@@ -39,6 +48,7 @@ from knowledge_mining.mining.kb.workspace_sources import WorkspacePermissionErro
 pytestmark = pytest.mark.asyncio
 
 DOMAIN = "cloud_core_network"
+DOMAIN2 = "power_grid"
 
 
 def _user(uid: str, site_role: str = "member") -> dict:
@@ -265,7 +275,10 @@ class FakeDomainDirectory:
         self.users: dict[str, str] = {}
 
     async def is_domain_admin(self, user_id: str, domain_id: str) -> bool:
-        return (user_id, domain_id) in self.domain_admins
+        # 真库口径（db_artifacts.is_domain_admin）：active site admin 全通 /
+        # 本域 domain_role='admin' —— fake 同步含 site_admins。
+        return ((user_id, domain_id) in self.domain_admins
+                or user_id in self.site_admins)
 
     async def user_in_domain(self, user_id: str, domain_id: str) -> bool:
         return (user_id, domain_id) in self.bindings
@@ -394,7 +407,11 @@ async def env(monkeypatch, tmp_path):
 
     adb.bindings.update((uid, DOMAIN) for uid in
                         ("u-alice", "u-viewer", "u-bob", "u-domadm"))
-    adb.domain_admins.add(("u-domadm", DOMAIN))
+    adb.bindings.add(("u-foreigndm", DOMAIN2))
+    # 2026-11-17 收紧：默认操作者 u-alice 提升为域管理员（正路径全走
+    # admin）；u-viewer/u-bob 留绑定普通成员（负侧 404/403）。
+    adb.domain_admins.update({("u-alice", DOMAIN), ("u-domadm", DOMAIN),
+                              ("u-foreigndm", DOMAIN2)})
     adb.site_admins.add("u-root")
     adb.users.update({"u-viewer": "active", "u-bob": "active"})
 
@@ -452,7 +469,7 @@ async def test_crud_roundtrip_and_archive(env):
     assert r.status_code == 200
     body = r.json()
     assert body["name"] == "组网工作台"
-    assert body["my_role"] == "owner"
+    assert body["my_role"] == "domain_admin"  # 收紧后 my_role=合成角色
     assert body["status"] == "active"
     assert body["graph_json"] == {"nodes": []}
     # 负责人用户名透传（用户测试反馈修复1：db 层 JOIN，路由/服务不滤列）
@@ -479,17 +496,18 @@ async def test_crud_roundtrip_and_archive(env):
 async def test_delete_two_state_archive_then_purge(env):
     """DELETE 两态（用户反馈问题1——归档后真删，两步门禁）：active → 200
     status=archived（行保留）；已归档 → 200 status=deleted（行真删，此后
-    404 反探测）；editor 角色两态都 403（owner-only）；site admin 旁路可删。"""
+    404 反探测）；绑定成员（原 editor 负侧）收紧后=404 反探测（非管理员
+    与不存在同面）；site admin 旁路可删。"""
     wid = await _create_ws(env)
     r = await env.client.delete(f"/api/workspaces/{wid}")
     assert r.status_code == 200 and r.json()["status"] == "archived"
 
-    # owner-only：editor 对已归档工作区删除 → 403（admin 旁路之外不放行）
+    # 收紧（2026-11-17）：绑定成员即使挂 editor 成员行也 → 404 反探测
     env.db.members[(wid, "u-viewer")] = "editor"
     env.holder["user"] = _user("u-viewer")
     r = await env.client.delete(f"/api/workspaces/{wid}")
-    assert r.status_code == 403
-    assert r.json()["detail"]["code"] == "workspace_forbidden"
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "workspace_not_found"
 
     # owner 再 DELETE → 真删：status=deleted，行消失（fake 层级联成员行）
     env.holder["user"] = _user("u-alice")
@@ -513,9 +531,21 @@ async def test_delete_two_state_archive_then_purge(env):
 
 
 async def test_detail_404_antiprobe_stranger_same_as_missing(env):
-    """反探测：无权用户与不存在的 wid 同响应（404 + code=workspace_not_found）。"""
+    """反探测（收紧后口径）：非管理员（陌生人/绑定成员/他域域管理员）与
+    不存在的 wid 同响应（404 + code=workspace_not_found）。"""
     wid = await _create_ws(env)
     env.holder["user"] = _user("u-stranger")  # 无域绑定非成员
+    r = await env.client.get(f"/api/workspaces/{wid}")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "workspace_not_found"
+    # 绑定普通成员（即使挂成员行）→ 同面 404
+    env.db.members[(wid, "u-viewer")] = "viewer"
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.get(f"/api/workspaces/{wid}")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "workspace_not_found"
+    # 他域域管理员 → 同面 404（is_domain_admin 按工作区域判定）
+    env.holder["user"] = _user("u-foreigndm")
     r = await env.client.get(f"/api/workspaces/{wid}")
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "workspace_not_found"
@@ -525,7 +555,8 @@ async def test_detail_404_antiprobe_stranger_same_as_missing(env):
 
 
 async def test_list_visibility_admin_flags(env):
-    """admin 两旗：site/domain admin 见本域全部；陌生人只见面内自己参与的。"""
+    """收紧（2026-11-17）：site/domain admin 见本域全量；绑定普通成员与
+    陌生人 → 403 workspace_forbidden（列表门禁——不再有「自己参与的」面）。"""
     wid = await _create_ws(env, "alices-ws")
     env.holder["user"] = _user("u-root", site_role="admin")
     r = await env.client.get(f"/api/workspaces?domain_id={DOMAIN}")
@@ -534,17 +565,43 @@ async def test_list_visibility_admin_flags(env):
     env.holder["user"] = _user("u-domadm")
     r = await env.client.get(f"/api/workspaces?domain_id={DOMAIN}")
     assert [w["id"] for w in r.json()["workspaces"]] == [wid]
+    env.holder["user"] = _user("u-viewer")  # 绑定普通成员
+    r = await env.client.get(f"/api/workspaces?domain_id={DOMAIN}")
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "workspace_forbidden"
     env.holder["user"] = _user("u-stranger")
     r = await env.client.get(f"/api/workspaces?domain_id={DOMAIN}")
-    assert r.json()["workspaces"] == []
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "workspace_forbidden"
 
 
 async def test_create_requires_domain_grant(env):
+    """收紧（2026-11-17）：建台管理员门禁——陌生人/绑定普通成员 → 403
+    workspace_forbidden（创建无反探测对象）；域管理员 → 201；缺省域不可
+    解析仍 422。"""
     env.holder["user"] = _user("u-stranger")
     r = await env.client.post(
         "/api/workspaces", json={"name": "x", "domain_id": DOMAIN})
     assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "workspace_forbidden"
+    # 绑定普通成员（can_create_in_domain 旧口径曾放行）→ 403
+    env.holder["user"] = _user("u-viewer")
+    r = await env.client.post(
+        "/api/workspaces", json={"name": "x", "domain_id": DOMAIN})
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "workspace_forbidden"
+    # 域管理员（bind_domain domain_role='admin'）建台 → 成功
+    env.holder["user"] = _user("u-domadm")
+    r = await env.client.post(
+        "/api/workspaces", json={"name": "域管建台", "domain_id": DOMAIN})
+    assert r.status_code == 201, r.text
+    # 他域域管理员对本域建台 → 403（is_domain_admin 按目标域判定）
+    env.holder["user"] = _user("u-foreigndm")
+    r = await env.client.post(
+        "/api/workspaces", json={"name": "x", "domain_id": DOMAIN})
+    assert r.status_code == 403
     # 未提供 domain 且无绑定域 → 422
+    env.holder["user"] = _user("u-stranger")
     r = await env.client.post("/api/workspaces", json={"name": "x"})
     assert r.status_code == 422
 
@@ -559,29 +616,31 @@ async def _put_graph(client, wid: str, nodes: list[dict],
               "expected_revision": expected_revision})
 
 
-async def test_graph_permissions_viewer_403_stranger_404_admin_bypass(env):
+async def test_graph_permissions_member_404_admins_pass(env):
+    """收紧（2026-11-17）：绑定成员（原 viewer 403 用例）读写图均 → 404
+    反探测（与不存在同码）；陌生人同面；domain/site admin 全通。"""
     wid = await _create_ws(env)
     env.db.members[(wid, "u-viewer")] = "viewer"
     nodes = [_node("sp", "source"), _node("f", "filter", inputs=("sp:main",))]
 
     env.holder["user"] = _user("u-viewer")
     r = await _put_graph(env.client, wid, nodes)
-    assert r.status_code == 403
-    assert r.json()["detail"]["code"] == "workspace_forbidden"
-    # viewer 读图放行（read+）
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "workspace_not_found"
+    # 收紧后读图同样 404（read+ 角色面已退役）
     r = await env.client.get(f"/api/workspaces/{wid}/graph")
-    assert r.status_code == 200
+    assert r.status_code == 404
 
     env.holder["user"] = _user("u-stranger")
     r = await _put_graph(env.client, wid, nodes)
-    assert r.status_code == 404  # 非成员与不存在同面
+    assert r.status_code == 404  # 非管理员与不存在同面
 
-    env.holder["user"] = _user("u-domadm")  # domain admin 旁路
+    env.holder["user"] = _user("u-domadm")  # domain admin
     r = await _put_graph(env.client, wid, nodes)
     assert r.status_code == 200, r.text
     assert r.json()["graph_revision"] == 1
 
-    env.holder["user"] = _user("u-root", site_role="admin")  # site admin 旁路
+    env.holder["user"] = _user("u-root", site_role="admin")  # site admin
     r = await _put_graph(env.client, wid, nodes, expected_revision=1)
     assert r.status_code == 200
 
@@ -651,12 +710,12 @@ async def test_source_kb_dir_forbidden_403_and_ok_201(env):
     assert "dataset" not in row["input_manifest"]
     assert row["input_manifest"]["doc_count"] == 2
 
-    # viewer 接来源 → 403；DELETE 正常 → 200；再删 → 404
+    # 收紧（2026-11-17）：绑定成员接来源 → 404 反探测；DELETE 正常 → 200；再删 → 404
     env.db.members[(wid, "u-viewer")] = "viewer"
     env.holder["user"] = _user("u-viewer")
     r = await env.client.post(f"/api/workspaces/{wid}/sources", json={
         "connector": "kb_dir", "kb_id": "kb_ok", "node_id": "sp2"})
-    assert r.status_code == 403
+    assert r.status_code == 404
     env.holder["user"] = _user("u-alice")
     r = await env.client.delete(f"/api/workspaces/{wid}/sources/sp")
     assert r.status_code == 200
@@ -750,12 +809,12 @@ async def test_run_start_202_subgraph_422_inflight_409_cancel(env):
     r = await env.client.post(f"/api/workspaces/{wid}/runs/{run_id}/cancel")
     assert r.status_code == 200 and r.json()["cancelled"] is False
 
-    # viewer 启动/取消 → 403；取消他人工作区的 run → 404
+    # 收紧（2026-11-17）：绑定成员启动/取消 → 404 反探测；取消他人工作区的 run → 404
     env.db.members[(wid, "u-viewer")] = "viewer"
     env.holder["user"] = _user("u-viewer")
     r = await env.client.post(f"/api/workspaces/{wid}/runs", json={
         "scope": "workspace"})
-    assert r.status_code == 403
+    assert r.status_code == 404
     env.holder["user"] = _user("u-alice")
     r = await env.client.post(f"/api/workspaces/{wid}/runs/wsr_missing/cancel")
     assert r.status_code == 404
@@ -770,6 +829,8 @@ async def test_run_status_foreign_run_404(env):
 
 
 async def test_outputs_current_read_roles(env):
+    """收紧（2026-11-17）：管理员读输出面 200；绑定成员（原 read+ 面已
+    退役）与陌生人 → 404。"""
     wid = await _create_ws(env)
     env.ex.rdb.runs["wsr_x"] = {
         "id": "wsr_x", "workspace_id": wid, "status": "completed"}
@@ -778,7 +839,7 @@ async def test_outputs_current_read_roles(env):
     assert r.status_code == 200 and r.json()["outputs"] == {}
     env.holder["user"] = _user("u-viewer")
     r = await env.client.get(f"/api/workspaces/{wid}/outputs/current")
-    assert r.status_code == 200
+    assert r.status_code == 404
     env.holder["user"] = _user("u-stranger")
     r = await env.client.get(f"/api/workspaces/{wid}/outputs/current")
     assert r.status_code == 404
@@ -806,12 +867,12 @@ async def test_trial_design_role_and_port_mismatch(env):
         f"/api/workspaces/{wid}/outputs/f/nope/trial")
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "output_not_found"
-    # viewer → 403；节点不存在 → 422
+    # 收紧（2026-11-17）：绑定成员试跑 → 404 反探测；节点不存在 → 422
     env.db.members[(wid, "u-viewer")] = "viewer"
     env.holder["user"] = _user("u-viewer")
     r = await env.client.post(
         f"/api/workspaces/{wid}/outputs/f/main/trial")
-    assert r.status_code == 403
+    assert r.status_code == 404
     env.holder["user"] = _user("u-alice")
     r = await env.client.post(
         f"/api/workspaces/{wid}/outputs/ghost/main/trial")
@@ -885,7 +946,7 @@ async def test_export_route_status_codes(env):
 
 # ----------------------------------------------------------------- 成员
 
-async def test_members_owner_only_and_last_owner_guard(env):
+async def test_members_last_owner_guard_and_admin_governance(env):
     wid = await _create_ws(env)
 
     r = await env.client.get(f"/api/workspaces/{wid}/members")
@@ -899,11 +960,11 @@ async def test_members_owner_only_and_last_owner_guard(env):
         "user_id": "u-ghost", "role": "viewer"})
     assert r.status_code == 422  # 目标用户不在 kb_users
 
-    # viewer 治理成员 → 403（owner-only，admin 旁路）
+    # 收紧（2026-11-17）：绑定成员治理成员 → 404 反探测（与不存在同码）
     env.holder["user"] = _user("u-viewer")
     r = await env.client.post(f"/api/workspaces/{wid}/members", json={
         "user_id": "u-bob", "role": "viewer"})
-    assert r.status_code == 403
+    assert r.status_code == 404
 
     # owner 改角色；成员行不存在 → 404
     env.holder["user"] = _user("u-alice")
@@ -923,7 +984,68 @@ async def test_members_owner_only_and_last_owner_guard(env):
     r = await env.client.delete(f"/api/workspaces/{wid}/members/u-alice")
     assert r.status_code == 422
 
-    # domain admin 旁路治理
+    # domain admin 治理（收紧后能进门的都是管理员，天然有权）
     env.holder["user"] = _user("u-domadm")
     r = await env.client.delete(f"/api/workspaces/{wid}/members/u-viewer")
     assert r.status_code == 200
+
+
+# --------------------------------------------------- 收紧钉测（2026-11-17）
+
+
+async def test_bound_member_every_write_endpoint_404(env):
+    """收紧钉测：绑定普通成员（非管理员，挂 owner 级成员行也不放行）对既有
+    工作区**任何写端点**=404，且与不存在的 wid 响应同码同面（反探测信封
+    完全一致——status+code 逐一比对，不向无权者泄露存在性）。"""
+    wid = await _create_ws(env)
+    # 成员行给到最高角色 owner —— 收紧后成员行不再参与判定，仍应 404
+    env.db.members[(wid, "u-viewer")] = "owner"
+    env.holder["user"] = _user("u-viewer")
+
+    graph = {"graph": {"nodes": [_node("sp", "source")]},
+             "expected_revision": 0}
+    export_body = {"request_id": "r-pin", "items": [
+        {"node_id": "s", "port_id": "main", "artifact_name": "钉测"}]}
+    xlsx = _xlsx_bytes(env.tmp_path / "pin.xlsx", ["MOP"], [("NC-1",)])
+    writes: list[tuple[str, str, dict | None]] = [
+        ("patch", f"/api/workspaces/{wid}", {"name": "越权改名"}),
+        ("delete", f"/api/workspaces/{wid}", None),
+        ("post", f"/api/workspaces/{wid}/members",
+         {"user_id": "u-bob", "role": "viewer"}),
+        ("patch", f"/api/workspaces/{wid}/members/u-bob", {"role": "editor"}),
+        ("delete", f"/api/workspaces/{wid}/members/u-bob", None),
+        ("put", f"/api/workspaces/{wid}/graph", graph),
+        ("post", f"/api/workspaces/{wid}/sources",
+         {"connector": "kb_dir", "kb_id": "kb_ok", "node_id": "sp"}),
+        ("delete", f"/api/workspaces/{wid}/sources/sp", None),
+        ("post", f"/api/workspaces/{wid}/runs", {"scope": "workspace"}),
+        ("post", f"/api/workspaces/{wid}/runs/wsr_x/cancel", None),
+        ("post", f"/api/workspaces/{wid}/outputs/f/main/trial", None),
+        ("post", f"/api/workspaces/{wid}/exports", export_body),
+    ]
+    excel = ("post", f"/api/workspaces/{wid}/sources/excel",
+             {"files": {"file": ("pin.xlsx", xlsx,
+                                 "application/octet-stream")},
+              "data": {"node_id": "sp"}})
+
+    async def _call(entry):
+        method, path, payload = entry
+        if path.endswith("/sources/excel"):
+            return await env.client.post(path, **payload)
+        if payload is None:
+            return await getattr(env.client, method)(path)
+        return await getattr(env.client, method)(path, json=payload)
+
+    for entry in writes + [excel]:
+        r = await _call(entry)
+        assert r.status_code == 404, (entry[1], r.text)
+        assert r.json()["detail"]["code"] == "workspace_not_found", entry[1]
+        # 反探测同码：与不存在的 wid 响应面完全一致（wid 段替换）
+        missing = entry[1].replace(f"/{wid}", "/wsp_missing")
+        if entry is excel:
+            r2 = await env.client.post(missing, **entry[2])
+        else:
+            r2 = await _call((entry[0], missing, entry[2]))
+        assert r2.status_code == r.status_code, missing
+        assert r2.json()["detail"]["code"] == \
+            r.json()["detail"]["code"], missing

@@ -53,6 +53,9 @@ describe('Sidebar navigation', () => {
     expect(wrapper.text()).not.toContain('挖掘范式')
     expect(wrapper.text()).not.toContain('系统设置')
     expect(wrapper.text()).not.toContain('用户管理')
+    // 2026-11-17 收紧：制作工作台仅站点/域管理员可见
+    expect(wrapper.text()).not.toContain('制作工作台')
+    expect(wrapper.html()).not.toContain('/workspaces')
   })
 
   it('shows standalone user management to the selected domain administrator', () => {
@@ -68,6 +71,9 @@ describe('Sidebar navigation', () => {
     const wrapper = shallowMount(Sidebar)
 
     expect(wrapper.text()).toContain('用户管理')
+    // 2026-11-17 收紧：域管理员可见制作工作台
+    expect(wrapper.text()).toContain('制作工作台')
+    expect(wrapper.html()).toContain('/workspaces')
     expect(wrapper.text()).not.toContain('系统设置')
   })
 
@@ -75,6 +81,9 @@ describe('Sidebar navigation', () => {
     const wrapper = shallowMount(Sidebar)
     expect(wrapper.text()).toContain('用户管理')
     expect(wrapper.html()).toContain('/users')
+    // 2026-11-17 收紧：站点管理员可见制作工作台
+    expect(wrapper.text()).toContain('制作工作台')
+    expect(wrapper.html()).toContain('/workspaces')
   })
 
   it('does not present an unmatched raw domain id as a display name', () => {

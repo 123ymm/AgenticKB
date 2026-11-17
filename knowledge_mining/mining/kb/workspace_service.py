@@ -2,15 +2,20 @@
 """KB 知识制品工作台服务层（67号 MVP Task 8/9）——权限反探测 + CRUD/图/
 来源/运行面/成员编排 + 导出交付。
 
-机制权威 = docs/superpowers/plans/2026-11-16-workbench-mvp.md Task 8：
+机制权威 = docs/superpowers/plans/2026-11-16-workbench-mvp.md Task 8；
+**2026-11-17 收紧（用户指令：工作台仅站点/域管理员可用）**：
 
-- **权限判定序照 artifact_service._assert_role**：site admin（user.site_role
-  现值）→ domain admin（ArtifactDB.is_domain_admin 现查，谓词复用不自造）→
-  非成员还须当前绑定在工作区域内（user_in_domain——撤销域绑定后残留成员行
-  不放行，codex二审批号⑧同源）→ member_role 成员行 → owner_user_id 兜底；
-  **其余一律 WorkspaceNotFoundError**（404 反探测：不存在与无权同响应）。
-  成员但角色不足 → WorkspaceForbiddenError（403）。design=(owner,editor)；
-  read=+viewer；成员治理与归档 owner-only（admin 旁路满足任意 allowed）。
+- **权限判定序收口为仅管理员**（_assert_ws_role）：site admin
+  （user.site_role 现值）→ 返回 "admin"；domain admin
+  （ArtifactDB.is_domain_admin 现查——口径=site_role='admin' OR
+  user_domains 行 domain_role='admin'）→ 返回 "domain_admin"；**其余一律
+  WorkspaceNotFoundError**（404 反探测：不存在与无权同响应）。原「域绑定
+  预检→成员行→owner 兜底」的 owner/editor/viewer 成员面全部退役——allowed
+  参数保留签名但恒满足（能过判定的都是管理员，天然满足任意角色档）。
+  治理操作（成员管理/归档/真删除）原 owner-only 限定随之失效（管理员即
+  有权）。create_workspace 与 list_workspaces 加管理员门禁：不过 → 403
+  WorkspaceForbiddenError（workspace_forbidden；创建/列表无反探测对象——
+  域本身可见，只有台不可建不可列）。
 - **来源 KB 权限拍板**：工作区有权但来源 KB 无权（含 KB 不存在/非 active
   ——两者同面，不向无权者泄露 KB 存在性）→ 403
   WorkspaceSourceForbiddenError（workspace_source_forbidden）。
@@ -100,15 +105,11 @@ __all__ = [
     "WorkspaceSourceForbiddenError",
 ]
 
-#: 运行态读（详情/图读/来源读/outputs/runs 查询）：成员任一角色。
+#: 2026-11-17 收紧后以下三档仅作调用点签名兼容保留——_assert_ws_role 只认
+#: 管理员（admin/domain_admin），allowed 恒满足，不再有成员角色分档。
 ROLE_READ = ("owner", "editor", "viewer")
-#: 设计态（改图/接来源/启动·取消 run/试跑/patch）：owner+editor。
 ROLE_DESIGN = ("owner", "editor")
-#: 成员治理与归档：仅 owner（site/domain admin 由旁路放行）。
 ROLE_OWNER_ONLY = ("owner",)
-
-#: admin 旁路角色（_assert_ws_role 合成，满足任意 allowed）。
-_ADMIN_ROLES = ("admin", "domain_admin")
 
 #: run scope 服务端词表（subgraph 与执行器同步拒绝——迁移 012 词表预留）。
 _STARTABLE_SCOPES = ("workspace", "node")
@@ -117,7 +118,8 @@ _VALID_MEMBER_ROLES = ("owner", "editor", "viewer")
 
 
 class WorkspaceForbiddenError(WorkspaceError):
-    """403——工作区成员但角色不足（非成员走 404 反探测，见模块 docstring）。"""
+    """403——建台/列表管理员门禁不过（2026-11-17 收紧；非管理员对既有
+    工作区的访问走 404 反探测，见模块 docstring）。"""
 
     code = "workspace_forbidden"
 
@@ -168,8 +170,9 @@ class WorkspaceService:
 
     构造入参 pool 为 row_factory=dict_row 的 psycopg AsyncConnectionPool；
     executor 可注入（缺省自建 WorkspaceExecutor(pool)）。域谓词复用
-    ArtifactDB（is_domain_admin/user_in_domain/can_create_in_domain/
-    get_user_status——谓词唯一真相源不自造，口径同 kb/db.py）。
+    ArtifactDB（is_domain_admin/get_user_status——谓词唯一真相源不自造，
+    口径同 kb/db.py；user_in_domain/can_create_in_domain 在 2026-11-17
+    收紧后不再使用）。
     """
 
     def __init__(self, pool: Any, executor: Any = None) -> None:
@@ -186,29 +189,18 @@ class WorkspaceService:
         self, workspace: dict[str, Any], user: dict[str, Any],
         *allowed: str,
     ) -> tuple[dict[str, Any], str]:
-        """返回 (workspace, role)。判定序见模块 docstring；workspace 行由
-        调用方（_require）先行取好——本方法不做行读取。"""
+        """返回 (workspace, role)——2026-11-17 收紧为仅管理员判定：site
+        admin → "admin"；is_domain_admin(uid, ws.domain) → "domain_admin"；
+        **其余一律 WorkspaceNotFoundError**（404 反探测；原 owner/成员行/
+        viewer 路径全部退役）。allowed 保留签名但恒满足（管理员天然满足
+        任意角色档）；workspace 行由调用方（_require）先行取好。"""
         if _is_site_admin(user):
             return workspace, "admin"
-        uid = _uid(user)
-        domain_id = str(workspace["domain_id"])
-        if await self._adb.is_domain_admin(uid, domain_id):
+        if await self._adb.is_domain_admin(
+                _uid(user), str(workspace["domain_id"])):
             return workspace, "domain_admin"
-        if not await self._adb.user_in_domain(uid, domain_id):
-            raise WorkspaceNotFoundError(
-                f"workspace not found: {workspace['id']}")
-        role = await self._db.member_role(
-            workspace_id=str(workspace["id"]), user_id=uid)
-        if role is None and workspace.get("owner_user_id") == uid:
-            role = "owner"  # owner 成员行缺失的兜底（创建路径必有行）
-        if role is None:
-            raise WorkspaceNotFoundError(
-                f"workspace not found: {workspace['id']}")
-        if allowed and role not in allowed and role not in _ADMIN_ROLES:
-            raise WorkspaceForbiddenError(
-                f"role {role} not allowed (requires one of"
-                f" {list(allowed)})")
-        return workspace, role
+        raise WorkspaceNotFoundError(
+            f"workspace not found: {workspace['id']}")
 
     async def _require(
         self, user: dict[str, Any], workspace_id: str, *allowed: str,
@@ -225,13 +217,16 @@ class WorkspaceService:
         self, *, user: dict[str, Any], domain_id: str, name: str,
         description: str = "",
     ) -> dict[str, Any]:
+        """2026-11-17 收紧：建台管理员门禁——is_domain_admin（含 site
+        admin 全通）不过 → 403 workspace_forbidden（创建无反探测对象，
+        域本身可见）。原 can_create_in_domain（绑定 member 即放行）退役。"""
         if not isinstance(domain_id, str) or not domain_id.strip():
             raise WorkspaceValidationError("domain_id must be non-empty")
         if not isinstance(name, str) or not name.strip():
             raise WorkspaceValidationError("name must be a non-empty string")
-        if not await self._adb.can_create_in_domain(_uid(user), domain_id):
+        if not await self._adb.is_domain_admin(_uid(user), domain_id):
             raise WorkspaceForbiddenError(
-                f"domain not bound: {domain_id}")
+                f"admin only (site/domain): {domain_id}")
         return await self._db.create_workspace(
             domain_id=domain_id, name=name.strip(),
             description=description or "", owner_user_id=_uid(user),
@@ -240,12 +235,17 @@ class WorkspaceService:
     async def list_workspaces(
         self, *, user: dict[str, Any], domain_id: str,
     ) -> list[dict[str, Any]]:
-        """admin 两旗（site=user.site_role 现值；domain=库现查）= 本域全部；
-        余人=owner 行或成员行命中。域解析归路由层（缺省域回落）。"""
+        """2026-11-17 收紧：site admin 全通；否则对查询域做
+        is_domain_admin（域解析归路由层——缺省域回落同 _resolve_domain），
+        不过 → 403 workspace_forbidden（无「自己参与的」面）。过门后两类
+        管理员都是本域全量（admin 两旗只是 db 层查询范围）。"""
         is_site = _is_site_admin(user)
         is_dom_admin = (
             not is_site
             and await self._adb.is_domain_admin(_uid(user), domain_id))
+        if not is_site and not is_dom_admin:
+            raise WorkspaceForbiddenError(
+                f"admin only (site/domain): {domain_id}")
         return await self._db.list_workspaces(
             domain_id=domain_id, user_id=_uid(user),
             is_site_admin=is_site, is_domain_admin=is_dom_admin)
@@ -253,11 +253,10 @@ class WorkspaceService:
     async def get_workspace(
         self, *, user: dict[str, Any], workspace_id: str,
     ) -> dict[str, Any]:
-        """详情附 my_role（admin 旁路归一为 owner——前端可写判定口径，同
-        artifact_service.get_artifact）。"""
+        """详情附 my_role——收紧后只剩合成角色 admin/domain_admin（原
+        「admin 归一 owner」退役：前端 canWrite 改为对两角色放行）。"""
         ws, role = await self._require(user, workspace_id, *ROLE_READ)
-        my_role = "owner" if role in _ADMIN_ROLES else role
-        return {**ws, "my_role": my_role}
+        return {**ws, "my_role": role}
 
     async def patch_workspace(
         self, *, user: dict[str, Any], workspace_id: str,
@@ -280,8 +279,9 @@ class WorkspaceService:
         """DELETE 两态（用户反馈问题1——两步门禁，照制品「先停用再删除」）：
         active → 归档（幂等软删，返回行 status='archived'）；已 archived →
         purge 真删（单事务七表清理，返回 {"id", "status": "deleted"}——行已
-        不存在，不再有整行可回）。owner-only + admin 旁路（_require 门禁）；
-        db 层 purge 锁内再验一次 archived（并发改态的纵深防御）。"""
+        不存在，不再有整行可回）。2026-11-17 收紧后原 owner-only 限定退役
+        ——_require 只放行两类管理员，天然有权；db 层 purge 锁内再验一次
+        archived（并发改态的纵深防御）。"""
         ws, _ = await self._require(user, workspace_id, *ROLE_OWNER_ONLY)
         if str(ws.get("status")) == "archived":
             await self._db.purge_workspace(workspace_id=workspace_id)
@@ -334,7 +334,8 @@ class WorkspaceService:
         member_user_id: str, role: str,
     ) -> dict[str, Any]:
         """加成员/改角色（UPSERT 同口径，同 artifacts.upsert_member）。目标
-        用户须在 kb_users 且 active（以库为准）；owner-only + admin 旁路。"""
+        用户须在 kb_users 且 active（以库为准）；2026-11-17 收紧后治理权=
+        过 _require 的两类管理员（原 owner-only 限定退役）。"""
         await self._require(user, workspace_id, *ROLE_OWNER_ONLY)
         if role not in _VALID_MEMBER_ROLES:
             raise WorkspaceValidationError(f"invalid role: {role!r}")

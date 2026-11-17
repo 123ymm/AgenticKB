@@ -61,10 +61,14 @@ export interface WorkspaceSummary {
   updated_at: string
 }
 
-/** 详情行：完整行 + graph_json + my_role（admin 旁路归一 owner——前端可写判定口径）。 */
+/**
+ * 详情行：完整行 + graph_json + my_role。2026-11-17 收紧后 my_role 只剩
+ * 合成角色 'admin' | 'domain_admin'（服务层 _assert_ws_role 仅管理员判定，
+ * 普通成员 404 反探测）；owner/editor/viewer 保留在联合里作历史口径兼容。
+ */
 export interface WorkspaceDetail extends WorkspaceSummary {
   graph_json: WorkspaceGraph
-  my_role: 'owner' | 'editor' | 'viewer'
+  my_role: 'owner' | 'editor' | 'viewer' | 'admin' | 'domain_admin'
 }
 
 /**

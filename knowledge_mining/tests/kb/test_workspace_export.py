@@ -18,8 +18,9 @@
   kb_members 行后放行（read_kb_dir 同款谓词 KbDB.is_visible）。
 - 多 item 部分成功：一个合法 + 一个 stale → 200 语义逐项状态，exports 行
   succeeded。
-- 权限：非成员 → 404 反探测；viewer → 403；pending 行 → 409
-  export_in_progress；failed 行复用重跑（同 id 状态回 pending 再 succeeded）。
+- 权限（2026-11-17 收紧后口径）：非管理员（陌生人/绑定 viewer）→ 404 反
+  探测；pending 行 → 409 export_in_progress；failed 行复用重跑（同 id 状态
+  回 pending 再 succeeded）。
 
 真库跑法与 Task 2 同款（随机域前缀隔离，无模块级 skip；容器命令见计划
 文档 Task 0）。
@@ -68,12 +69,13 @@ def _ctx(u: dict) -> dict:
 async def _seed(async_pool) -> tuple:
     """随机域工作台 + 服务/仓储四件，返回 (svc, wdb, rdb, adb, ws, owner_ctx)。
 
-    owner 须绑定工作区域（服务层 _assert_ws_role 判定序：非 admin 走
-    user_in_domain——登记层直建工作区不自动绑域）。"""
+    2026-11-17 收紧：owner 从绑定 member 提升为该域 domain admin
+    （bind_domain domain_role='admin'）——服务层 _assert_ws_role 只认
+    管理员，普通绑定成员全 404。"""
     owner = await _user(async_pool)
     domain = f"dom-{_hex()}"
     await KbDB(async_pool).bind_domain(
-        user_id=str(owner["id"]), domain=domain)
+        user_id=str(owner["id"]), domain=domain, domain_role="admin")
     wdb = WorkspaceDB(async_pool)
     ws = await wdb.create_workspace(
         domain_id=domain, name="导出工作台", description="导出交付",
@@ -473,13 +475,15 @@ async def test_export_pending_conflict_and_failed_retry_reuses_row(
 
 
 async def test_export_permission_gates(async_pool) -> None:
+    """收紧（2026-11-17）：非管理员一律 404 反探测——陌生人、绑定 viewer
+    （挂成员行）同面同码。"""
     svc, wdb, rdb, adb, ws, ctx = await _seed(async_pool)
     nodes = [_node("sp", "source"), _node("s", "select", inputs=("sp:main",))]
     await _write_output(rdb, wdb, ws, str(ctx["id"]), nodes, "s",
                         _products())
 
     stranger = await _user(async_pool)
-    with pytest.raises(WorkspaceNotFoundError):  # 非成员=404 反探测同面
+    with pytest.raises(WorkspaceNotFoundError):  # 陌生人=404 反探测同面
         await _export(svc, ws, _ctx(stranger), f"req-{_hex(12)}",
                       [_item("s")])
 
@@ -488,10 +492,10 @@ async def test_export_permission_gates(async_pool) -> None:
         user_id=str(viewer["id"]), domain=str(ws["domain_id"]))
     await wdb.add_member(workspace_id=str(ws["id"]),
                          user_id=str(viewer["id"]), role="viewer")
-    with pytest.raises(WorkspaceError) as ei:  # viewer → 403
+    with pytest.raises(WorkspaceNotFoundError) as ei:  # 绑定 viewer → 404
         await _export(svc, ws, _ctx(viewer), f"req-{_hex(12)}",
                       [_item("s")])
-    assert str(ei.value.code) == "workspace_forbidden"
+    assert str(ei.value.code) == "workspace_not_found"
 
 
 # ------------------------------------------------------------ 跨工作区回放
@@ -550,8 +554,9 @@ async def _mk_ws_owner(async_pool, *, site_role: str, bind: bool):
                     (str(u["id"]),))
         u["site_role"] = "admin"
     if bind:
+        # 2026-11-17 收紧：operator 须域管理员（否则 404 到不了 owner 校验）
         await KbDB(async_pool).bind_domain(
-            user_id=str(u["id"]), domain=_BND[0])
+            user_id=str(u["id"]), domain=_BND[0], domain_role="admin")
         domain = _BND[0]
     else:
         domain = f"dom-{_hex()}"

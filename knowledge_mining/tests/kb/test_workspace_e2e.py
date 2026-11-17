@@ -248,7 +248,10 @@ async def _seed_env(async_pool) -> dict:
     domain = f"dom-{_hex()}"
     owner = await kbdb.create_user(username=f"we2e-{_hex(10)}")
     owner_id = str(owner["id"])
-    await kbdb.bind_domain(user_id=owner_id, domain=domain)
+    # 2026-11-17 收紧：owner 提升为域管理员（bind_domain domain_role='admin'）
+    # ——服务层只认站点/域管理员，普通绑定成员建台/读写全被拒。
+    await kbdb.bind_domain(user_id=owner_id, domain=domain,
+                           domain_role="admin")
     kb = await kbdb.create_kb(
         domain=domain, name=f"电源模块产品库-{_hex(6)}",
         owner_id=owner_id, visibility="private")

@@ -79,8 +79,11 @@ const ALL_NAV = [
   // 47 号：一张网接入（管理员：产品文档导入/重同步；KB 侧引用在知识库详情 tab）
   // 一张网图标用 Share（原 Key 与 MCP 接入撞图标）
   { path: '/onenet', label: '一张网接入', icon: Share, access: 'site-admin' },
-  // 67号 Task 10：制作工作台（制品的上游制作间，导出为制品草稿；只插入不动他项顺序）
-  { path: '/workspaces', label: '制作工作台', icon: MagicStick, access: 'all' },
+  // 67号 Task 10：制作工作台（制品的上游制作间，导出为制品草稿）。
+  // 2026-11-17 收紧（用户指令）：仅站点/域管理员可用——复用 'domain-users'
+  // 可见模式（语义=站点管理员或域管理员：mining auth 把 domain_role='admin'
+  // 映射为全量 capabilities，site admin 由 main_control 直给），与用户管理同门。
+  { path: '/workspaces', label: '制作工作台', icon: MagicStick, access: 'domain-users' },
   // 61号批次4：知识制品（表格建表发布，viewer 也有运行态视图）
   { path: '/artifacts', label: '知识制品', icon: Grid, access: 'all' },
   { path: '/llm', label: 'LLM 服务', icon: Cpu, access: 'site-admin' },
