@@ -446,6 +446,10 @@ async function resumeInflightRun(): Promise<void> {
       activeRunScope.value = latest.scope === 'node' ? 'node' : 'workspace'
       running.value = true
       lastRun.value = latest
+      // 死锁修复（用户反馈：run 期间重进页面后按钮永久禁用）：running 的
+      // 唯一"放下"途径是轮询循环发现终态——恢复标志的同时必须启动循环，
+      // 否则服务端跑完了也没人通知前端，running 永真，运行/导出全锁死。
+      startRunPolling()
     }
   } catch {
     // 恢复失败视为无在飞 run——不阻塞页面主数据
