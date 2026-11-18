@@ -296,7 +296,7 @@ Body:
 | 工具 | 用途 |
 |------|------|
 | `search_knowledge` | 搜内容：检索知识库，返回纯 EvidenceResponse（query/evidence/has_more）；evidence[].source 同时带 document_id 与 document_ref |
-| `get_knowledge` | 一切读取行为：域→库顶层浏览（kb_tree）、目录逐层浏览（browse_directory，view=directory）、文件清单/文件名搜索（documents/file_results）、证据原文（ev_）、整篇文档（doc_）、能力报告与结构导航与表格查询（st_） |
+| `get_knowledge` | 一切读取行为：域→库顶层浏览及制品清单翻页（kb_tree）、目录逐层浏览（browse_directory，view=directory）、文件清单/文件名搜索（documents/file_results）、证据原文（ev_）、整篇文档（doc_）、能力报告与结构导航与表格查询（st_）、知识制品读取与查询（art_） |
 | `manage_files` | 管理文件：`action="upload"` 上传新文件（可指定已存在目录 directory_path，ZIP 落位 {目录}/{包名}/…）或 `action="replace"` 按 document_id+expected_revision 替换任意本地文件（五种状态均可，不要求已挖掘）；两步直传 + 自动排队挖掘；**不提供删除、移动、重命名** |
 
 **文件身份三分法（58号，Agent 侧约定）**：
@@ -312,6 +312,29 @@ Body:
 工具开关按用户级 open_tools 控制；含已退役/改名工具名的历史配置会在验钥时自动迁移（剔除退役名 + 改名映射 1:1 不扩权，如 upload_document → manage_files）。58号起老钥匙的自定义 instructions 已随迁移清空（以官方默认为准），自定义工具描述按工具名查找、旧名挂载的自动失效。
 
 传输相关的 `MCP_TRANSPORT` / `MCP_HOST` / `MCP_PORT` 见上文「两种运行模式」；后端相关的环境变量见上文那张表（**以那张为准**）。
+
+## 知识制品清单翻页
+
+`get_knowledge()` 返回开放知识库清单，以及当前钥匙可访问的知识制品（表格和 Wiki）。制品每页最多 20 个，知识库清单不受此限制。
+
+顶层响应在 `artifacts` 之外返回两个字段：
+
+| 字段 | 含义 |
+|------|------|
+| `artifacts_cursor` | 读取下一页制品的游标，原样传回；末页为 `null` |
+| `artifacts_has_more` | 是否还有下一页制品，末页为 `false` |
+
+调用示例：
+
+```python
+page = get_knowledge()  # 第一页制品 + 完整知识库清单
+if page["artifacts_has_more"]:  # 按需读取下一页
+    page = get_knowledge(cursor=page["artifacts_cursor"])
+```
+
+翻页时不传 `ref`、`kb_name` 或 `file_query`；每页仍返回域→库树，`artifacts` 是该页制品。没有可用制品时返回空数组、`artifacts_cursor=null` 和 `artifacts_has_more=false`。无效游标或翻页服务异常会明确报错；首页制品服务异常时沿用原有降级行为，仍返回知识库清单并省略制品字段，不能把字段缺失理解成没有制品。
+
+此游标只用于顶层制品清单。读取文档或导航结构时，仍使用相应响应的 `cursor`；查询 `art_` 表格行时，分页参数仍写在 `query` 内，不同入口的游标不能混用。
 
 ## 典型调用顺序
 

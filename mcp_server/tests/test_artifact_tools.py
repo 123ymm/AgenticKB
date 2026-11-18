@@ -326,6 +326,8 @@ def test_browse_top_appends_artifacts_section(monkeypatch, calls):
 
     assert out["view"] == "kb_tree"
     assert [a["artifact_ref"] for a in out["artifacts"]] == ["art_ab12"]
+    assert out["artifacts_cursor"] == "next"
+    assert out["artifacts_has_more"] is True
     body = json.loads(calls[0].content)
     assert body == {
         "domain": "cloud_core_network", "username": "alice",
@@ -348,6 +350,8 @@ def test_browse_top_artifacts_failure_degrades_silently(monkeypatch, calls):
     assert out["view"] == "kb_tree"
     assert out["domains"][0]["knowledge_bases"] == [{"name": "网络手册库"}]
     assert "artifacts" not in out
+    assert "artifacts_cursor" not in out
+    assert "artifacts_has_more" not in out
 
 
 def test_browse_top_artifacts_unreachable_also_degrades(monkeypatch, calls):
@@ -361,6 +365,93 @@ def test_browse_top_artifacts_unreachable_also_degrades(monkeypatch, calls):
     out = server.get_knowledge()
     assert out["view"] == "kb_tree"
     assert "artifacts" not in out
+
+
+@pytest.mark.parametrize("has_kbs", [True, False])
+def test_browse_top_artifacts_can_read_all_pages(monkeypatch, calls, has_kbs):
+    """Agent 原样回传游标，45 个制品按 20/20/5 返回；零开放库也可翻页。"""
+    artifacts = [{"artifact_ref": f"art_{i}", "kind": "wiki"} for i in range(45)]
+    pages = {
+        None: (artifacts[:20], "opaque-page-2", True),
+        "opaque-page-2": (artifacts[20:40], "opaque-page-3", True),
+        "opaque-page-3": (artifacts[40:], None, False),
+    }
+
+    def responder(request):
+        assert request.url.path == "/api/internal/artifact-list"
+        body = json.loads(request.content)
+        assert body["limit"] == 20
+        assert body["key_id"] == "key-1"
+        assert body["username"] == "alice"
+        assert body["domain"] == "cloud_core_network"
+        assert body["is_admin"] is False
+        items, cursor, has_more = pages[body["cursor"]]
+        return ok({"artifacts": items, "cursor": cursor, "has_more": has_more})
+
+    install(monkeypatch, handler_for(calls, responder), calls)
+    ident = IDENT if has_kbs else Identity(
+        username="alice", user_id="u-1", key_id="key-1",
+        key_domain="cloud_core_network", open_kbs=(),
+    )
+    ident_server(monkeypatch, ident)
+    kbs = [{"id": "kb-1", "name": "网络手册库", "domain": "cloud_core_network"}] if has_kbs else []
+    patch_listing(monkeypatch, kbs)
+
+    first = server.get_knowledge()
+    second = server.get_knowledge(cursor=first["artifacts_cursor"])
+    last = server.get_knowledge(cursor=second["artifacts_cursor"])
+
+    assert [len(p["artifacts"]) for p in (first, second, last)] == [20, 20, 5]
+    assert [a for p in (first, second, last) for a in p["artifacts"]] == artifacts
+    assert first["artifacts_has_more"] is True
+    assert second["artifacts_has_more"] is True
+    assert last["artifacts_has_more"] is False
+    assert last["artifacts_cursor"] is None
+    expected_kbs = [{"name": "网络手册库"}] if has_kbs else []
+    for page in (first, second, last):
+        assert page["view"] == "kb_tree"
+        assert page["domains"] == [{"domain": "cloud_core_network", "knowledge_bases": expected_kbs}]
+    assert len(calls) == 3
+
+
+def test_browse_top_empty_artifacts_has_no_next_page(monkeypatch, calls):
+    install(monkeypatch, handler_for(calls, lambda request: ok({
+        "artifacts": [], "cursor": None, "has_more": False,
+    })), calls)
+    ident_server(monkeypatch)
+    patch_listing(monkeypatch, [])
+
+    out = server.get_knowledge()
+    assert out["artifacts"] == []
+    assert out["artifacts_cursor"] is None
+    assert out["artifacts_has_more"] is False
+
+
+@pytest.mark.parametrize("failure", ["invalid_cursor", "server_error", "unreachable"])
+def test_browse_top_artifact_page_errors_are_not_hidden(monkeypatch, calls, failure):
+    """主动翻页不能沿用首页的静默降级，否则错误会伪装成末页。"""
+    def responder(request):
+        assert json.loads(request.content)["cursor"] == "page-token"
+        if failure == "invalid_cursor":
+            return httpx.Response(400, json={"error": {
+                "code": "unsupported_operation", "message": "cursor 非法",
+            }})
+        if failure == "server_error":
+            return httpx.Response(500, json={"detail": "boom"})
+        raise httpx.ConnectError("serving down")
+
+    install(monkeypatch, handler_for(calls, responder), calls)
+    ident_server(monkeypatch)
+    patch_listing(monkeypatch, [])
+
+    with pytest.raises(ToolError) as exc_info:
+        server.get_knowledge(cursor="page-token")
+    if failure == "invalid_cursor":
+        assert "[unsupported_operation]" in str(exc_info.value)
+        assert "cursor 非法" in str(exc_info.value)
+    else:
+        assert exc_info.value.ledger_status == "failed"
+    assert len(calls) == 1
 
 
 # ── 63号批次4 T3：wiki query 形态透传契约 ────────────────────────────────

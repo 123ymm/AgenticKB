@@ -150,6 +150,9 @@ DEFAULT_INSTRUCTIONS = """\
 工作流：先用 get_knowledge 不带参数看自己有什么（返回域→库树），或
 browse_directory="" 逐层看目录；要更新文件就 search_knowledge / get_knowledge
 拿到 document_id + content_revision 后走 manage_files(action="replace")。
+顶层浏览的 artifacts 每页最多 20 个制品；artifacts_has_more=true 时，把
+artifacts_cursor 原样传给 get_knowledge(cursor=...) 继续取下一页（不传 ref、
+kb_name 或 file_query）。知识库清单不受此分页限制。
 search_knowledge 模糊检索返回证据列表 evidence（每条带 ref/type/content/source），
 source 里同时有 document_id 和 document_ref。之后一切深入都走 get_knowledge：
 - ref 是 ev_（search 结果 evidence[].ref）：给内容原文，truncated=true 时加 mode
@@ -462,7 +465,8 @@ def get_knowledge(
     分流矩阵（返回都带 "view" 字段自标识）：
     | 你给的入口                        | 行为                     | view            |
     |-----------------------------------|--------------------------|-----------------|
-    | 什么都不传                        | 域→库 顶层浏览           | kb_tree         |
+    | 什么都不传                        | 域→库树 + 制品清单首页   | kb_tree         |
+    | 只传 cursor                       | 制品清单下一页 + 域→库树 | kb_tree         |
     | kb_name + browse_directory        | **目录逐层浏览**：直属   | directory       |
     |                                   | 子目录（空目录可见）+    |                 |
     |                                   | 直属文件（不递归）       |                 |
@@ -495,6 +499,11 @@ def get_knowledge(
     cursor 写在 query 里，不吃顶层分页参数）；wiki={"q": 文本}[+"mode"/"top_k"]
     搜页、{"page": 页 key} 整读一页、{"links": 页 key}[+"direction"] 看单跳邻页
     （query 只收 dict 或不传，无字符串形态）。kb_names 不影响制品——按域开放。
+
+    顶层浏览的 artifacts 每页最多 20 个；artifacts_has_more=true 时，用返回的
+    artifacts_cursor 调 get_knowledge(cursor=...) 继续翻页，不传 ref/kb_name/
+    file_query。末页 artifacts_cursor=null、artifacts_has_more=false。每次仍返回
+    完整的开放知识库清单。首页制品服务异常时省略制品字段；翻页异常会明确报错。
 
     browse_directory 与 directory_prefix 的分工（都用 / 分隔的目录路径，如
     "产品文档/手册"）：browse_directory=**打开文件夹看一眼**（只列本层直属
@@ -552,7 +561,8 @@ def get_knowledge(
             默认50）/ documents·file_results·directory 的 documents 每页
             （≤200 默认50）。
         cursor: 分页游标：上一页返回的 cursor 原样传回（doc_ 与 navigation 与
-            st_+query 表格行分页——三处通用，不要自行改写）。
+            st_+query 表格行分页）；顶层浏览则传上一页的 artifacts_cursor，
+            继续读取制品清单（每页最多 20 个）。不同入口的游标不可混用或改写。
         offset: 仅 documents/file_results/directory 视图：分页偏移。
         kb_names: 仅 ref 分支：限定库范围（与 search_knowledge 的 kb_names 同义，
             默认全部开放库）。注意与 kb_name（浏览目标库）是两回事。
@@ -612,7 +622,7 @@ def get_knowledge(
             "directory_prefix/status 只在 file_query（跨库搜文件）或 kb_name+file_query"
             "（库内搜文件）场景下生效：请同时传 file_query，或去掉过滤参数。"
         )
-    return _browse_top(ident, domain)
+    return _browse_top(ident, domain, cursor)
 
 
 def _get_by_ref(ident: Identity, ref: str, domain: str | None,
@@ -780,10 +790,11 @@ def _search_files_across_kbs(
     }
 
 
-def _browse_top(ident: Identity, domain: str | None) -> dict:
+def _browse_top(ident: Identity, domain: str | None, cursor: str | None = None) -> dict:
     """顶层：开放库按钥匙域分组（批次2 单域钥匙——分组只含 key_domain，
     不再按 listing 的域聚合多组；不回内部 id，Agent 只需要 name）。"""
     resolved = _domain(ident, domain)  # 校验参数：不传=钥匙域；传了必须相等
+    cursor = cursor if cursor and cursor.strip() else None
     try:
         listing = backend.list_knowledge_bases(ident.username, ident.key_id)
     except backend.ToolBackendError as exc:
@@ -804,16 +815,23 @@ def _browse_top(ident: Identity, domain: str | None) -> dict:
             "检索内容用 search_knowledge；按文件名找文件用 get_knowledge 传 "
             "file_query（跨库）；知识制品（表格与 Wiki）在 artifacts 段（仅本钥匙"
             "被开放的部分），用其 artifact_ref（art_）配 get_knowledge 的 query "
-            "精确查询；domain 可不传（自动使用本钥匙绑定的知识域）。"
+            "精确查询；artifacts 每页最多 20 个，artifacts_has_more=true 时用 "
+            "get_knowledge(cursor=artifacts_cursor) 取下一页，不传 ref/kb_name/"
+            "file_query；domain 可不传（自动使用本钥匙绑定的知识域）。"
         ),
     }
-    # 61号批次3：发现通道——顶层浏览附带域内可见制品说明卡（前 20 张，Agent
-    # 要深入就用卡里的 art_ ref 走 get_knowledge(ref=art_…[, query=…])）。
-    # 发现通道挂了不影响主浏览：静默降级为不带 artifacts 段。
+    # 发现通道每页 20 个制品，游标由 serving 生成和校验，MCP 原样透传。
+    # 首页失败沿用降级行为；主动翻页失败必须报错，不能伪装成已到末页。
     try:
-        listing_artifacts = backend.list_artifacts(resolved, ident, limit=20)
+        listing_artifacts = _serving_call(
+            backend.list_artifacts, resolved, ident, cursor=cursor, limit=20,
+        )
         out["artifacts"] = listing_artifacts.get("artifacts") or []
+        out["artifacts_cursor"] = listing_artifacts.get("cursor")
+        out["artifacts_has_more"] = bool(listing_artifacts.get("has_more", False))
     except Exception as exc:  # noqa: BLE001 —— 降级面必须兜住一切上游异常
+        if cursor:
+            raise
         logger.warning("artifact discovery degraded: %r", exc)
     return out
 
