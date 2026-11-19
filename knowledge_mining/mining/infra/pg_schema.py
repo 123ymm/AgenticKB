@@ -188,6 +188,12 @@ _KB_PURGE_TASKS_DDL = (
 _KB_EXPORT_TASKS_DDL = (
     _REPO_ROOT / "databases" / "kb" / "schemas" / "020_kb_export_tasks.sql"
 )
+# 67号工作台 MVP：工作台 7 表（登记/成员/来源/运行/输出/绑定/导出）。自包含——
+# kb_workspace_* 之间的 FK 组内自洽，无跨表引用，挂链尾；存量库同文版本化迁移
+# =core/20261116_012_kb_workspaces。
+_KB_WORKSPACES_DDL = (
+    _REPO_ROOT / "databases" / "kb" / "schemas" / "021_kb_workspaces.sql"
+)
 _WORKFLOW_CONTROL_DDL = _REPO_ROOT / "databases" / "mining_control" / "schemas" / "001_mining_workflow_postgresql.sql"
 
 
@@ -305,6 +311,8 @@ def domain_schema_paths() -> tuple[Path, ...]:
         # KB 整库导出任务表（020，原 018：与 wiki 的 018 撞号让位改号——启动链
         # 无 ledger、按文件名无记账，改号安全；存量库迁移 id 不变）：自包含，链尾。
         _KB_EXPORT_TASKS_DDL,
+        # 67号工作台 MVP：kb_workspace_* 七表（自包含，挂链尾）。
+        _KB_WORKSPACES_DDL,
     )
 
 

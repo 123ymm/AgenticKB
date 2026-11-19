@@ -91,6 +91,15 @@ EXPORT_TABLES = [
     "kb_wiki_page_units",
     # wiki 目录草稿（66号批次1，迁移 011，019 启动链同文；无外键）
     "kb_wiki_tocs",
+    # 知识制品工作台（67号 MVP，迁移 012，021 启动链同文）：父表先导
+    # （workspaces→members/sources，runs→run_outputs；bindings/exports 无外键）
+    "kb_workspaces",
+    "kb_workspace_members",
+    "kb_workspace_sources",
+    "kb_workspace_runs",
+    "kb_workspace_run_outputs",
+    "kb_workspace_output_bindings",
+    "kb_workspace_exports",
 ]
 
 # 兼容尚未完成 52 号 bootstrap 的测试/旧库；生产收敛库验证要求这些表存在。

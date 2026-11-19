@@ -43,11 +43,14 @@ def _row(key: str, data: dict, ordinal: int = 0, provenance: list | None = None,
 
 
 async def _index_names(pool, artifact_id: str) -> list[str]:
+    # LIKE 转义前先算好替换值——f-string 表达式段含反斜杠是 3.12+ 语法
+    # （Task 13 e2e 收口在 3.11 验证镜像下发现的可移植性缺口）。
+    esc_id = artifact_id.replace("_", "\\_")
     async with pool.connection() as conn:
         cur = await conn.execute(
             """SELECT indexname FROM pg_indexes
                WHERE tablename = 'kb_table_rows' AND indexname LIKE %s""",
-            (f"idx\\_kbtr\\_{artifact_id.replace('_', '\\_')}\\_%",),
+            (f"idx\\_kbtr\\_{esc_id}\\_%",),
         )
         return sorted(str(r["indexname"]) for r in await cur.fetchall())
 

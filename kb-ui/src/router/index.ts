@@ -89,6 +89,19 @@ const router = createRouter({
           props: true,
         },
         {
+          // 67号 Task 10：制作工作台（制品的上游制作间；普通成员可达——
+          // 权限反探测在后端（非成员 404 与不存在同面），路由不做 admin 门）
+          path: 'workspaces',
+          name: 'workspaces',
+          component: () => import('@/views/workspaces/WorkspacesListView.vue'),
+        },
+        {
+          path: 'workspaces/:workspaceId',
+          name: 'workspace-detail',
+          component: () => import('@/views/workspaces/WorkspaceDetailView.vue'),
+          props: true,
+        },
+        {
           path: 'mining/workflows',
           name: 'mining-workflows',
           component: () => import('@/views/mining/WorkflowListView.vue'),

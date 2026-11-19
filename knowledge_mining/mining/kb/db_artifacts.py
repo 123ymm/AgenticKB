@@ -2,6 +2,10 @@
 
 风格契约与 mining/kb/db.py 一致：TEXT id、参数化 SQL、dict_row、
 多语句显式 ``conn.transaction()``、每方法自开连接（一个事务）。
+Task 9 起另设 conn 级内核（``_create_artifact_in_conn`` /
+``_upsert_member_in_conn`` / ``_replace_columns_in_conn`` /
+``_insert_rows_in_conn`` / ``_delete_rows_in_conn``）：薄封装方法行为
+不变，工作台导出在服务层单 item 事务内复用内核，跨表写入同事务原子。
 
 机制权威 = docs/下一阶段/61号 §四（发布事务 / ensure_draft / diff）：
 - 行地址 row_key = 业务主键（ordinal 仅展示）；jsonb 三字段分工：
@@ -113,30 +117,52 @@ class ArtifactDB:
             raise ArtifactError("invalid_visibility")
         async with self._pool.connection() as conn:
             async with conn.transaction():
-                cur = await conn.execute(
-                    """INSERT INTO kb_artifacts
-                       (artifact_id, domain_id, kind, title, description,
-                        owner_user_id, visibility, status, current_revision,
-                        draft_open)
-                       VALUES (%(id)s, %(dom)s, %(kind)s, %(title)s, %(desc)s,
-                               %(owner)s, %(vis)s, 'draft', 0, FALSE)
-                       RETURNING artifact_id, domain_id, kind, title, description,
-                                 usage_note, owner_user_id, visibility, status,
-                                 current_revision, draft_open, created_at, updated_at""",
-                    {
-                        "id": artifact_id or _new_artifact_id(),
-                        "dom": domain_id, "kind": kind, "title": title,
-                        "desc": description, "owner": owner_user_id,
-                        "vis": visibility,
-                    },
+                return await ArtifactDB._create_artifact_in_conn(
+                    conn,
+                    artifact_id=artifact_id, domain_id=domain_id, kind=kind,
+                    title=title, description=description,
+                    owner_user_id=owner_user_id, visibility=visibility,
                 )
-                row = dict(await cur.fetchone())  # type: ignore[arg-type]
-                await conn.execute(
-                    """INSERT INTO kb_artifact_members (artifact_id, user_id, role)
-                       VALUES (%s, %s, 'owner')""",
-                    (row["artifact_id"], owner_user_id),
-                )
-                return row
+
+    @staticmethod
+    async def _create_artifact_in_conn(
+        conn: Any,
+        *,
+        artifact_id: str | None = None,
+        domain_id: str,
+        kind: str,
+        title: str,
+        description: str,
+        owner_user_id: str,
+        visibility: str,
+    ) -> dict[str, Any]:
+        """conn 级创建内核（67号 Task 9 提炼）：制品行 + owner 成员行——
+        调用方负责事务边界与词表校验（薄封装 create_artifact 行为不变；
+        工作台导出在其单 item 事务内复用，保证制品/成员/列/行同事务原子）。"""
+        cur = await conn.execute(
+            """INSERT INTO kb_artifacts
+               (artifact_id, domain_id, kind, title, description,
+                owner_user_id, visibility, status, current_revision,
+                draft_open)
+               VALUES (%(id)s, %(dom)s, %(kind)s, %(title)s, %(desc)s,
+                       %(owner)s, %(vis)s, 'draft', 0, FALSE)
+               RETURNING artifact_id, domain_id, kind, title, description,
+                         usage_note, owner_user_id, visibility, status,
+                         current_revision, draft_open, created_at, updated_at""",
+            {
+                "id": artifact_id or _new_artifact_id(),
+                "dom": domain_id, "kind": kind, "title": title,
+                "desc": description, "owner": owner_user_id,
+                "vis": visibility,
+            },
+        )
+        row = dict(await cur.fetchone())  # type: ignore[arg-type]
+        await conn.execute(
+            """INSERT INTO kb_artifact_members (artifact_id, user_id, role)
+               VALUES (%s, %s, 'owner')""",
+            (row["artifact_id"], owner_user_id),
+        )
+        return row
 
     async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         async with self._pool.connection() as conn:
@@ -371,6 +397,19 @@ class ArtifactDB:
                 (artifact_id, user_id, role),
             )
             return dict(await cur.fetchone())  # type: ignore[arg-type]
+
+    @staticmethod
+    async def _upsert_member_in_conn(
+        conn: Any, artifact_id: str, user_id: str, role: str,
+    ) -> None:
+        """conn 级成员行内核（Task 9 导出复用：owner≠操作者时补操作者
+        editor 行，走 DO NOTHING——重写草稿路径幂等，不覆盖既有角色）。"""
+        await conn.execute(
+            """INSERT INTO kb_artifact_members (artifact_id, user_id, role)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (artifact_id, user_id) DO NOTHING""",
+            (artifact_id, user_id, role),
+        )
 
     async def remove_member(self, artifact_id: str, user_id: str) -> None:
         async with self._pool.connection() as conn:
@@ -1047,23 +1086,32 @@ class ArtifactDB:
                 await self._assert_expected_updated_at(
                     conn, artifact_id, expected_updated_at,
                 )
-                await conn.execute(
-                    "DELETE FROM kb_table_columns WHERE artifact_id = %s",
-                    (artifact_id,),
-                )
-                for col in columns:
-                    await conn.execute(
-                        """INSERT INTO kb_table_columns
-                           (artifact_id, column_id, column_name, column_type,
-                            enum_values, is_primary_key, is_indexed, alias, ordinal)
-                           VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s)""",
-                        (artifact_id, col["column_id"], col["column_name"],
-                         col["column_type"], _json(col.get("enum_values")),
-                         bool(col.get("is_primary_key", False)),
-                         bool(col.get("is_indexed", False)),
-                         _json(col.get("alias") or []), int(col.get("ordinal", 0))),
-                    )
-                await self._touch_in_conn(conn, artifact_id)
+                await ArtifactDB._replace_columns_in_conn(
+                    conn, artifact_id, columns)
+
+    @staticmethod
+    async def _replace_columns_in_conn(
+        conn: Any, artifact_id: str, columns: list[dict[str, Any]],
+    ) -> None:
+        """conn 级建列内核（删旧插新 + touch updated_at；调用方负责事务
+        边界、词表校验与乐观锁校验）。"""
+        await conn.execute(
+            "DELETE FROM kb_table_columns WHERE artifact_id = %s",
+            (artifact_id,),
+        )
+        for col in columns:
+            await conn.execute(
+                """INSERT INTO kb_table_columns
+                   (artifact_id, column_id, column_name, column_type,
+                    enum_values, is_primary_key, is_indexed, alias, ordinal)
+                   VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, %s)""",
+                (artifact_id, col["column_id"], col["column_name"],
+                 col["column_type"], _json(col.get("enum_values")),
+                 bool(col.get("is_primary_key", False)),
+                 bool(col.get("is_indexed", False)),
+                 _json(col.get("alias") or []), int(col.get("ordinal", 0))),
+            )
+        await ArtifactDB._touch_in_conn(conn, artifact_id)
 
     # ------------------------------------------------------------------ 行
 
@@ -1077,7 +1125,6 @@ class ArtifactDB:
         expected_updated_at（codex三审 P1-4，手工行增路径）：事务内 FOR UPDATE
         取行+比对后再写——整批原子（校验+写入同事务，多批同进一事务）。
         """
-        inserted = updated = 0
         flat_rows = [
             {
                 "row_key": r["row_key"],
@@ -1093,41 +1140,66 @@ class ArtifactDB:
                 await self._assert_expected_updated_at(
                     conn, artifact_id, expected_updated_at,
                 )
-                for start in range(0, len(flat_rows), _ROW_INSERT_BATCH):
-                    chunk = flat_rows[start:start + _ROW_INSERT_BATCH]
-                    # 8 占位符 = 8 列（artifact_id..updated_by）；与 flat.extend 一一对应
-                    # （对抗审查修复①：曾漏 2 个占位符，真库必炸——静态测试钉死）。
-                    values_sql = ", ".join(
-                        ["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk),
-                    )
-                    flat: list[Any] = []
-                    for item in chunk:
-                        flat.extend([
-                            artifact_id, revision, item["row_key"], item["data"],
-                            item["provenance"], item["conflicts"], item["ordinal"],
-                            updated_by,
-                        ])
-                    cur = await conn.execute(
-                        """INSERT INTO kb_table_rows
-                           (artifact_id, revision, row_key, data, provenance, conflicts,
-                            ordinal, updated_by)
-                           VALUES """ + values_sql + """
-                           ON CONFLICT (artifact_id, revision, row_key) DO UPDATE SET
-                               data = EXCLUDED.data,
-                               provenance = kb_table_rows.provenance || EXCLUDED.provenance,
-                               conflicts = EXCLUDED.conflicts,
-                               ordinal = EXCLUDED.ordinal,
-                               updated_at = now(),
-                               updated_by = EXCLUDED.updated_by
-                           RETURNING (xmax = 0) AS _inserted""",
-                        flat,
-                    )
-                    for hit in await cur.fetchall():
-                        if hit["_inserted"]:
-                            inserted += 1
-                        else:
-                            updated += 1
+                inserted, updated = await ArtifactDB._insert_rows_in_conn(
+                    conn, artifact_id, revision, flat_rows, updated_by)
         return {"inserted": inserted, "updated": updated}
+
+    @staticmethod
+    async def _insert_rows_in_conn(
+        conn: Any, artifact_id: str, revision: int,
+        flat_rows: list[dict[str, Any]], updated_by: str,
+    ) -> tuple[int, int]:
+        """conn 级行 UPSERT 内核（flat 行=data/provenance/conflicts 已 _json
+        编码；调用方负责事务边界与乐观锁校验）。返回 (inserted, updated)。"""
+        inserted = updated = 0
+        for start in range(0, len(flat_rows), _ROW_INSERT_BATCH):
+            chunk = flat_rows[start:start + _ROW_INSERT_BATCH]
+            # 8 占位符 = 8 列（artifact_id..updated_by）；与 flat.extend 一一对应
+            # （对抗审查修复①：曾漏 2 个占位符，真库必炸——静态测试钉死）。
+            values_sql = ", ".join(
+                ["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(chunk),
+            )
+            flat: list[Any] = []
+            for item in chunk:
+                flat.extend([
+                    artifact_id, revision, item["row_key"], item["data"],
+                    item["provenance"], item["conflicts"], item["ordinal"],
+                    updated_by,
+                ])
+            cur = await conn.execute(
+                """INSERT INTO kb_table_rows
+                   (artifact_id, revision, row_key, data, provenance, conflicts,
+                    ordinal, updated_by)
+                   VALUES """ + values_sql + """
+                   ON CONFLICT (artifact_id, revision, row_key) DO UPDATE SET
+                       data = EXCLUDED.data,
+                       provenance = kb_table_rows.provenance || EXCLUDED.provenance,
+                       conflicts = EXCLUDED.conflicts,
+                       ordinal = EXCLUDED.ordinal,
+                       updated_at = now(),
+                       updated_by = EXCLUDED.updated_by
+                   RETURNING (xmax = 0) AS _inserted""",
+                flat,
+            )
+            for hit in await cur.fetchall():
+                if hit["_inserted"]:
+                    inserted += 1
+                else:
+                    updated += 1
+        return inserted, updated
+
+    @staticmethod
+    async def _delete_rows_in_conn(
+        conn: Any, artifact_id: str, revision: int,
+    ) -> int:
+        """conn 级删行内核（Task 9 导出专用：B.5 重写草稿=删除重插，rev0
+        整版换新——provenance 不随 UPSERT 拼接、行数不残留）。"""
+        cur = await conn.execute(
+            "DELETE FROM kb_table_rows"
+            " WHERE artifact_id = %s AND revision = %s",
+            (artifact_id, revision),
+        )
+        return int(cur.rowcount or 0)
 
     async def _assert_expected_updated_at(
         self, conn: Any, artifact_id: str, expected_updated_at: Any,

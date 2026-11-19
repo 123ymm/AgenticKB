@@ -25,6 +25,8 @@ MIRROR_PAIRS = [
      "databases/migrations/core/20261021_010_wiki_artifacts.sql"),
     ("databases/kb/schemas/019_wiki_toc.sql",
      "databases/migrations/core/20261103_011_wiki_toc.sql"),
+    ("databases/kb/schemas/021_kb_workspaces.sql",
+     "databases/migrations/core/20261116_012_kb_workspaces.sql"),
 ]
 
 

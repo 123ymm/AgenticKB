@@ -184,6 +184,33 @@ async def get_artifact_import_service(request: Request) -> "Any":
     return ArtifactImportService(await get_artifact_db(request))
 
 
+# --------------------------------------------------- 工作台（67号 Task 8）
+
+#: WorkspaceExecutor 模块级单例（内部持惰性 LlmTaskClient 的同步 httpx
+#: 连接池——每请求新建 executor 会随 run 泄漏连接池；先例=wiki 生命周期
+#: 单例注）。pool 在首建时捕获（app.state.pg_pool 进程内恒定）。
+_WORKSPACE_EXECUTOR_SINGLETON: "Any" = None
+
+
+def _get_workspace_executor(pool: "Any") -> "Any":
+    global _WORKSPACE_EXECUTOR_SINGLETON
+    if _WORKSPACE_EXECUTOR_SINGLETON is None:
+        from knowledge_mining.mining.kb.workspace_executor import (
+            WorkspaceExecutor,
+        )
+        _WORKSPACE_EXECUTOR_SINGLETON = WorkspaceExecutor(pool)
+    return _WORKSPACE_EXECUTOR_SINGLETON
+
+
+async def get_workspace_service(request: Request) -> "Any":
+    """67号 Task 8：工作台服务层（权限反探测 + CRUD/图/来源/运行编排；
+    执行器单例共享，服务对象本身无状态每请求新建）。"""
+    from knowledge_mining.mining.kb.workspace_service import WorkspaceService
+    return WorkspaceService(
+        request.app.state.pg_pool,
+        _get_workspace_executor(request.app.state.pg_pool))
+
+
 async def get_export_service(request: Request) -> "Any":
     """整库导出（打包下载通道）：KbDB + ExportDB + 对象存储 + 导出配置."""
     from knowledge_mining.mining.infra.export_config import ExportConfig

@@ -59,3 +59,7 @@ migrations:
     path: core/20261103_011_wiki_toc.sql
     mode: online_expand
     checksum: 30eb840b1fb9c55612f2ae1c4f936e6c3fefcbcffd4a3b0ec0cf5a7a5d56325c
+  - id: core/20261116_012_kb_workspaces
+    path: core/20261116_012_kb_workspaces.sql
+    mode: online_expand
+    checksum: 23b850288210072dd2ef21a78d95050a1e6e465d742d4f415e7602d00521be89

@@ -1,33 +1,45 @@
 <template>
   <div class="artifact-detail">
-    <!-- Header：标题 + 状态/类型 + 生命周期操作 -->
+    <!-- Header：图标+标题、徽章成组（高保真 ar-title/ar-badges 排版）+ 生命周期操作 -->
     <div class="artifact-detail__header">
       <div class="artifact-detail__head-left">
-        <router-link to="/artifacts" class="artifact-back">
-          <el-icon><ArrowLeft /></el-icon>
-          <span>知识制品</span>
-        </router-link>
-        <h2 class="artifact-detail__title">{{ artifact?.title || '加载中…' }}</h2>
-        <el-tag v-if="artifact" size="small" :type="statusTagType(artifact.status)">
-          {{ statusLabel(artifact.status) }}
-        </el-tag>
-        <el-tag v-if="artifact" size="small" effect="plain">
-          {{ artifact.kind === 'wiki' ? 'Wiki' : '表格' }}
-        </el-tag>
-        <!-- D01（66号 §5）：服务版本 tag——rev>0 且非停用时点明「rN 正在服务」，
-             与下方草稿 tag 并列，让「正式版在服务 + 另有待发布草稿」的并存一眼可读。 -->
-        <el-tag v-if="servingRevisionLabel" size="small" type="success" effect="plain">
-          {{ servingRevisionLabel }}
-        </el-tag>
-        <!-- 草稿 tag 与 servingRevisionLabel 同源（Task 3.3 审查 Minor）：有
-             服务版（非停用且 rev>0）才说「另有待发布内容」；停用/rev0 语境一律
-             「draft 开放中」——deprecated+draft 边角不再出现「另有待发布」悬空。 -->
-        <el-tag v-if="artifact && artifact.draft_open" size="small" type="warning" effect="plain">
-          {{ servingRevisionLabel ? '另有待发布内容' : 'draft 开放中' }}
-        </el-tag>
-        <el-tag v-if="artifact" size="small" :type="artifact.visibility === 'public' ? 'success' : 'info'">
-          {{ artifact.visibility === 'public' ? '公开' : '私有' }}
-        </el-tag>
+        <!-- 标题一行式（2026-11-13 用户拍板）：返回箭头+图标+标题+状态章全同行；
+             全局页头已有「知识制品」，返回入口只留箭头不重复字样。 -->
+        <div class="artifact-detail__title-row">
+          <router-link
+            to="/artifacts"
+            class="artifact-back"
+            aria-label="返回知识制品列表"
+            title="返回知识制品列表"
+          >
+            <el-icon><ArrowLeft /></el-icon>
+          </router-link>
+          <span v-if="artifact" class="artifact-detail__kindicon" :class="`is-${artifact.kind}`" aria-hidden="true">
+            {{ artifact.kind === 'wiki' ? 'W' : 'T' }}
+          </span>
+          <h2 class="artifact-detail__title">{{ artifact?.title || '加载中…' }}</h2>
+          <div v-if="artifact" class="artifact-detail__badges">
+            <el-tag size="small" :type="statusTagType(artifact.status)">
+              {{ statusLabel(artifact.status) }}
+            </el-tag>
+            <el-tag size="small" effect="plain">
+              {{ artifact.kind === 'wiki' ? 'Wiki' : '表格' }}
+            </el-tag>
+            <!-- D01（66号 §5）：服务版本 tag——rev>0 且非停用时点明「rN 正在服务」。 -->
+            <el-tag v-if="servingRevisionLabel" size="small" type="success" effect="plain">
+              {{ servingRevisionLabel }}
+            </el-tag>
+            <!-- 草稿 tag 与 servingRevisionLabel 同源（Task 3.3 审查 Minor）：有
+                 服务版（非停用且 rev>0）才说「另有待发布内容」；停用/rev0 语境一律
+                 「draft 开放中」。 -->
+            <el-tag v-if="artifact.draft_open" size="small" type="warning" effect="plain">
+              {{ servingRevisionLabel ? '另有待发布内容' : 'draft 开放中' }}
+            </el-tag>
+            <el-tag size="small" :type="artifact.visibility === 'public' ? 'success' : 'info'">
+              {{ artifact.visibility === 'public' ? '公开' : '私有' }}
+            </el-tag>
+          </div>
+        </div>
       </div>
       <div v-if="artifact && canWrite" class="artifact-detail__actions">
         <el-tooltip
@@ -84,7 +96,8 @@
 
     <el-tabs v-if="artifact" v-model="activeTab" class="artifact-detail__tabs">
       <!-- ── 设计态：导入向导 / 列定义 / 行编辑三面板（owner+editor；viewer 无设计态）── -->
-      <el-tab-pane label="设计态" name="design">
+      <el-tab-pane name="design">
+        <template #label><el-icon class="artifact-detail__tab-icon"><EditPen /></el-icon>设计态</template>
         <!-- L01 空制品引导（66号 §4）：刚创建的空制品给「下一步做什么」指路
              ——空 Wiki 提示从知识库生成；空表格提示上传 Excel 或编辑字段。 -->
         <el-alert
@@ -96,9 +109,9 @@
           :title="emptyGuide.title"
           :description="emptyGuide.description"
         />
-        <!-- wiki 分支（63号批次2/3）：编译面板（来源绑定+目录确认+进度轮询）
-             在上；内容区「页面｜图谱」切换（66号 D03.1——四个主页签不变）。
-             viewer 也可读（面板内部按 canWrite 收敛写入口）。 -->
+        <!-- wiki 分支（2026-11-13 重构）：编译面板在上；内容区=统一三栏视图
+             （目录｜正文默认渲染｜近邻图谱）——「页面｜图谱」切换取消，
+             近邻并入右栏；canWrite 开写入口（编辑正文/页面属性/新建/删除/目录拖拽）。 -->
         <template v-if="artifact.kind === 'wiki'">
           <WikiCompilePanel
             :artifact-id="artifactId"
@@ -106,40 +119,12 @@
             :expected-updated-at="artifact.updated_at"
             @changed="reloadAll"
           />
-          <div class="artifact-detail__wiki-views" role="tablist" aria-label="设计态内容视图">
-            <button
-              type="button"
-              role="tab"
-              :aria-selected="designWikiView === 'pages'"
-              :class="{ active: designWikiView === 'pages' }"
-              data-test="wiki-design-view-pages"
-              @click="setWikiView('design', 'pages')"
-            >页面</button>
-            <button
-              type="button"
-              role="tab"
-              :aria-selected="designWikiView === 'graph'"
-              :class="{ active: designWikiView === 'graph' }"
-              data-test="wiki-design-view-graph"
-              @click="setWikiView('design', 'graph')"
-            >图谱</button>
-          </div>
-          <!-- v-show 常驻：切图谱不丢编辑器状态（目录未保存修改守卫在面板内） -->
-          <WikiEditorPanel
-            v-show="designWikiView === 'pages'"
-            ref="wikiEditorRef"
+          <WikiReaderPanel
+            :key="`design-${artifactId}-${artifact.updated_at}`"
             :artifact-id="artifactId"
             :can-write="canWrite"
             :expected-updated-at="artifact.updated_at"
-            :draft-open="artifact.draft_open"
             @changed="reloadAll"
-          />
-          <WikiGraphPanel
-            v-if="designGraphActivated"
-            v-show="designWikiView === 'graph'"
-            :artifact-id="artifactId"
-            :draft="canWrite"
-            @open-page="openWikiPageFromDesign"
           />
         </template>
         <template v-else-if="canWrite">
@@ -148,7 +133,10 @@
             :active="activeTab === 'design'"
             @imported="reloadAll"
           />
-          <el-divider content-position="left">列定义</el-divider>
+          <div class="artifact-detail__sec-head">
+            <span class="artifact-detail__sec-title">列定义</span>
+            <span class="artifact-detail__sec-sub">{{ artifact.schema.length }} 列 · 主键/类型/枚举在这里管理</span>
+          </div>
           <ArtifactSchemaPanel
             :artifact-id="artifactId"
             :can-write="canWrite"
@@ -156,7 +144,10 @@
             :expected-updated-at="artifact.updated_at"
             @changed="reloadAll"
           />
-          <el-divider content-position="left">数据编辑</el-divider>
+          <div class="artifact-detail__sec-head">
+            <span class="artifact-detail__sec-title">数据编辑</span>
+            <span class="artifact-detail__sec-sub">双击单元格编辑所在行 · 草稿口径</span>
+          </div>
           <ArtifactRowsPanel
             ref="rowsPanel"
             :artifact-id="artifactId"
@@ -171,7 +162,8 @@
       </el-tab-pane>
 
       <!-- ── 运行态：说明卡子组件 + 只读行表格（本棒可用）── -->
-      <el-tab-pane label="运行态" name="runtime">
+      <el-tab-pane name="runtime" lazy>
+        <template #label><el-icon class="artifact-detail__tab-icon"><Reading /></el-icon>运行态</template>
         <div class="artifact-detail__meta-bar">
           <!-- C01：说明卡（描述/使用说明/版本/消费方式 + artifact_ref 复制 +
                Agent 三条件区）整体抽入子组件——本视图已被多任务触碰，控行数。 -->
@@ -207,73 +199,44 @@
               @click="repairProjection"
             >修复投影</el-button>
           </div>
-          <div class="artifact-detail__wiki-views" role="tablist" aria-label="运行态内容视图">
-            <button
-              type="button"
-              role="tab"
-              :aria-selected="runtimeWikiView === 'pages'"
-              :class="{ active: runtimeWikiView === 'pages' }"
-              data-test="wiki-runtime-view-pages"
-              @click="setWikiView('runtime', 'pages')"
-            >页面</button>
-            <button
-              type="button"
-              role="tab"
-              :aria-selected="runtimeWikiView === 'graph'"
-              :class="{ active: runtimeWikiView === 'graph' }"
-              data-test="wiki-runtime-view-graph"
-              @click="setWikiView('runtime', 'graph')"
-            >图谱</button>
-          </div>
           <WikiReaderPanel
-            v-show="runtimeWikiView === 'pages'"
-            ref="wikiReaderRef"
+            :key="`runtime-${artifactId}-${artifact.current_revision}`"
             :artifact-id="artifactId"
-          />
-          <WikiGraphPanel
-            v-if="runtimeGraphActivated"
-            v-show="runtimeWikiView === 'graph'"
-            :artifact-id="artifactId"
-            :draft="false"
-            @open-page="openWikiPageFromRuntime"
           />
         </template>
         <template v-else>
-          <el-table v-loading="rowsLoading" :data="runtimeRows" size="small">
-            <el-table-column label="行键" min-width="150">
-              <template #default="{ row }">
-                <el-tooltip :content="row.row_key" placement="top" :disabled="row.row_key === displayRowKey(row)">
-                  <span>{{ displayRowKey(row) }}</span>
-                </el-tooltip>
-              </template>
-            </el-table-column>
-            <el-table-column
-              v-for="col in runtimeColumns"
-              :key="col.column_id"
-              :label="col.column_name"
-              min-width="130"
-              show-overflow-tooltip
+          <!-- 统一表格视图（与设计态同形态，只读）：行键并入主键列展示口径 -->
+          <div v-loading="rowsLoading" class="artifact-detail__runtime-table">
+            <ArtifactTableView
+              :columns="runtimeColumns"
+              :rows="runtimeRows"
+              :editable="false"
+              :show-sources="false"
+              :index-offset="(rowsPage - 1) * rowsPageSize"
+              :footer-text="`${rowsTotal} 行 · ${runtimeColumns.length} 列 · 正式版只读`"
             >
-              <template #default="{ row }">{{ displayValue(row.data[col.column_name]) }}</template>
-            </el-table-column>
-            <template #empty>
-              <EmptyState text="暂无已发布数据（发布后在运行态可见）" />
-            </template>
-          </el-table>
+              <template #empty>
+                <EmptyState text="暂无已发布数据（发布后在运行态可见）" />
+              </template>
+            </ArtifactTableView>
+          </div>
           <el-pagination
-            v-if="rowsTotal > rowsPageSize"
             class="artifact-detail__pager"
-            layout="total, prev, pager, next"
+            layout="total, sizes, prev, pager, next"
             :total="rowsTotal"
             :page-size="rowsPageSize"
+            :page-sizes="[20, 50, 100]"
+            :pager-count="7"
             :current-page="rowsPage"
             @current-change="onRowsPageChange"
+            @size-change="onRowsSizeChange"
           />
         </template>
       </el-tab-pane>
 
       <!-- ── 成员：成员管理仅 owner（后端 ROLE_OWNER_ONLY）── -->
-      <el-tab-pane label="成员" name="members" lazy>
+      <el-tab-pane name="members" lazy>
+        <template #label><el-icon class="artifact-detail__tab-icon"><User /></el-icon>成员</template>
         <ArtifactMembersPanel
           :artifact-id="artifactId"
           :can-manage="isOwner"
@@ -283,7 +246,8 @@
       </el-tab-pane>
 
       <!-- ── 版本：revisions 列表 + 回滚（面板内）── -->
-      <el-tab-pane label="版本" name="versions" lazy>
+      <el-tab-pane name="versions" lazy>
+        <template #label><el-icon class="artifact-detail__tab-icon"><Timer /></el-icon>版本</template>
         <ArtifactVersionsPanel
           ref="versionsPanel"
           :artifact-id="artifactId"
@@ -349,23 +313,22 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft, Edit } from '@element-plus/icons-vue'
+import { ArrowLeft, Edit, EditPen, Reading, Timer, User } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useArtifactsApi } from '@/api/artifacts'
+import { useDocumentTitle } from '@/composables/useDocumentTitle'
 import { apiErrorDetail } from '@/api/proxyClient'
 import EmptyState from '@/components/common/EmptyState.vue'
 import ArtifactImportWizard from '@/components/artifacts/ArtifactImportWizard.vue'
 import ArtifactUsagePanel from '@/components/artifacts/ArtifactUsagePanel.vue'
+import ArtifactTableView from '@/components/artifacts/ArtifactTableView.vue'
 import ArtifactSchemaPanel from '@/components/artifacts/ArtifactSchemaPanel.vue'
 import ArtifactRowsPanel from '@/components/artifacts/ArtifactRowsPanel.vue'
 import ArtifactMembersPanel from '@/components/artifacts/ArtifactMembersPanel.vue'
 import ArtifactVersionsPanel from '@/components/artifacts/ArtifactVersionsPanel.vue'
 import ArtifactPublishDialog from '@/components/artifacts/ArtifactPublishDialog.vue'
 import WikiCompilePanel from '@/components/artifacts/WikiCompilePanel.vue'
-import WikiEditorPanel from '@/components/artifacts/WikiEditorPanel.vue'
-import WikiGraphPanel from '@/components/artifacts/WikiGraphPanel.vue'
 import WikiReaderPanel from '@/components/artifacts/WikiReaderPanel.vue'
-import { decodeRowKey } from '@/utils/rowKey'
 import type {
   ArtifactColumn,
   ArtifactDetail,
@@ -381,6 +344,10 @@ const api = useArtifactsApi()
 const router = useRouter()
 
 const artifact = ref<ArtifactDetail | null>(null)
+
+// 浏览器标签：制品标题跟随（加载前回落「知识制品」）——站名后缀取挂载时
+// document.title（brand 启动期已写入）；须在 artifact 声明后（immediate 求值）
+useDocumentTitle(() => artifact.value?.title || '知识制品')
 const loading = ref(false)
 const loadError = ref('')
 const activeTab = ref<'design' | 'runtime' | 'members' | 'versions'>('design')
@@ -390,7 +357,7 @@ const runtimeRows = ref<ArtifactRow[]>([])
 const runtimeColumns = ref<ArtifactColumn[]>([])
 const rowsTotal = ref(0)
 const rowsPage = ref(1)
-const rowsPageSize = 20
+const rowsPageSize = ref(20)
 const rowsLoading = ref(false)
 const runtimeLoaded = ref(false)
 
@@ -405,39 +372,6 @@ const metaForm = ref({ title: '', description: '', usage_note: '', visibility: '
 
 // 发布
 const publishVisible = ref(false)
-
-// ── wiki 内容区「页面｜图谱」切换（66号 D03.1：四个主页签不变，表格制品无此入口）──
-/** 当前内容视图（pages=编辑器/阅读器；graph=只读图谱）。 */
-const designWikiView = ref<'pages' | 'graph'>('pages')
-const runtimeWikiView = ref<'pages' | 'graph'>('pages')
-/** 图谱懒挂载：首次切图谱才 mount（不拉数据），此后 v-show 常驻（切回不重载）。 */
-const designGraphActivated = ref(false)
-const runtimeGraphActivated = ref(false)
-/** 面板引用：图谱「打开页面」→ 切回页面视图并定位该页（selectPage 已 expose）。 */
-const wikiEditorRef = ref<InstanceType<typeof WikiEditorPanel> | null>(null)
-const wikiReaderRef = ref<InstanceType<typeof WikiReaderPanel> | null>(null)
-
-function setWikiView(area: 'design' | 'runtime', view: 'pages' | 'graph'): void {
-  if (area === 'design') {
-    if (view === 'graph') designGraphActivated.value = true
-    designWikiView.value = view
-  } else {
-    if (view === 'graph') runtimeGraphActivated.value = true
-    runtimeWikiView.value = view
-  }
-}
-
-/** 图谱「打开页面」：切回页面视图 + 定位该页（编辑器/阅读器 v-show 常驻已挂载；
- * 方法级可选调用——面板被测试桩替换等边缘形态下静默跳过）。 */
-function openWikiPageFromDesign(pageKey: string): void {
-  designWikiView.value = 'pages'
-  void wikiEditorRef.value?.selectPage?.(pageKey)
-}
-
-function openWikiPageFromRuntime(pageKey: string): void {
-  runtimeWikiView.value = 'pages'
-  void wikiReaderRef.value?.selectPage?.(pageKey)
-}
 
 // ── Q01 wiki 检索状态条 + 投影修复（66号批次5 Task 5.3）──
 
@@ -587,7 +521,7 @@ async function loadRuntimeRows() {
   rowsLoading.value = true
   try {
     const page = await api.listRows(props.artifactId, {
-      page: rowsPage.value, size: rowsPageSize,
+      page: rowsPage.value, size: rowsPageSize.value,
     })
     runtimeRows.value = page.rows
     rowsTotal.value = page.total
@@ -613,6 +547,13 @@ watch(activeTab, (tab) => {
 
 function onRowsPageChange(page: number) {
   rowsPage.value = page
+  loadRuntimeRows()
+}
+
+/** 每页条数变更：回第一页重拉（与设计态行面板同口径）。 */
+function onRowsSizeChange(size: number) {
+  rowsPageSize.value = size
+  rowsPage.value = 1
   loadRuntimeRows()
 }
 
@@ -740,18 +681,6 @@ function statusLabel(status: string): string {
   return '草稿'
 }
 
-function displayValue(value: unknown): string {
-  if (value === null || value === undefined) return '—'
-  if (typeof value === 'object') return JSON.stringify(value)
-  return String(value)
-}
-
-/** 运行态行键展示：有主键 → hex 解码回原文；无主键（uuid）原样。 */
-const runtimeHasPk = computed(() => runtimeColumns.value.some(c => c.is_primary_key))
-
-function displayRowKey(row: ArtifactRow): string {
-  return decodeRowKey(row.row_key, runtimeHasPk.value)
-}
 
 onMounted(reload)
 
@@ -759,42 +688,38 @@ defineExpose({ reloadAll })
 </script>
 
 <style scoped>
-.artifact-detail__header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.artifact-detail__head-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.artifact-detail__title { margin: 0; font-size: 20px; }
-.artifact-back { display: inline-flex; align-items: center; gap: 4px; color: var(--kb-text-tertiary); text-decoration: none; font-size: 13px; }
-.artifact-back:hover { color: var(--kb-accent, #2563eb); }
+.artifact-detail__tabs :deep(.el-tabs__item) { display: inline-flex; align-items: center; gap: 5px; }
+.artifact-detail__tab-icon { font-size: 14px; }
+.artifact-detail__header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.artifact-detail__head-left { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.artifact-back { display: inline-flex; align-items: center; gap: 4px; color: var(--kb-text-tertiary); text-decoration: none; font-size: 12px; flex-shrink: 0; }
+.artifact-back:hover { color: var(--kb-accent, #0891b2); }
+/* ── 标题行：返回箭头 + kindicon + 大标题 + 状态章 一行式（用户拍板：章不掉行） ── */
+.artifact-detail__title-row {
+  display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap;
+}
+.artifact-detail__kindicon {
+  display: inline-grid; place-items: center; flex-shrink: 0;
+  width: 34px; height: 34px; border-radius: 9px;
+  border: 1px solid var(--kb-border, #e2e8f0);
+  background: var(--kb-accent-soft, rgba(8, 145, 178, 0.08));
+  color: var(--kb-accent, #0891b2);
+  font-size: 14px; font-weight: 700;
+}
+.artifact-detail__title {
+  margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  min-width: 0; flex-shrink: 1;
+}
+.artifact-detail__badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
 .artifact-detail__desc { margin: 8px 0 12px; color: var(--kb-text-tertiary); font-size: 13px; }
 .artifact-detail__missing { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .artifact-detail__meta-bar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
-/* 说明卡占位（desc-card 名字保留——class 传给子组件根元素继承 flex 占位） */
-.artifact-detail__desc-card { flex: 1; max-width: 720px; }
+/* 说明卡满宽（2026-11-13 用户反馈「框宽与页面不适配」——不再 720px 截断，
+   与下方表格/阅读壳同宽对齐） */
+.artifact-detail__desc-card { flex: 1; min-width: 0; }
 .artifact-detail__visibility-hint { width: 100%; color: var(--kb-text-tertiary); font-size: 12px; line-height: 1.5; }
 .artifact-detail__empty-guide { margin-bottom: 14px; }
-/* 内容区切换与检索记录页保持一致。 */
-.artifact-detail__wiki-views {
-  display: flex;
-  gap: 4px;
-  margin: 14px 0 10px;
-  border-bottom: 1px solid var(--kb-border-light);
-}
-.artifact-detail__wiki-views button {
-  padding: 9px 16px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  color: var(--kb-text-secondary);
-  background: transparent;
-  cursor: pointer;
-}
-.artifact-detail__wiki-views button.active {
-  color: var(--kb-accent);
-  border-bottom-color: var(--kb-accent);
-  font-weight: 600;
-}
-.artifact-detail__wiki-views button:focus-visible {
-  outline: 2px solid var(--kb-accent);
-  outline-offset: -2px;
-}
 /* Q01 检索状态条（66号批次5）：运行态 wiki 顶部一行；警示=黄边淡底 */
 .artifact-detail__search-status {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -807,4 +732,58 @@ defineExpose({ reloadAll })
 }
 .artifact-detail__search-status-text { font-size: 12.5px; color: var(--kb-text-secondary, #606266); }
 .artifact-detail__pager { margin-top: 12px; justify-content: flex-end; }
+</style>
+
+<style>
+/**
+ * 知识制品详情页 EP 组件观感统一层（非 scoped——作用于本页子树的所有
+ * Element Plus 组件：行/字段/成员/版本/说明卡/导入向导/发布弹窗）。
+ * 设计语言=docs/高保真 artifacts-1115：软表头、发丝线、soft 徽章、
+ * 圆角弹窗。只调观感，不动组件行为（分页/展开/校验全保留）。
+ */
+.artifact-detail .el-table th.el-table__cell {
+  background: var(--kb-bg-card-hover, #f8fafc);
+  color: var(--kb-text-secondary, #64748b);
+  font-weight: 500;
+  font-size: 12px;
+}
+.artifact-detail .el-table td.el-table__cell { font-size: 12.5px; }
+.artifact-detail .el-tag {
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.artifact-detail .el-tag--plain { background: transparent; }
+/* 弹窗观感已由全局层统一（styles/global.css），页内不再重复覆盖 */
+/* 页签规格（高保真 ar-tabs 观感）：可读字号 + 高命中区 + 2px 圆头活动条 */
+.artifact-detail .el-tabs__item {
+  font-size: 13.5px;
+  height: 44px;
+  line-height: 44px;
+  font-weight: 500;
+}
+.artifact-detail .el-tabs__item.is-active { font-weight: 600; color: var(--kb-text-primary, #0f172a); }
+.artifact-detail .el-tabs__active-bar { height: 2px; border-radius: 2px; }
+.artifact-detail .el-descriptions__label {
+  color: var(--kb-text-tertiary, #94a3b8);
+  font-size: 12px;
+  width: 92px;
+}
+.artifact-detail .el-descriptions__body { font-size: 12.5px; }
+.artifact-detail__sec-head {
+  display: flex; align-items: baseline; gap: 10px;
+  margin: 22px 0 10px;
+}
+.artifact-detail__sec-head:first-child { margin-top: 4px; }
+.artifact-detail__sec-title {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 14.5px; font-weight: 600;
+  color: var(--kb-text-primary, inherit);
+}
+.artifact-detail__sec-title::before {
+  content: '';
+  width: 3px; height: 14px; border-radius: 2px;
+  background: var(--kb-accent, #0891b2);
+}
+.artifact-detail__sec-sub { font-size: 12px; color: var(--kb-text-tertiary, #94a3b8); }
 </style>
