@@ -12,6 +12,7 @@ T1）/ collect_units 编译取材（批次3 T2：列/scope 过滤/向量解码/�
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import uuid
 from array import array
@@ -764,19 +765,21 @@ async def test_unit_source_provenance_gate_and_unit_join(async_pool) -> None:
                       change_summary="v1", published_by="editor-1")
 
     # 命中：真身行 + provenance 的 (kb_id, snapshot_id)
-    row = await inputs.unit_source(aid, rid0, [1])
+    owner_id = (await kbdb.get_kb(kb_id))["owner_id"]
+    row = await inputs.unit_source(aid, rid0, [1], user_id=owner_id)
     assert row == {"kb_id": kb_id, "snapshot_id": snap,
-                   "content_text": "单元0", "section_ref": "s-0"}
+                   "content_text": "单元0", "section_ref": "s-0", "total_chars": 3,
+                   "content_hash": hashlib.md5("单元0".encode()).hexdigest()}
 
     # 归属门：库里存在但不在本制品 provenance（rev1）→ None
-    assert await inputs.unit_source(aid, rid1, [1]) is None
+    assert await inputs.unit_source(aid, rid1, [1], user_id=owner_id) is None
     # 完全未知 unit → None
-    assert await inputs.unit_source(aid, "ru-none", [1]) is None
+    assert await inputs.unit_source(aid, "ru-none", [1], user_id=owner_id) is None
     # revision 不匹配（发布清 rev0；rev2 不存在）→ None
-    assert await inputs.unit_source(aid, rid0, [0]) is None
-    assert await inputs.unit_source(aid, rid0, [2]) is None
+    assert await inputs.unit_source(aid, rid0, [0], user_id=owner_id) is None
+    assert await inputs.unit_source(aid, rid0, [2], user_id=owner_id) is None
     # 空 revision 集（调用方 runtime 空集语义）→ None
-    assert await inputs.unit_source(aid, rid0, []) is None
+    assert await inputs.unit_source(aid, rid0, [], user_id=owner_id) is None
 
     # 多页含同一 unit：第二页 page_key 序在前 → 确定性取该页的 provenance 账
     await wdb.ensure_draft(aid)   # checkout current→rev0
@@ -785,16 +788,15 @@ async def test_unit_source_provenance_gate_and_unit_join(async_pool) -> None:
     art = await adb.get_artifact(aid)
     await wdb.publish(aid, expected_updated_at=art["updated_at"],
                       change_summary="v2", published_by="editor-1")
-    row2 = await inputs.unit_source(aid, rid0, [2])
-    assert row2 == {"kb_id": kb_id, "snapshot_id": snap,
-                    "content_text": "单元0", "section_ref": "s-0"}
+    row2 = await inputs.unit_source(aid, rid0, [2], user_id=owner_id)
+    assert row2 == row
 
     # 原文退役：真身删除 → JOIN 不上 → None（页 provenance 仍在）
     async with async_pool.connection() as conn:
         await conn.execute(
             "DELETE FROM asset_retrieval_units_v2 WHERE representation_id = %s",
             (rid0,))
-    assert await inputs.unit_source(aid, rid0, [1]) is None
+    assert await inputs.unit_source(aid, rid0, [1], user_id=owner_id) is None
 
 
 async def test_update_batch_details_merge_and_latest_compile_batch(

@@ -7,10 +7,20 @@ from typing import Any
 import pytest
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.routing import APIRoute
+from fastapi import routing
 from fastapi.testclient import TestClient
 
 from knowledge_mining.mining.kb.auth import current_user
 from knowledge_mining.mining.kb.routes.auth import _require_internal
+
+
+def _api_routes(app):
+    """兼容 FastAPI 延迟 include_router，使用框架展开后的实际路径。"""
+    expand = getattr(routing, "iter_route_contexts", None)
+    if expand is not None:
+        return [route for route in expand(app.routes)
+                if isinstance(route.original_route, APIRoute)]
+    return [route for route in app.routes if isinstance(route, APIRoute)]
 
 
 def _client(*, authenticated_user: dict[str, Any] | None = None) -> TestClient:
@@ -212,7 +222,7 @@ def test_retired_routes_absent_from_app_surface() -> None:
     from knowledge_mining.mining.api.app import create_app
 
     app = create_app()
-    paths = {getattr(route, "path", "") for route in app.routes}
+    paths = {route.path for route in _api_routes(app)}
 
     retired_prefixes = (
         "/api/builds", "/api/releases", "/api/config",
@@ -289,9 +299,8 @@ def test_every_non_exempt_api_route_rejects_anonymous_requests() -> None:
     try:
         protected = [
             route
-            for route in app.routes
-            if isinstance(route, APIRoute)
-            and route.path.startswith("/api/")
+            for route in _api_routes(app)
+            if route.path.startswith("/api/")
             and not any(_is_exempt(method, route.path) for method in route.methods or ())
         ]
         assert protected
@@ -315,14 +324,13 @@ def test_mcp_tools_post_routes_are_service_exempt() -> None:
     from knowledge_mining.mining.api.auth_guard import _is_exempt
 
     app = create_app()
-    misses = [
-        route.path
-        for route in app.routes
-        if isinstance(route, APIRoute)
-        and "POST" in (route.methods or ())
+    posts = [
+        route.path for route in _api_routes(app)
+        if "POST" in (route.methods or ())
         and route.path.startswith("/api/kb/mcp-tools/")
-        and not _is_exempt("POST", route.path)
     ]
+    assert "/api/kb/mcp-tools/wiki-source" in posts
+    misses = [path for path in posts if not _is_exempt("POST", path)]
     assert not misses, (
         "mcp-tools POST 端点漏登 auth_guard._SERVICE_ONLY_ROUTES（中间件会抢先 401）: "
         f"{sorted(misses)}"

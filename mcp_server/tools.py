@@ -38,8 +38,8 @@ class ToolBackendError(Exception):
     """上游错误，message 面向 Agent。"""
 
 
-class ServingToolError(ToolBackendError):
-    """serving 结构工具的 typed error（§7.2）：code + details 供 Agent 反馈式重试。"""
+class BackendToolError(ToolBackendError):
+    """上游可修正的业务错误；serving 与 mining 共用 code/details 契约。"""
 
     def __init__(self, code: str, message: str, details: dict | None = None):
         super().__init__(message)
@@ -47,7 +47,12 @@ class ServingToolError(ToolBackendError):
         self.details = details or {}
 
 
-def _post(path: str, payload: dict, *, timeout: float = TOOLS_TIMEOUT) -> dict:
+class ServingToolError(BackendToolError):
+    """serving 结构工具错误，保留既有异常类型。"""
+
+
+def _post(path: str, payload: dict, *, timeout: float = TOOLS_TIMEOUT,
+          typed_errors: bool = False) -> dict:
     secret = _internal_auth_secret()
     if not secret:
         raise ToolBackendError("服务端未完成内部鉴权配置，请联系管理员。")
@@ -62,6 +67,16 @@ def _post(path: str, payload: dict, *, timeout: float = TOOLS_TIMEOUT) -> dict:
     except httpx.HTTPError as exc:
         logger.warning("mcp-tools %s unreachable: %s", path, exc)
         raise ToolBackendError("知识服务暂不可用，请稍后重试。") from None
+    if typed_errors and resp.status_code != 200:
+        if resp.status_code in (400, 404, 409, 422):
+            try:
+                detail = resp.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = None
+            if isinstance(detail, dict) and detail.get("code"):
+                raise BackendToolError(str(detail["code"]),
+                                       str(detail.get("message") or detail["code"]))
+        raise ToolBackendError(f"来源读取服务调用失败（HTTP {resp.status_code}），请稍后重试或检查服务授权。")
     if resp.status_code == 404:
         raise ToolBackendError("目标知识库或文档不存在（或你对它没有权限）。")
     if resp.status_code == 403:
@@ -75,7 +90,13 @@ def _post(path: str, payload: dict, *, timeout: float = TOOLS_TIMEOUT) -> dict:
         except Exception:
             detail = resp.text[:120]
         raise ToolBackendError(f"操作失败（HTTP {resp.status_code}）：{detail}")
-    return resp.json()
+    try:
+        result = resp.json()
+        if typed_errors and not isinstance(result, dict):
+            raise ValueError
+        return result
+    except ValueError:
+        raise ToolBackendError("知识服务返回了无法解析的响应。") from None
 
 
 def _serving_secret() -> str:
@@ -202,6 +223,14 @@ def query_structured_asset(
 
 
 # ── art_ 制品通道（61号批次3 后半，Task 7 契约） ─────────────────────────
+
+
+def read_wiki_source(ref: str, query: dict, domain: str, ident: Identity) -> dict:
+    """Wiki 来源走 mining 的公共读取逻辑，不在 Java 复制来源 SQL/权限。"""
+    return _post("/api/kb/mcp-tools/wiki-source", {
+        "artifact_ref": ref, "query": query, "domain": domain,
+        "username": ident.username, "key_id": ident.key_id,
+    }, typed_errors=True)
 
 
 def query_artifact(

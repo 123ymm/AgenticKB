@@ -370,40 +370,64 @@ class CompileInputsDB:
 
     async def unit_source(
         self, artifact_id: str, unit_id: str, revisions: list[int],
+        *, user_id: str, allowed_kb_ids: list[str] | None = None,
+        offset: int = 0, max_chars: int = 500, source_kb_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Q01 回原文（66号批次5 Task 5.2）单行查：unit 归属门 = 请求
-        revision 集内**本制品页 provenance 的 unit_ids 数组元素命中**
-        （kb_wiki_pages.provenance JSONB，``e->'unit_ids' ? unit``——
-        不开放任意 unit 反查）→ JOIN units v2 真身行（content_text/
-        section_ref/snapshot_id，原文真身在主表不在投影副本）。
-
-        kb_id 只从 provenance 条目取（编译语料归属账，group_provenance
-        分组键）——unit 行无 kb_id 列（collect_units 的 kb_id 是 Python 侧
-        回填）。多页含同一 unit 取 page_key 序首遇（确定性）；无行 =
-        非本制品 / 原文退役（真身删除）/ revision 不含，调用方一律翻 404
-        反探测，不区分口径。"""
+        """网页与 MCP 共用的来源读取。provenance 必须匹配真实 unit/快照及
+        源库文档归属；允许仍然存在的历史快照，不切换到文档最新版本。
+        allowed_kb_ids=None 为网页，[] 为钥匙未开放来源库。只取一页正文；
+        可见性仍复用 KbDB.is_visible，不能先 LIMIT 1 再误拒共享切片。
+        source_kb_id 用于续页固定来源，不允许分页中途换到另一来源库。
+        """
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """WITH pv AS (
-                        SELECT e->>'kb_id' AS kb_id
+                        SELECT DISTINCT e->>'kb_id' AS kb_id,
+                                        e->>'snapshot_id' AS snapshot_id
                         FROM kb_wiki_pages p
                         CROSS JOIN LATERAL jsonb_array_elements(
-                            COALESCE(p.provenance, '[]'::jsonb)) AS e
+                            CASE WHEN jsonb_typeof(p.provenance) = 'array'
+                                 THEN p.provenance ELSE '[]'::jsonb END) AS e
                         WHERE p.artifact_id = %(a)s
                           AND p.revision = ANY(%(revs)s)
+                          AND jsonb_typeof(e->'unit_ids') = 'array'
                           AND e->'unit_ids' ? %(u)s
-                        ORDER BY p.page_key
-                        LIMIT 1
+                          AND (%(kbs)s::text[] IS NULL
+                               OR e->>'kb_id' = ANY(%(kbs)s))
+                          AND (%(source_kb)s::text IS NULL
+                               OR e->>'kb_id' = %(source_kb)s)
                     )
-                    SELECT pv.kb_id, u.snapshot_id, u.content_text, u.section_ref
+                    SELECT pv.kb_id, u.snapshot_id, u.section_ref,
+                           substring(COALESCE(u.content_text, '')
+                                     FROM %(start)s FOR %(size)s) AS content_text,
+                           char_length(COALESCE(u.content_text, '')) AS total_chars,
+                           md5(COALESCE(u.content_text, '')) AS content_hash
                     FROM pv
                     JOIN asset_retrieval_units_v2 u
-                           ON u.representation_id = %(u)s""",
+                      ON u.representation_id = %(u)s
+                     AND u.snapshot_id = pv.snapshot_id
+                    WHERE EXISTS (
+                        SELECT 1 FROM asset_build_document_snapshots bs
+                        JOIN asset_builds b ON b.id = bs.build_id
+                        JOIN asset_documents d ON d.id = bs.document_id
+                         AND d.kb_id = b.kb_id AND d.deleted_at IS NULL
+                        WHERE bs.document_snapshot_id = u.snapshot_id
+                          AND b.kb_id = pv.kb_id
+                          AND b.status IN ('validated', 'published')
+                          AND bs.selection_status = 'active'
+                    )
+                    ORDER BY pv.kb_id""",
                 {"a": artifact_id, "u": unit_id,
-                 "revs": [int(r) for r in (revisions or [])]},
+                 "revs": [int(r) for r in (revisions or [])],
+                 "kbs": allowed_kb_ids, "source_kb": source_kb_id,
+                 "start": offset + 1, "size": max_chars},
             )
-            row = await cur.fetchone()
-            return dict(row) if row else None
+            rows = await cur.fetchall()
+        # 先归还连接，再走复用的权限查询，避免小连接池嵌套占用。
+        for row in rows:
+            if await self.kb_readable(str(row["kb_id"]), user_id):
+                return dict(row)
+        return None
 
     # ------------------------------------------------------------ 编译批次
 

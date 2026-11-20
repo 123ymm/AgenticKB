@@ -336,6 +336,60 @@ if page["artifacts_has_more"]:  # 按需读取下一页
 
 此游标只用于顶层制品清单。读取文档或导航结构时，仍使用相应响应的 `cursor`；查询 `art_` 表格行时，分页参数仍写在 `query` 内，不同入口的游标不能混用。
 
+### Wiki 来源引用按需读取
+
+读取 Wiki 页面后，Agent 可以从正文的 `[[src:unit_id]]` 或
+`provenance[].unit_ids` 取得原始切片编号。该编号不是 Wiki 页面搜索结果的
+`unit_key`，也不是 `ev_` 引用。只在需要核对原始材料时读取：
+
+```python
+page = get_knowledge(ref="art_art_...", query={"page": "电源告警"})
+source = get_knowledge(
+    ref="art_art_...",
+    query={"source": "页面引用中的 unit_id", "max_chars": 2000},
+)
+if source["has_more"]:
+    source = get_knowledge(
+        ref="art_art_...",
+        query={"source": "同一个 unit_id", "cursor": source["cursor"]},
+    )
+```
+
+响应示例：
+
+```json
+{
+  "view": "wiki_source",
+  "artifact_ref": "art_art_...",
+  "revision": 2,
+  "unit_id": "原始切片编号",
+  "content_text": "本次读取的原文……",
+  "source": {"kb_id": "来源库编号", "snapshot_id": "引用时的快照编号", "section_ref": "原始章节定位"},
+  "cursor": "不透明的下一页游标",
+  "has_more": true
+}
+```
+
+- `max_chars` 是本次读取的 Unicode 字符数上限，默认 2000，允许 1–10000；
+  分页拼接后得到整个原始切片。末页 `cursor=null`、`has_more=false`。
+- 来源游标必须放在 `query.cursor` 中，不能使用工具顶层 `cursor/limit`，
+  也不能与 `q/page/links` 等操作混用。游标应原样传回同一制品、同一来源。
+- MCP 只读当前已发布的 Wiki 版本及其引用的原始快照，不替换为文档最新内容。
+  Wiki 版本或来源内容改变时返回 `expired_source_cursor`，应重新读 Wiki 页，
+  核对引用后从来源首页读取。
+- 每页重新验证：用户能读 Wiki、钥匙开放 Wiki、用户能读来源库、钥匙开放来源库。
+  仅开放 Wiki 的钥匙仍可搜页、读页、查页间链接，但不能读取未开放来源库的原文。
+- 来源无权、失效、不是本版本引用或不存在，统一为 `unit_not_found`；
+  服务故障会明确报错，不作为空结果返回。`section_ref` 是原文定位信息，
+  不能直接当成 MCP 的 `st_` 引用。
+
+实现链：`server._get_by_ref` → `tools.read_wiki_source` → mining 内部
+`POST /api/kb/mcp-tools/wiki-source` → `WikiService.read_source` →
+公共 `_read_unit_source` → `CompileInputsDB.unit_source`。
+网页 `WikiService.unit_source` 也走这份公共读取逻辑，保持原有前 500 字预览和
+草稿/历史版本规则。来源 SQL 和用户权限检查在 Python 维护；既有 Wiki 搜页、
+整页读取、页间链接和表格查询继续走 Java serving。
+
 ## 典型调用顺序
 
 ```

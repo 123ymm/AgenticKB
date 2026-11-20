@@ -33,6 +33,7 @@ from knowledge_mining.mining.kb.db_wiki import (
 # 66号批次1 Task 1.4：目录形态校验纯函数（权威定义处，同 wiki_compile_pages
 # 直连先例——单向下依赖：db_wiki_toc → db_wiki，与本模块无环）。
 from knowledge_mining.mining.kb.db_wiki_toc import validate_toc
+from knowledge_mining.mining.kb.wiki_source_cursor import decode_cursor, encode_cursor
 # 批次3决策7：发布前确定性校验。直连 wiki_compile_pages（校验函数权威定义
 # 处——经 wiki_compile_service 转出多一层间接，审查 Minor；单向下依赖无环）。
 from knowledge_mining.mining.kb.services.wiki_compile_pages import (
@@ -813,19 +814,75 @@ class WikiService:
         else:
             rev = await self._runtime_revision(user, artifact_id)
             revs = [int(rev)] if rev > 0 else []
-        row = (await self._inputs.unit_source(artifact_id, unit_id, revs)
-               if revs else None)
-        if row is None:
-            raise WikiError("unit_not_found")
-        if not await self._inputs.kb_readable(
-                str(row["kb_id"]), str(user["id"])):
-            raise WikiError("unit_not_found")
+        row = await self._read_unit_source(
+            user, artifact_id, unit_id, revs, max_chars=_UNIT_SNIPPET_CHARS)
         return {
             "unit_id": unit_id,
-            "content_text": str(row.get("content_text") or "")[:_UNIT_SNIPPET_CHARS],
+            "content_text": row["content_text"],
             "kb_id": str(row["kb_id"]),
             "snapshot_id": str(row["snapshot_id"]),
             "section_ref": row.get("section_ref"),
+        }
+
+    async def _read_unit_source(
+        self, user: dict[str, Any], artifact_id: str, unit_id: str,
+        revisions: list[int], *, max_chars: int, offset: int = 0,
+        allowed_kb_ids: list[str] | None = None, source_kb_id: str | None = None,
+    ) -> dict[str, Any]:
+        """两个入口共用：来源归属、用户可见性和有界正文读取只走一份查询。"""
+        row = (await self._inputs.unit_source(
+            artifact_id, unit_id, revisions, user_id=_uid(user),
+            max_chars=max_chars, offset=offset, allowed_kb_ids=allowed_kb_ids,
+            source_kb_id=source_kb_id) if revisions else None)
+        if row is None:
+            raise WikiError("unit_not_found")
+        return row
+
+    async def read_source(
+        self, user: dict[str, Any], artifact_id: str, query: dict, *,
+        domain: str, allowed_kb_ids: list[str],
+    ) -> dict[str, Any]:
+        """MCP 来源读取：钥匙开放集由内部接口从 DB 解析，不能由 Agent 指定。
+        MCP 只读当前发布版；网页的草稿/历史视图仍由 unit_source 负责。
+        """
+        artifact, _ = await self._artifacts._assert_role(
+            user, artifact_id, *ROLE_RUNTIME_READ)
+        revision = int(artifact.get("current_revision") or 0)
+        if (artifact.get("kind") != "wiki" or artifact.get("status") != "published"
+                or artifact.get("domain_id") != domain or revision < 1):
+            raise ArtifactNotFound(artifact_id)
+        if not isinstance(query, dict) or set(query) - {"source", "max_chars", "cursor"}:
+            raise WikiError("invalid_source_query")
+        unit_id = query.get("source")
+        max_chars = query.get("max_chars", 2000)
+        if (not isinstance(unit_id, str) or not unit_id.strip() or len(unit_id) > 200
+                or type(max_chars) is not int or not 1 <= max_chars <= 10000):
+            raise WikiError("invalid_source_query")
+        state = (decode_cursor(query["cursor"], artifact_id, revision, unit_id)
+                 if "cursor" in query else None)
+        offset = state["offset"] if state else 0
+        row = await self._read_unit_source(
+            user, artifact_id, unit_id, [revision], max_chars=max_chars,
+            offset=offset, allowed_kb_ids=allowed_kb_ids,
+            source_kb_id=state["kb_id"] if state else None)
+        if state:
+            if (state["snapshot_id"] != str(row["snapshot_id"])
+                    or state["content_hash"] != row["content_hash"]):
+                raise WikiError("expired_source_cursor")
+            if offset >= row["total_chars"]:
+                raise WikiError("invalid_source_cursor")
+        end = offset + len(row["content_text"])
+        has_more = end < row["total_chars"]
+        return {
+            "view": "wiki_source", "artifact_ref": REF_PREFIX + artifact_id,
+            "revision": revision, "unit_id": unit_id,
+            "content_text": row["content_text"],
+            "source": {"kb_id": str(row["kb_id"]),
+                       "snapshot_id": str(row["snapshot_id"]),
+                       "section_ref": row.get("section_ref")},
+            "cursor": (encode_cursor(artifact_id, revision, unit_id, row, end)
+                       if has_more else None),
+            "has_more": has_more,
         }
 
     # ------------------------------------------------------ 来源绑定（批次3）

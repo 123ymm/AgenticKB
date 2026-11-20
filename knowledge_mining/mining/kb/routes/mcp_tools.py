@@ -28,8 +28,11 @@ from psycopg.errors import UniqueViolation
 
 from knowledge_mining.mining.infra.control_plane import get_internal_verify_secret
 from knowledge_mining.mining.infra.upload_config import UploadConfig
-from knowledge_mining.mining.kb.deps import get_document_service, get_kb_db
+from knowledge_mining.mining.kb.deps import get_document_service, get_kb_db, get_wiki_service
 from knowledge_mining.mining.kb.db import KbDB
+from knowledge_mining.mining.kb.db_wiki import WikiError
+from knowledge_mining.mining.kb.services.artifact_service import ArtifactForbidden, ArtifactNotFound
+from knowledge_mining.mining.kb.services.wiki_service import WikiService, REF_PREFIX
 from knowledge_mining.mining.kb.services import auto_mine
 from knowledge_mining.mining.kb.services.document_service import (
     ContentRevisionConflict, UploadTooLarge,
@@ -151,6 +154,47 @@ async def _key_scope(kbdb: KbDB, username: str, key_id: str) -> tuple[str, dict]
     if key is None or key["user_id"] != user_id or key["status"] != "active":
         raise HTTPException(401, "invalid mcp key")
     return user_id, key
+
+
+@router.post("/wiki-source", dependencies=[Depends(_require_internal_body)])
+async def wiki_source(
+    body: dict[str, Any], kbdb: KbDB = Depends(get_kb_db),
+    svc: WikiService = Depends(get_wiki_service),
+) -> dict[str, Any]:
+    """仅内部 MCP 入口；用户、钥匙及开放集每页重新从数据库校验。"""
+    username = str(body.get("username") or "")
+    key_id = str(body.get("key_id") or "")
+    _, key = await _key_scope(kbdb, username, key_id)
+    user = await kbdb.get_user_by_username(username)
+    if not user or user.get("status") != "active" or user.get("deleted_at") is not None:
+        raise HTTPException(401, "invalid mcp user")
+    ref = body.get("artifact_ref")
+    domain = body.get("domain")
+    unavailable = {"code": "artifact_not_found", "message": "制品不存在或无权访问"}
+    if (not isinstance(ref, str) or not ref.startswith(REF_PREFIX)
+            or len(ref) > 200 or domain != key["domain"]):
+        raise HTTPException(404, unavailable)
+    artifact_id = ref[len(REF_PREFIX):]
+    if artifact_id not in await kbdb.key_open_artifact_ids(key_id=key_id):
+        raise HTTPException(404, unavailable)
+    allowed_kb_ids = await kbdb.key_open_kb_ids(key_id=key_id)
+    try:
+        return await svc.read_source(
+            user, artifact_id, body.get("query"), domain=domain,
+            allowed_kb_ids=allowed_kb_ids)
+    except (ArtifactNotFound, ArtifactForbidden):
+        raise HTTPException(404, unavailable) from None
+    except WikiError as exc:
+        errors = {
+            "unit_not_found": (404, "来源不存在或无权访问"),
+            "invalid_source_query": (400, "source 必须为来源编号；max_chars 为 1–10000 的整数；只能搭配 cursor"),
+            "invalid_source_cursor": (400, "来源游标无效，请原样传入同一来源返回的 cursor"),
+            "expired_source_cursor": (409, "Wiki 版本或来源内容已变化，请重新读页并从来源首页读取"),
+        }
+        if exc.code not in errors:
+            raise
+        status, message = errors[exc.code]
+        raise HTTPException(status, {"code": exc.code, "message": message}) from None
 
 
 def _validated_filename(raw: Any) -> str:

@@ -1,6 +1,33 @@
 {
-  "current": "1.1.41",
+  "current": "1.1.43",
   "releases": [
+    {
+      "version": "1.1.43",
+      "released_at": "2026-11-20",
+      "title": "MCP Wiki 来源引用按需读取与完整切片分页",
+      "changes": [
+        "新增 get_knowledge(ref=art_..., query={source: unit_id})：按需读取 Wiki 正文中 [[src:unit_id]] 或 provenance.unit_ids 引用的原始切片；读取当前发布版引用的原始快照，不替换为文档最新内容",
+        "网页与 MCP 共用 Python 来源读取逻辑，统一维护来源查询和用户权限检查；网页保持前 500 字预览及既有草稿、历史版本读取规则",
+        "支持 max_chars、cursor 和 has_more：默认每页 2000 字符，上限 10000，来源游标放在 query.cursor 中；游标绑定制品、版本、切片及来源信息，版本或内容变化后要求重新读取",
+        "每页重新检查用户及 MCP 钥匙对 Wiki 和来源知识库的访问权限；校验引用版本、实际切片快照与来源库文档归属，支持共享快照；来源不存在、失效或无权统一返回 404",
+        "新增 mining 内部 wiki-source 接口并登记认证中间件服务白名单；区分参数错误、游标失效和服务故障，保留稳定错误码；既有 Wiki 搜页、整页读取、页间链接和表格查询路径保持兼容",
+        "更新 MCP 工具说明、调用示例和回归测试，并修复鉴权测试对新版 FastAPI 延迟路由结构的枚举兼容",
+        "验证：300 项单元及接口测试、44 项 PostgreSQL 测试全部通过，git diff --check 通过",
+        "部署：更新 knowledge_mining 与 mcp_server Python 代码并重启对应服务；无数据库迁移"
+      ]
+    },
+    {
+      "version": "1.1.42",
+      "released_at": "2026-11-18",
+      "title": "MCP 顶层知识制品清单支持游标翻页",
+      "changes": [
+        "get_knowledge() 顶层浏览返回 artifacts_cursor 和 artifacts_has_more，透出服务端已有的制品清单分页能力，Agent 可以继续发现首批 20 个之外的开放制品",
+        "通过 get_knowledge(cursor=上一页的 artifacts_cursor) 读取下一页，不传 ref、kb_name 或 file_query；每页最多 20 个制品，仍返回域与知识库树，知识库清单不受该制品分页条数限制",
+        "末页返回 artifacts_cursor=null、artifacts_has_more=false；无效游标及翻页服务异常明确报错，首页制品服务异常沿用原有降级行为",
+        "更新工具说明、分页调用示例和相关回归测试；制品清单游标与文档、结构导航、表格查询的游标各自独立使用",
+        "部署：更新 mcp_server Python 代码并重启 MCP 服务；复用现有 Java 制品清单接口，无数据库迁移"
+      ]
+    },
     {
       "version": "1.1.41",
       "released_at": "2026-11-17",

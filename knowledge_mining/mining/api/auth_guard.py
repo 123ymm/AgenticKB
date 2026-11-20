@@ -24,6 +24,7 @@ _SERVICE_ONLY_ROUTES = frozenset({
     # browse-directory 漏登导致中间件抢先 401（路由内自验根本没机会跑）；
     # test_api_auth_guard 有反向守卫钉死"该前缀下 POST 路由必在豁免集"。
     ("POST", "/api/kb/mcp-tools/list-kbs"),
+    ("POST", "/api/kb/mcp-tools/wiki-source"),
     ("POST", "/api/kb/mcp-tools/list-documents"),
     ("POST", "/api/kb/mcp-tools/browse-directory"),
     ("POST", "/api/kb/mcp-tools/begin-upload"),

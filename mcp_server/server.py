@@ -166,9 +166,13 @@ source 里同时有 document_id 和 document_ref。之后一切深入都走 get_
 - ref 是 art_（知识制品引用——顶层浏览 artifacts 段的 artifact_ref）：只传 ref
   给说明卡（元信息+列能力+行数），要查表格传 query（DSL 同 st_，字段名以说明卡
   columns 为准，limit/cursor 写在 query 里）。wiki 制品（说明卡 kind=wiki）query
-  四种形态：不传=说明卡（描述+用途+页数+embedding 进度）；{"q": 文本} 搜页，可带
+  五种形态：不传=说明卡（描述+用途+页数+embedding 进度）；{"q": 文本} 搜页，可带
   "mode"（dense|keyword|fusion）与 "top_k"；{"page": 页 key} 整读一页；
-  {"links": 页 key} 看单跳邻页，可带 "direction"（out|in）。query 只收 dict 或
+  {"links": 页 key} 看单跳邻页，可带 "direction"（out|in）；
+  {"source": unit_id} 读取页内 [[src:unit_id]] 引用的原始切片（不是 Wiki 搜索的 unit_key）。
+  可带 max_chars（默认 2000，上限 10000）；has_more=true 时将返回的 cursor
+  原样放回 query 继续读。用户及钥匙均须有 Wiki 和来源库读权，每页重验。
+  query 只收 dict 或
   不传——没有字符串形态（get_knowledge 入口即拒）。
 工具返回的错误带稳定 code（如 unknown_field / out_of_scope / expired_ref），
 按提示修正参数重试即可。
@@ -349,10 +353,10 @@ def _scope_kbs(ident: Identity, kb_names: list[str] | None) -> list[str]:
 
 
 def _serving_call(call, *args, **kwargs):
-    """统一把 serving 结构工具的 typed error 转成 Agent 可修正的 ToolError。"""
+    """统一把上游 typed error 转成 Agent 可修正的 ToolError。"""
     try:
         return call(*args, **kwargs)
-    except backend.ServingToolError as exc:
+    except backend.BackendToolError as exc:
         if exc.code == "artifact_not_found":
             # 61号批次3：404 反探测（不存在/无权/已停用/跨域同响应）——中文直述
             # 可修正路径，不透传上游英文 message（同 out_of_scope 的 denied 口径）。
@@ -374,7 +378,7 @@ def _serving_call(call, *args, **kwargs):
             hint = "请重新 search_knowledge 获取新 ref。"
         elif exc.code == "result_too_large":
             hint = "请缩小范围、增加过滤条件或使用 cursor 分页。"
-        status = "denied" if exc.code == "out_of_scope" else "invalid"
+        status = "denied" if exc.code in ("out_of_scope", "unit_not_found") else "invalid"
         raise LedgerToolError(
             f"[{exc.code}] {exc}。{hint}",
             ledger_status=status,
@@ -487,7 +491,7 @@ def get_knowledge(
     | ref=art_ + query                  | 表格 DSL 查询（同 st_）；| artifact_rows/  |
     |                                   | wiki={"q"}搜页/{"page"}  | artifact_aggregate；|
     |                                   | 整读/{"links"}邻页       | wiki_search/    |
-    |                                   | （详见 query 参数）      | wiki_page/wiki_links |
+    |                                   | {"source"}来源分页       | wiki_page/wiki_links/wiki_source |
 
     ev_/doc_ 是内容引用——只传 ref 就直接给内容（默认粒度/首页）；st_ 是结构
     引用——只传 ref 给能力报告，告诉你 relation/query 能传什么。ev_ 来自 search
@@ -542,9 +546,13 @@ def get_knowledge(
             不是模糊搜索。st_ 行数超 limit 时响应带 cursor/has_more——翻页把
             工具顶层 cursor 参数原样传回（不要自己往 query 里塞 cursor，工具会
             代劳合并）；art_ 表格的 limit/cursor 直接写在 query 里（不吃顶层
-            分页参数）。wiki 制品三种 dict 形态：{"q": 文本} 搜页（可带
+            分页参数）。wiki 制品四种 dict 形态：{"q": 文本} 搜页（可带
             "mode": dense|keyword|fusion 与 "top_k"）；{"page": 页 key} 整读
-            一页；{"links": 页 key} 看单跳邻页（可带 "direction": out|in）。
+            一页；{"links": 页 key} 看单跳邻页（可带 "direction": out|in）；
+            {"source": unit_id} 读 [[src:unit_id]] 原始切片（当前发布版）。
+            可带 max_chars（1–10000，默认 2000）及 cursor；来源分页的 cursor
+            放在 query 内，末页 cursor=null、has_more=false；不可与 q/page/links
+            混用。用户和钥匙必须均能读 Wiki 及来源知识库。游标失效须重新读页。
         browse_directory: 目录逐层浏览（须配 kb_name）：" "=库根目录，
             "产品文档/手册"=该目录直属内容（child_directories+documents，
             空目录可见，不递归）。与 ref/file_query/directory_prefix/status 互斥。
@@ -651,6 +659,12 @@ def _get_by_ref(ident: Identity, ref: str, domain: str | None,
             raise ToolError(
                 "mode（展开粒度）只用于 ev_ 证据引用，与 art_ 制品引用互斥。"
             )
+        if isinstance(query, dict) and "source" in query:
+            if limit is not None or cursor is not None or depth is not None or kb_names:
+                raise ToolError(
+                    "Wiki 来源读取只使用 query.source/max_chars/cursor；"
+                    "请把来源游标放入 query，不要传顶层 limit/cursor/depth/kb_names。")
+            return _serving_call(backend.read_wiki_source, ref, query, resolved, ident)
         out = _serving_call(backend.query_artifact, ref, query, resolved, ident)
         # 上游三视图自带 view 自标识（artifact_card/artifact_rows/artifact_aggregate）
         return {**out}

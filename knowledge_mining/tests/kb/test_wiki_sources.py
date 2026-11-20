@@ -187,6 +187,8 @@ class FakeCompileInputsDB:
 
     async def unit_source(
         self, artifact_id: str, unit_id: str, revisions: list[int],
+        *, user_id: str, allowed_kb_ids=None, offset=0, max_chars=500,
+        source_kb_id=None,
     ) -> dict | None:
         """真库契约镜像：provenance 归属门（请求 revision 集与预置可见集
         相交）+ 真身存在性（unit_rows）；两者都过才有行。"""
@@ -195,7 +197,14 @@ class FakeCompileInputsDB:
                 (artifact_id, unit_id), set()) & revs):
             return None
         row = self.unit_rows.get(unit_id)
-        return dict(row) if row is not None else None
+        if (row is None or not await self.kb_readable(row["kb_id"], user_id)
+                or (allowed_kb_ids is not None and row["kb_id"] not in allowed_kb_ids)
+                or (source_kb_id is not None and row["kb_id"] != source_kb_id)):
+            return None
+        import hashlib
+        text = row["content_text"]
+        return {**row, "content_text": text[offset:offset + max_chars],
+                "total_chars": len(text), "content_hash": hashlib.md5(text.encode()).hexdigest()}
 
     # ---- 编译批次 --------------------------------------------------------
 
